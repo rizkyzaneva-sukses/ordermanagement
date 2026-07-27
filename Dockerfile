@@ -1,12 +1,22 @@
-# ── Stage 1: Install dependencies ───────────────────────
-FROM node:20-alpine AS deps
+# ── Stage 1: Install backend dependencies ──────────────
+FROM node:20-alpine AS backend-deps
 
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 
-# ── Stage 2: Build (generate Prisma client) ─────────────
-FROM node:20-alpine AS build
+# ── Stage 2: Build frontend ───────────────────────────
+FROM node:20-alpine AS frontend-build
+
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci
+
+COPY frontend ./
+RUN NEXT_PUBLIC_API_URL=/api npm run build
+
+# ── Stage 3: Build backend (generate Prisma client) ───
+FROM node:20-alpine AS backend-build
 
 WORKDIR /app
 COPY package.json package-lock.json* ./
@@ -15,25 +25,27 @@ RUN npm ci
 COPY prisma ./prisma/
 RUN npx prisma generate
 
-COPY . .
-
-# ── Stage 3: Production runtime ────────────────────────
+# ── Stage 4: Production runtime ──────────────────────
 FROM node:20-alpine AS runtime
 
 RUN apk add --no-cache tini curl
 
 WORKDIR /app
 
-# Copy production deps + generated Prisma client
-COPY --from=deps /app/node_modules ./node_modules
-COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=build /app/node_modules/@prisma ./node_modules/@prisma
+# Copy production deps
+COPY --from=backend-deps /app/node_modules ./node_modules
+# Copy generated Prisma client
+COPY --from=backend-build /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=backend-build /app/node_modules/@prisma ./node_modules/@prisma
 
-# Copy source
+# Copy frontend build output
+COPY --from=frontend-build /app/frontend/out ./frontend/out
+
+# Copy backend source
 COPY package.json ./
 COPY prisma ./prisma/
 COPY src ./src/
-COPY scripts ./scripts/
+COPY scripts ./scripts/ 2>/dev/null || true
 
 # Ensure migration script is executable
 RUN chmod +x scripts/*.sh 2>/dev/null || true
@@ -45,7 +57,7 @@ RUN addgroup -g 1001 -S appgroup && \
 
 USER appuser
 
-EXPOSE 3000
+EXPOSE 80
 
 # Run migrations then start the server
 ENTRYPOINT ["tini", "--"]
