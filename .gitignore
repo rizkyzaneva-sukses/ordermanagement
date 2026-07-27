@@ -1,0 +1,44 @@
+# ── Dependencies ─────────────────────────────────────────
+node_modules/
+
+# ── Environment ──────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.db
+*.db-journal
+*.sqlite
+
+# ── Build output ─────────────────────────────────────────
+dist/
+build/
+.next/
+
+# ── Generated files ──────────────────────────────────────
+src/generated/
+prisma/migrations/**/migration_lock.toml
+
+# ── PDF output ───────────────────────────────────────────
+pdfs/
+labels/
+*.pdf
+
+# ── Logs ─────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+
+# ── OS files ─────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Uploads ──────────────────────────────────────────────
+uploads/
+tmp/

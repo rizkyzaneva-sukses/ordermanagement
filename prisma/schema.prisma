@@ -1,0 +1,112 @@
+// ── OrderPro Prisma Schema (SQLite Dev Mode) ───────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model User {
+  id          String   @id @default(cuid())
+  email       String   @unique
+  password    String
+  name        String
+  role        String   @default("STAFF")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  storeAccess StoreAccess[]
+  processedOrders Order[]   @relation("ProcessedBy")
+  printedOrders   Order[]   @relation("PrintedBy")
+  printBatches    PrintBatch[]
+
+  @@map("users")
+}
+
+model Store {
+  id            String   @id @default(cuid())
+  name          String
+  platform      String
+  shopId        String   @unique
+  accessToken   String
+  refreshToken  String
+  tokenExpiry   DateTime
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  orders       Order[]
+  access       StoreAccess[]
+
+  @@map("stores")
+}
+
+model StoreAccess {
+  id      String @id @default(cuid())
+  userId  String
+  storeId String
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, storeId])
+  @@map("store_access")
+}
+
+model Order {
+  id               String      @id @default(cuid())
+  orderId          String
+  storeId          String
+  buyerName        String
+  buyerAddress     String
+  buyerPhone       String?
+  buyerCity        String?
+  buyerProvince    String?
+  buyerPostalCode  String?
+  items            String      @default("[]")
+  shippingCourier  String
+  shippingService  String
+  trackingNumber   String?
+  shippingLabelUrl String?
+  status           String      @default("PENDING")
+  isBatchSelected  Boolean     @default(false)
+  batchId          String?
+  orderDate        DateTime
+  processedAt      DateTime?
+  processedById    String?
+  printedAt        DateTime?
+  printedById      String?
+  printBatchId     String?
+  reprintCount     Int         @default(0)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  store         Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  processedBy   User?  @relation("ProcessedBy", fields: [processedById], references: [id], onDelete: SetNull)
+  printedBy     User?  @relation("PrintedBy", fields: [printedById], references: [id], onDelete: SetNull)
+
+  @@index([storeId, status])
+  @@index([batchId])
+  @@index([printedAt])
+  @@map("orders")
+}
+
+model PrintBatch {
+  id          String            @id @default(cuid())
+  userId      String
+  platform    String
+  storeIds    String            @default("[]")
+  orderCount  Int
+  status      String            @default("PENDING")
+  pdfUrl      String?
+  createdAt   DateTime          @default(now())
+  completedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("print_batches")
+}
