@@ -45,10 +45,6 @@ COPY --from=frontend-build /app/frontend/out ./frontend/out
 COPY package.json ./
 COPY prisma ./prisma/
 COPY src ./src/
-COPY scripts ./scripts/ 2>/dev/null || true
-
-# Ensure migration script is executable
-RUN chmod +x scripts/*.sh 2>/dev/null || true
 
 # Create non-root user
 RUN addgroup -g 1001 -S appgroup && \
