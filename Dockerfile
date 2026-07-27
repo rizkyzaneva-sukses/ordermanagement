@@ -49,4 +49,4 @@ EXPOSE 3000
 
 # Run migrations then start the server
 ENTRYPOINT ["tini", "--"]
-CMD ["sh", "-c", "npx prisma migrate deploy && node src/index.js"]
+CMD ["sh", "-c", "npx prisma migrate deploy && node src/server.js"]
