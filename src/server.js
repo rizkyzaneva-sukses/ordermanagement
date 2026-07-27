@@ -45,6 +45,11 @@ if (fs.existsSync(frontendPath)) {
     etag: true,
   }));
 
+  // Server-side redirect: / → /login/
+  app.get('/', (req, res) => {
+    res.redirect(302, '/login/');
+  });
+
   // Client-side routing: serve correct index.html for each route
   app.get('*', (req, res) => {
     const cleanPath = req.path.replace(/\/+$/, '') || '';
