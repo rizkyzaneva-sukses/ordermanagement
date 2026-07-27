@@ -45,14 +45,20 @@ if (fs.existsSync(frontendPath)) {
     etag: true,
   }));
 
-  // Client-side routing: serve index.html for all non-API routes
+  // Client-side routing: serve correct index.html for each route
   app.get('*', (req, res) => {
-    // Try to serve the exact file first (e.g. /login/index.html)
+    const cleanPath = req.path.replace(/\/+$/, '') || '';
+    // Try /login/index.html, /dashboard/index.html, etc.
+    const dirIndex = path.join(frontendPath, cleanPath, 'index.html');
+    if (fs.existsSync(dirIndex)) {
+      return res.sendFile(dirIndex);
+    }
+    // Try exact file match
     const filePath = path.join(frontendPath, req.path);
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
       return res.sendFile(filePath);
     }
-    // Fallback to index.html for SPA routing
+    // Fallback to root index.html
     res.sendFile(path.join(frontendPath, 'index.html'));
   });
 } else {
