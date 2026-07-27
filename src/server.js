@@ -17,6 +17,24 @@ app.use(express.json({ limit: '10mb' }));
 // Serve generated PDFs
 app.use('/storage', express.static(path.join(__dirname, '../storage')));
 
+// Root - app info
+app.get('/', (req, res) => {
+  res.json({
+    name: 'OrderPro API',
+    version: '1.0.0',
+    description: 'Order management for Shopee & TikTok Shop',
+    health: '/api/health',
+    docs: {
+      auth: '/api/auth',
+      stores: '/api/stores',
+      orders: '/api/orders',
+      sync: '/api/sync',
+      dashboard: '/api/dashboard',
+      print: '/api/print'
+    }
+  });
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
