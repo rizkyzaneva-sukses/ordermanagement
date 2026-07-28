@@ -90,7 +90,7 @@ router.post('/batch', async (req, res) => {
       data: {
         userId: req.user.id,
         platform: platform,
-        storeIds: storeIds,
+        storeIds: JSON.stringify(storeIds),
         orderCount: orders.length,
         status: 'PENDING',
       },

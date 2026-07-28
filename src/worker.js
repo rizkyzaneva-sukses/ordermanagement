@@ -195,7 +195,7 @@ async function handleSync(job) {
           status: orderData.status,
           trackingNumber: orderData.trackingNumber || existing.trackingNumber,
           shippingCourier: orderData.shippingCourier || existing.shippingCourier,
-          items: orderData.items,
+          items: JSON.stringify(Array.isArray(orderData.items) ? orderData.items : []),
         },
       });
       updated++;
@@ -210,7 +210,7 @@ async function handleSync(job) {
           buyerCity: orderData.buyerCity,
           buyerProvince: orderData.buyerProvince,
           buyerPostalCode: orderData.buyerPostalCode,
-          items: orderData.items,
+          items: JSON.stringify(Array.isArray(orderData.items) ? orderData.items : []),
           shippingCourier: orderData.shippingCourier,
           shippingService: orderData.shippingService,
           trackingNumber: orderData.trackingNumber,
@@ -221,6 +221,12 @@ async function handleSync(job) {
       created++;
     }
   }
+
+  // Update lastSyncAt for accurate tracking
+  await prisma.store.update({
+    where: { id: storeId },
+    data: { lastSyncAt: new Date() },
+  });
 
   console.log(`[sync] Completed sync for store ${storeId}: ${created} created, ${updated} updated`);
   return { storeId, total: orders.length, created, updated };
@@ -253,8 +259,17 @@ async function handlePrintBatch(job) {
     throw new Error(`No orders found in batch ${batchId}`);
   }
 
+  // Parse items (stored as JSON string in DB) before generating PDF
+  const ordersWithItems = orders.map((o) => {
+    let items = o.items;
+    if (typeof items === 'string') {
+      try { items = JSON.parse(items); } catch { items = []; }
+    }
+    return { ...o, items: Array.isArray(items) ? items : [] };
+  });
+
   // Generate batch PDF
-  const pdfBuffer = await pdfService.generateBatchPdf(orders);
+  const pdfBuffer = await pdfService.generateBatchPdf(ordersWithItems);
 
   // Save PDF to disk
   const pdfDir = path.resolve('./storage/pdfs');

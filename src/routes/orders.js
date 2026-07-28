@@ -3,6 +3,7 @@ const router = express.Router();
 const prisma = require('../prisma/client.js');
 const { syncQueue } = require('../services/queue.js');
 const { authenticate } = require('../middleware/auth.js');
+const pdfService = require('../services/pdf.js');
 
 // All order routes require auth
 router.use(authenticate);
@@ -78,14 +79,15 @@ router.get('/', async (req, res) => {
       ];
     }
 
-    // Print filter logic
-    if (printFilter === 'unprinted') {
+    // Print filter logic — accept both English ('unprinted'/'printed') and
+    // Indonesian ('belum'/'sudah') values sent by the frontend
+    if (printFilter === 'unprinted' || printFilter === 'belum') {
       where.printedAt = null;
       where.trackingNumber = { not: null };
-    } else if (printFilter === 'printed') {
+    } else if (printFilter === 'printed' || printFilter === 'sudah') {
       where.printedAt = { not: null };
     }
-    // 'all' → no printedAt filter
+    // 'all' / 'semua' → no printedAt filter
 
     const [orders, total] = await Promise.all([
       prisma.order.findMany({
@@ -305,6 +307,141 @@ router.delete('/batch-select', async (req, res) => {
   } catch (err) {
     console.error('DELETE /orders/batch-select error:', err);
     return res.status(500).json({ success: false, error: 'Failed to clear selection' });
+  }
+});
+
+/**
+ * POST /print-details
+ * Return full order details for a list of IDs (used by the /print page).
+ * Body: { ids: string[] }
+ */
+router.post('/print-details', async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, error: 'ids must be a non-empty array' });
+    }
+
+    const orders = await prisma.order.findMany({
+      where: { id: { in: ids } },
+      include: { store: { select: { id: true, name: true, platform: true } } },
+    });
+
+    const data = orders.map((o) => {
+      let items = o.items;
+      if (typeof items === 'string') {
+        try { items = JSON.parse(items); } catch { items = []; }
+      }
+      return {
+        id: o.id,
+        orderId: o.orderId,
+        storeId: o.storeId,
+        storeName: o.store?.name || 'Toko',
+        platform: o.store?.platform || 'SHOPEE',
+        buyerName: o.buyerName,
+        buyerAddress: o.buyerAddress,
+        buyerPhone: o.buyerPhone,
+        buyerCity: o.buyerCity,
+        buyerProvince: o.buyerProvince,
+        buyerPostalCode: o.buyerPostalCode,
+        courier: o.shippingCourier,
+        trackingNumber: o.trackingNumber || '',
+        status: o.status,
+        printedAt: o.printedAt,
+        items: Array.isArray(items) ? items.map((item) => ({
+          name: item.name || item.item_name || 'Product',
+          qty: item.quantity || item.qty || 1,
+          variant: item.variant || undefined,
+          price: item.price,
+        })) : [],
+      };
+    });
+
+    return res.json({ success: true, data });
+  } catch (err) {
+    console.error('POST /orders/print-details error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch print details' });
+  }
+});
+
+/**
+ * POST /print
+ * Generate a batch PDF for the given order IDs and return it as a blob.
+ * Body: { ids: string[], reprint?: boolean }
+ */
+router.post('/print', async (req, res) => {
+  try {
+    const { ids, reprint } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, error: 'ids must be a non-empty array' });
+    }
+    if (ids.length > 300) {
+      return res.status(400).json({ success: false, error: 'Maximum 300 orders per print batch' });
+    }
+
+    const orders = await prisma.order.findMany({
+      where: { id: { in: ids } },
+      include: { store: true },
+    });
+
+    if (orders.length === 0) {
+      return res.status(404).json({ success: false, error: 'No orders found' });
+    }
+
+    // Validate: all orders must have tracking numbers
+    const noTracking = orders.filter((o) => !o.trackingNumber);
+    if (noTracking.length > 0 && !reprint) {
+      return res.status(400).json({
+        success: false,
+        error: `${noTracking.length} order(s) missing tracking number`,
+      });
+    }
+
+    // Parse items for each order
+    const ordersWithItems = orders.map((o) => {
+      let items = o.items;
+      if (typeof items === 'string') {
+        try { items = JSON.parse(items); } catch { items = []; }
+      }
+      return { ...o, items: Array.isArray(items) ? items : [] };
+    });
+
+    // Generate batch PDF
+    const pdfBuffer = await pdfService.generateBatchPdf(ordersWithItems);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="resi-${new Date().toISOString().slice(0, 10)}.pdf"`);
+    return res.send(Buffer.from(pdfBuffer));
+  } catch (err) {
+    console.error('POST /orders/print error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to generate PDF' });
+  }
+});
+
+/**
+ * POST /mark-printed
+ * Mark a list of orders as printed.
+ * Body: { ids: string[] }
+ */
+router.post('/mark-printed', async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, error: 'ids must be a non-empty array' });
+    }
+
+    await prisma.order.updateMany({
+      where: { id: { in: ids } },
+      data: {
+        printedAt: new Date(),
+        printedById: req.user.id,
+      },
+    });
+
+    return res.json({ success: true, data: { marked: ids.length } });
+  } catch (err) {
+    console.error('POST /orders/mark-printed error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to mark orders as printed' });
   }
 });
 

@@ -45,8 +45,12 @@ router.get('/', async (req, res) => {
       platform: store.platform,
       shopId: store.shopId,
       isActive: store.isActive,
-      status: store.isActive ? 'ACTIVE' : 'ERROR',
-      lastSyncAt: store.updatedAt,
+      status: !store.isActive
+        ? 'ERROR'
+        : store.tokenExpiry && new Date(store.tokenExpiry) < new Date()
+          ? 'TOKEN_EXPIRED'
+          : 'ACTIVE',
+      lastSyncAt: store.lastSyncAt || store.updatedAt,
       orderCount: store._count.orders,
       createdAt: store.createdAt,
       updatedAt: store.updatedAt,

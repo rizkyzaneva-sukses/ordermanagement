@@ -9,6 +9,11 @@ const tiktokService = require('../services/tiktok');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3001';
 
+// Lazy-load scheduler to avoid circular dependencies
+function getScheduler() {
+  try { return require('../services/scheduler'); } catch { return null; }
+}
+
 /**
  * GET /api/oauth/shopee/callback
  * Shopee redirects here after merchant authorization.
@@ -51,6 +56,7 @@ router.get('/shopee/callback', async (req, res) => {
       where: { platform: 'SHOPEE', shopId: realShopId },
     });
 
+    let storeId;
     if (existing) {
       await prisma.store.update({
         where: { id: existing.id },
@@ -62,9 +68,10 @@ router.get('/shopee/callback', async (req, res) => {
           isActive: true,
         },
       });
+      storeId = existing.id;
       console.error(`[OAuth Shopee] Updated existing store ${existing.id}`);
     } else {
-      await prisma.store.create({
+      const created = await prisma.store.create({
         data: {
           name: shopName,
           platform: 'SHOPEE',
@@ -75,7 +82,16 @@ router.get('/shopee/callback', async (req, res) => {
           isActive: true,
         },
       });
+      storeId = created.id;
       console.error(`[OAuth Shopee] Created new store for shop_id=${realShopId}`);
+    }
+
+    // Register repeatable sync job for this store (runs in background, safe to fail)
+    const scheduler = getScheduler();
+    if (scheduler) {
+      scheduler.addStore(storeId).catch((err) =>
+        console.warn(`[OAuth Shopee] Could not register scheduler for store ${storeId}:`, err.message)
+      );
     }
 
     return res.redirect(`${FRONTEND_URL}/admin/stores?connected=shopee`);
@@ -106,18 +122,20 @@ router.get('/tiktok/callback', async (req, res) => {
     const accessToken = tokenData.access_token;
     const refreshToken = tokenData.refresh_token;
     const expiresIn = tokenData.expire_in || 86400;
+    // Use open_id or seller_id from token response as stable shopId
+    // Fallback to state if provided, otherwise generate from token data
+    const shopId = tokenData.open_id || tokenData.seller_id || state || tokenData.access_token?.slice(0, 20) || `TT_${Date.now()}`;
 
     if (!accessToken || !refreshToken) {
       throw new Error('Token tidak diterima dari TikTok');
     }
 
-    const shopId = state || `TIKTOK_${Date.now()}`;
     let shopName = 'TikTok Shop';
-
     const existing = await prisma.store.findFirst({
-      where: { platform: 'TIKTOK', shopId },
+      where: { platform: 'TIKTOK', shopId: String(shopId) },
     });
 
+    let storeId;
     if (existing) {
       await prisma.store.update({
         where: { id: existing.id },
@@ -129,20 +147,30 @@ router.get('/tiktok/callback', async (req, res) => {
           isActive: true,
         },
       });
+      storeId = existing.id;
       console.error(`[OAuth TikTok] Updated existing store ${existing.id}`);
     } else {
-      await prisma.store.create({
+      const created = await prisma.store.create({
         data: {
           name: shopName,
           platform: 'TIKTOK',
-          shopId,
+          shopId: String(shopId),
           accessToken: encrypt(accessToken),
           refreshToken: encrypt(refreshToken),
           tokenExpiry: new Date(Date.now() + expiresIn * 1000),
           isActive: true,
         },
       });
+      storeId = created.id;
       console.error(`[OAuth TikTok] Created new store for shop_id=${shopId}`);
+    }
+
+    // Register repeatable sync job for this store
+    const scheduler = getScheduler();
+    if (scheduler) {
+      scheduler.addStore(storeId).catch((err) =>
+        console.warn(`[OAuth TikTok] Could not register scheduler for store ${storeId}:`, err.message)
+      );
     }
 
     return res.redirect(`${FRONTEND_URL}/admin/stores?connected=tiktok`);
@@ -153,3 +181,5 @@ router.get('/tiktok/callback', async (req, res) => {
 });
 
 module.exports = router;
+
+

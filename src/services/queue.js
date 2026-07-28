@@ -29,7 +29,7 @@ const connection = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379'
 
 connection.on('connect', () => console.log('[redis] Connected'));
 connection.on('ready',   () => console.log('[redis] Ready'));
-connection.on('error',   (err) => console.error('[redis] Error:', err.message));
+connection.on('error',   (err) => console.error('[redis] Error:', err?.message || err?.code || String(err)));
 connection.on('close',   () => console.warn('[redis] Connection closed'));
 connection.on('reconnecting', () => console.warn('[redis] Reconnecting…'));
 

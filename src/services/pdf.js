@@ -94,8 +94,12 @@ class PdfService {
     page.drawLine({ start: { x: leftX, y }, end: { x: rightX, y }, thickness: 0.5 });
     y -= 14;
 
-    // Items
-    const items = Array.isArray(order.items) ? order.items : [];
+    // items is stored as a JSON string in DB — parse it if needed
+    let items = order.items;
+    if (typeof items === 'string') {
+      try { items = JSON.parse(items); } catch { items = []; }
+    }
+    if (!Array.isArray(items)) items = [];
     for (let i = 0; i < items.length && y > 60; i++) {
       const item = items[i];
       const itemText = `[${i + 1}] ${item.name || 'Product'} x${item.quantity || 1}`;
