@@ -1,12 +1,87 @@
 const { Worker } = require('bullmq');
 const prisma = require('./prisma/client.js');
-const { decrypt } = require('./utils/crypto.js');
+const { encrypt, decrypt } = require('./utils/crypto.js');
 const shopeeService = require('./services/shopee.js');
 const tiktokService = require('./services/tiktok.js');
 const pdfService = require('./services/pdf.js');
 const { connection } = require('./services/queue.js');
 const path = require('path');
 const fs = require('fs');
+
+// ─── Token refresh helper ─────────────────────────────────────────────────────
+
+/**
+ * Ensure the store's access token is valid before making API calls.
+ *
+ * Strategy:
+ *   - If tokenExpiry is more than TOKEN_BUFFER_MINUTES away → token is still good, use it.
+ *   - Otherwise → call the platform's refresh endpoint, persist the new token pair
+ *     and updated expiry, then return the fresh access token.
+ *
+ * @param {Object} store - Prisma store record (must have accessToken, refreshToken,
+ *                          tokenExpiry, platform, shopId)
+ * @returns {Promise<string>} Decrypted, valid access token
+ */
+const TOKEN_BUFFER_MINUTES = 5; // refresh if less than 5 min left
+
+async function ensureFreshToken(store) {
+  const now = new Date();
+  const expiry = store.tokenExpiry ? new Date(store.tokenExpiry) : new Date(0);
+  const minutesLeft = (expiry - now) / 60_000;
+
+  if (minutesLeft > TOKEN_BUFFER_MINUTES) {
+    // Token still valid — just decrypt and return
+    console.log(`[token] Store ${store.id} token valid for ~${Math.floor(minutesLeft)} more minutes`);
+    return decrypt(store.accessToken);
+  }
+
+  // Token expired or about to expire — refresh it
+  console.log(`[token] Store ${store.id} token expiring soon (${minutesLeft.toFixed(1)} min left). Refreshing…`);
+
+  if (!store.refreshToken) {
+    throw new Error(`Store ${store.id}: token expired and no refresh token available. Please reconnect the store.`);
+  }
+
+  const refreshToken = decrypt(store.refreshToken);
+  let newAccessToken;
+  let newRefreshToken;
+
+  if (store.platform === 'SHOPEE') {
+    const result = await shopeeService.refreshToken(refreshToken, store.shopId);
+    newAccessToken = result.access_token;
+    newRefreshToken = result.refresh_token;
+  } else if (store.platform === 'TIKTOK') {
+    const result = await tiktokService.refreshToken(refreshToken);
+    newAccessToken = result.access_token;
+    newRefreshToken = result.refresh_token;
+  } else {
+    throw new Error(`Store ${store.id}: unsupported platform ${store.platform} for token refresh`);
+  }
+
+  if (!newAccessToken) {
+    throw new Error(`Store ${store.id}: refresh token call returned no access_token`);
+  }
+
+  // Persist new tokens + expiry (Shopee ~4h, TikTok ~24h)
+  const expiryHours = store.platform === 'TIKTOK' ? 24 : 4;
+  const updateData = {
+    accessToken: encrypt(newAccessToken),
+    tokenExpiry: new Date(Date.now() + expiryHours * 60 * 60 * 1000),
+  };
+  if (newRefreshToken) {
+    updateData.refreshToken = encrypt(newRefreshToken);
+  }
+
+  await prisma.store.update({
+    where: { id: store.id },
+    data: updateData,
+  });
+
+  console.log(`[token] Store ${store.id} token refreshed successfully (new expiry: +${expiryHours}h)`);
+  return newAccessToken;
+}
+
+// ─── Sync job handler ─────────────────────────────────────────────────────────
 
 /**
  * Sync job handler
@@ -21,8 +96,10 @@ async function handleSync(job) {
     throw new Error(`Store ${storeId} not found`);
   }
 
-  const accessToken = decrypt(store.accessToken);
+  // Auto-refresh token if expired or expiring soon
+  const accessToken = await ensureFreshToken(store);
   const shopId = store.shopId;
+
 
   let orders = [];
   if (store.platform === 'SHOPEE') {

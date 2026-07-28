@@ -246,8 +246,12 @@ router.post('/:id/reconnect', async (req, res) => {
         return res.status(400).json({ success: false, error: `Unsupported platform: ${store.platform}` });
     }
 
-    // Update stored tokens
-    const updateData = {};
+    // Update stored tokens + expiry
+    // Shopee access token: ~4 hours; TikTok access token: ~24 hours
+    const expiryHours = store.platform === 'TIKTOK' ? 24 : 4;
+    const updateData = {
+      tokenExpiry: new Date(Date.now() + expiryHours * 60 * 60 * 1000),
+    };
     if (newAccessToken) updateData.accessToken = encrypt(newAccessToken);
     if (newRefreshToken) updateData.refreshToken = encrypt(newRefreshToken);
 
