@@ -14,7 +14,7 @@
  */
 
 const prisma = require('../prisma/client.js');
-const { syncQueue } = require('./queue.js');
+const { syncQueue, connection } = require('./queue.js');
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -29,6 +29,40 @@ function repeatableJobOpts(storeId) {
     removeOnComplete: { count: 10 },     // keep only last 10 completed jobs per store
     removeOnFail: { count: 20 },
   };
+}
+
+// ── Redis readiness helper ────────────────────────────────────────────────────
+
+/**
+ * Wait until ioredis is in 'ready' state before attempting any queue operations.
+ * Times out after `timeoutMs` and resolves (not rejects) so the scheduler can
+ * continue without crashing the process.
+ *
+ * @param {number} [timeoutMs=10000]
+ * @returns {Promise<boolean>} true if ready, false if timed out
+ */
+function waitForRedis(timeoutMs = 10_000) {
+  return new Promise((resolve) => {
+    // Already connected
+    if (connection.status === 'ready') {
+      return resolve(true);
+    }
+
+    const timer = setTimeout(() => {
+      console.warn('[scheduler] Redis not ready after timeout — skipping job registration');
+      resolve(false);
+    }, timeoutMs);
+
+    connection.once('ready', () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+
+    // Also handle the case where connection fails permanently
+    connection.once('error', () => {
+      // Don't reject — just let the timeout handle it
+    });
+  });
 }
 
 // ── Core helpers ──────────────────────────────────────────────────────────────
@@ -54,7 +88,6 @@ async function addStore(storeId) {
  * @param {string} storeId
  */
 async function removeStore(storeId) {
-  // BullMQ v5+: removeRepeatable(name, repeatOpts, jobId)
   try {
     await syncQueue.removeRepeatable('sync-store', { every: SYNC_INTERVAL_MS }, `auto-sync-${storeId}`);
     console.log(`[scheduler] Repeatable sync removed for store ${storeId}`);
@@ -71,6 +104,13 @@ async function removeStore(storeId) {
  */
 async function start() {
   console.log(`[scheduler] Starting — sync interval: ${SYNC_INTERVAL_MS / 60_000} min`);
+
+  // Wait for Redis to be ready before registering jobs
+  const isReady = await waitForRedis(10_000);
+  if (!isReady) {
+    console.error('[scheduler] Aborted: Redis not available. Auto-sync will not run until server restarts.');
+    return;
+  }
 
   let stores;
   try {
@@ -101,3 +141,4 @@ async function start() {
 }
 
 module.exports = { start, addStore, removeStore };
+
