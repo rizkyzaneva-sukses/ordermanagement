@@ -91,4 +91,13 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 80;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`OrderPro running on port ${PORT}`);
+
+  // ── Auto-sync scheduler ────────────────────────────
+  // Register repeatable BullMQ jobs for all active stores.
+  // Each store gets synced every SYNC_INTERVAL_MS (default 15 min).
+  const scheduler = require('./services/scheduler');
+  scheduler.start().catch((err) => {
+    console.error('[scheduler] Failed to start:', err.message);
+  });
 });
+
