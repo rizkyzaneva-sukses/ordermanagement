@@ -181,18 +181,19 @@ class ShopeeService {
    * The merchant will be redirected to `redirectUri` with a `code` query
    * parameter you can exchange for tokens via `getToken`.
    *
-   * @param {string|number} shopId     - Target shop ID
    * @param {string}        redirectUri - Your callback URL (must be registered in Shopee Partner Console)
+   * @param {string|number} [shopId]    - Optional target shop ID (omit to let merchant choose)
    * @returns {string} Full authorization URL
    */
-  getAuthUrl(shopId, redirectUri) {
+  getAuthUrl(redirectUri, shopId) {
     const timestamp = Math.floor(Date.now() / 1000);
     const path = '/api/v2/auth/token/get';
-    const sign = this._sign(path, timestamp);
+    const sign = this._sign(path, timestamp, '', shopId ? String(shopId) : '');
 
-    const url = `https://partner.shopeemobile.com${path}?partner_id=${this.partnerId}&timestamp=${timestamp}&sign=${sign}&redirect=${encodeURIComponent(redirectUri)}&shop_id=${shopId}`;
+    let url = `https://partner.shopeemobile.com${path}?partner_id=${this.partnerId}&timestamp=${timestamp}&sign=${sign}&redirect=${encodeURIComponent(redirectUri)}`;
+    if (shopId) url += `&shop_id=${shopId}`;
 
-    console.error(`[ShopeeService.getAuthUrl] Generated auth URL for shop_id=${shopId} redirect=${redirectUri}`);
+    console.error(`[ShopeeService.getAuthUrl] Generated auth URL redirect=${redirectUri} shop_id=${shopId || '(none)'}`);
     return url;
   }
 

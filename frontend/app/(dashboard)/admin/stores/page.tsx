@@ -37,6 +37,7 @@ export default function StoresPage() {
   const [connectingPlatform, setConnectingPlatform] = useState<'SHOPEE' | 'TIKTOK' | null>(null)
   const [reconnecting, setReconnecting] = useState<string | null>(null)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
+  const [toastType, setToastType] = useState<'success' | 'error'>('success')
 
   const fetchStores = async () => {
     try {
@@ -56,17 +57,40 @@ export default function StoresPage() {
 
   useEffect(() => {
     fetchStores().finally(() => setLoading(false))
+
+    const params = new URLSearchParams(window.location.search)
+    const connected = params.get('connected')
+    const error = params.get('error')
+    if (connected) {
+      const name = connected === 'shopee' ? 'Shopee' : 'TikTok'
+      setToastMessage(`Toko ${name} berhasil terhubung!`)
+      setToastType('success')
+      setTimeout(() => setToastMessage(null), 5000)
+      window.history.replaceState(null, '', '/admin/stores')
+    } else if (error) {
+      setToastMessage(error)
+      setToastType('error')
+      setTimeout(() => setToastMessage(null), 8000)
+      window.history.replaceState(null, '', '/admin/stores')
+    }
   }, [])
 
   const handle1ClickConnect = async (platform: 'SHOPEE' | 'TIKTOK') => {
     setConnectingPlatform(platform)
     try {
-      const res = await api.post('/stores/quick-connect', { platform })
-      setToastMessage(res.data?.message || `Toko ${platform} berhasil dihubungkan!`)
-      await fetchStores()
-      setTimeout(() => setToastMessage(null), 4000)
+      const res = await api.post<any>('/stores/quick-connect', { platform })
+      const authUrl = res.data?.authUrl
+      if (authUrl) {
+        window.location.href = authUrl
+        return
+      }
+      setToastMessage('URL otorisasi tidak diterima dari server')
+      setToastType('error')
+      setTimeout(() => setToastMessage(null), 5000)
     } catch (err: any) {
-      alert(err.response?.data?.error || 'Gagal menghubungkan toko')
+      setToastMessage(err.response?.data?.error || 'Gagal menghubungkan toko')
+      setToastType('error')
+      setTimeout(() => setToastMessage(null), 5000)
     } finally {
       setConnectingPlatform(null)
     }
@@ -96,8 +120,12 @@ export default function StoresPage() {
     <div className="space-y-6">
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-300 dark:border-emerald-700 text-emerald-800 dark:text-emerald-200 px-4 py-3 rounded-xl flex items-center gap-3 shadow-lg">
-          <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+        <div className={`${toastType === 'error' ? 'bg-red-50 dark:bg-red-950/80 border-red-300 dark:border-red-700 text-red-800 dark:text-red-200' : 'bg-emerald-50 dark:bg-emerald-950/80 border-emerald-300 dark:border-emerald-700 text-emerald-800 dark:text-emerald-200'} px-4 py-3 rounded-xl flex items-center gap-3 shadow-lg border`}>
+          {toastType === 'error' ? (
+            <AlertCircle className="w-5 h-5 text-red-600 dark:text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+          )}
           <span className="text-sm font-medium">{toastMessage}</span>
         </div>
       )}

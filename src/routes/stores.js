@@ -64,7 +64,8 @@ router.use(requireAdmin());
 /**
  * POST /quick-connect
  * 1-Click login authorization for Shopee and TikTok Shop.
- * Reads partner credentials from .env environment variables automatically.
+ * Returns the OAuth URL — the frontend redirects the user there.
+ * The actual store is created after the OAuth callback completes.
  */
 router.post('/quick-connect', async (req, res) => {
   try {
@@ -73,34 +74,20 @@ router.post('/quick-connect', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Platform valid (SHOPEE atau TIKTOK) diperlukan' });
     }
 
-    const shopNum = Math.floor(100000 + Math.random() * 900000);
-    const shopId = `${platform}_SHOP_${shopNum}`;
-    const name = `Toko ${platform === 'SHOPEE' ? 'Shopee' : 'TikTok'} ${shopNum}`;
-
-    // Build OAuth redirect URL for the platform — tokens come from merchant authorization, not from partner keys
+    const backendUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 5000}`;
     let authUrl;
+
     if (platform === 'SHOPEE') {
-      const redirectUri = `${process.env.FRONTEND_URL || 'http://localhost:3001'}/auth/callback/shopee`;
-      authUrl = shopeeService.getAuthUrl(shopId, redirectUri);
+      const redirectUri = `${backendUrl}/api/oauth/shopee/callback`;
+      authUrl = shopeeService.getAuthUrl(redirectUri);
     } else {
-      const redirectUri = `${process.env.FRONTEND_URL || 'http://localhost:3001'}/auth/callback/tiktok`;
-      authUrl = tiktokService.getAuthUrl(shopId, redirectUri);
+      const redirectUri = `${backendUrl}/api/oauth/tiktok/callback`;
+      authUrl = tiktokService.getAuthUrl('', redirectUri);
     }
 
-    const store = await prisma.store.create({
-      data: {
-        name,
-        platform,
-        shopId,
-        isActive: true,
-        // Tokens are left empty — they will be set after merchant completes OAuth
-      },
-    });
-
-    return res.status(201).json({
+    return res.json({
       success: true,
-      message: `Toko ${platform === 'SHOPEE' ? 'Shopee' : 'TikTok'} berhasil dibuat. Silakan authorize via link berikut.`,
-      data: { ...store, authUrl },
+      data: { authUrl },
     });
   } catch (err) {
     console.error('Quick connect error:', err);
