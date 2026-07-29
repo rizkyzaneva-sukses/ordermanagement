@@ -92,20 +92,31 @@ async function syncStore(storeId) {
   let orders = [];
 
   if (store.platform === 'SHOPEE') {
-    const now          = Math.floor(Date.now() / 1000);
-    const thirtyDaysAgo = now - 30 * 24 * 60 * 60;
+    const now           = Math.floor(Date.now() / 1000);
+    // Shopee API max time range is 15 days
+    const fifteenDaysAgo = now - 15 * 24 * 60 * 60;
 
     const orderListResp = await shopeeService.getOrderList(accessToken, shopId, {
       orderStatus: 'READY_TO_SHIP',
-      timeFrom:    thirtyDaysAgo,
+      timeFrom:    fifteenDaysAgo,
       timeTo:      now,
       pageSize:    100,
     });
 
+    console.log(`[sync] getOrderList raw response keys: ${Object.keys(orderListResp || {}).join(', ')}`);
+    console.log(`[sync] getOrderList response.order_list count: ${orderListResp?.response?.order_list?.length ?? 'undefined'}`);
+
     const orderSns = (orderListResp.response?.order_list || []).map(o => o.order_sn);
+    console.log(`[sync] Found ${orderSns.length} READY_TO_SHIP orders in last 15 days`);
 
     if (orderSns.length > 0) {
-      const detailResp = await shopeeService.getOrderDetail(accessToken, shopId, orderSns);
+      // Get full details — must request optional fields or Shopee returns minimal data
+      const detailResp = await shopeeService.getOrderDetail(accessToken, shopId, orderSns, {
+        response_optional_fields: 'item_list,recipient_address,shipping_carrier'
+      });
+
+      console.log(`[sync] getOrderDetail response order count: ${detailResp?.response?.order_list?.length ?? 'undefined'}`);
+
       orders = (detailResp.response?.order_list || []).map(o => ({
         orderId:         o.order_sn,
         buyerName:       o.buyer_username || o.recipient_address?.name || 'Unknown',

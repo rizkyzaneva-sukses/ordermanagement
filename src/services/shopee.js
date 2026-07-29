@@ -313,7 +313,7 @@ class ShopeeService {
    * @param {string[]} orderSnList - Array of order SNs (max 50)
    * @returns {Promise<Object>}
    */
-  async getOrderDetail(accessToken, shopId, orderSnList) {
+  async getOrderDetail(accessToken, shopId, orderSnList, extraParams = {}) {
     if (!Array.isArray(orderSnList) || orderSnList.length === 0) {
       throw new Error('orderSnList must be a non-empty array');
     }
@@ -326,8 +326,11 @@ class ShopeeService {
 
     return this._request('GET', '/api/v2/order/get_order_detail', {
       order_sn_list: orderSnList.join(','),
+      response_optional_fields: 'buyer_username,recipient_address,item_list,package_list,shipping_carrier,actual_shipping_cost,tracking_number',
+      ...extraParams,
     }, null, accessToken, String(shopId));
   }
+
 
   /**
    * Get available shipping/logistics channels and parameters for an order.
