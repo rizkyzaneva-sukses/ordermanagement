@@ -4,6 +4,7 @@ const helmet = require('helmet');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
+const config = require('./config/index.js');
 
 const app = express();
 
@@ -19,7 +20,7 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 // Serve generated PDFs
-app.use('/storage', express.static(path.join(__dirname, '../storage')));
+app.use('/storage', express.static(config.storage.dir));
 
 // ── API Routes ────────────────────────────────────────
 app.get('/api/health', (req, res) => {

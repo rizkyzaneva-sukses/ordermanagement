@@ -44,6 +44,17 @@ const config = {
     allowedMimeTypes: ['application/pdf', 'image/png', 'image/jpeg'],
   },
 
+  // Generated files (batch PDFs, downloaded air waybills).
+  //
+  // Must point at the same place for the API and the worker: the worker writes
+  // a batch PDF and the API serves it back, so on a split deployment (separate
+  // containers) this has to be a shared volume or the download 404s.
+  storage: {
+    dir: process.env.STORAGE_DIR
+      ? path.resolve(process.env.STORAGE_DIR)
+      : path.resolve(__dirname, '../../storage'),
+  },
+
   queue: {
     defaultJobOptions: {
       attempts: 3,

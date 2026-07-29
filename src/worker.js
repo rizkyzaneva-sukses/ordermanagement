@@ -4,6 +4,7 @@ const pdfService          = require('./services/pdf.js');
 const fulfillmentService  = require('./services/fulfillment.js');
 const prisma              = require('./prisma/client.js');
 const { connection }      = require('./services/queue.js');
+const config              = require('./config/index.js');
 const path = require('path');
 const fs   = require('fs');
 
@@ -69,7 +70,7 @@ async function handlePrintBatch(job) {
   const pdfBuffer = await pdfService.generateBatchPdf(ordersWithItems, awbDataMap);
 
   // Save PDF to disk
-  const pdfDir = path.resolve('./storage/pdfs');
+  const pdfDir = path.join(config.storage.dir, 'pdfs');
   if (!fs.existsSync(pdfDir)) {
     fs.mkdirSync(pdfDir, { recursive: true });
   }

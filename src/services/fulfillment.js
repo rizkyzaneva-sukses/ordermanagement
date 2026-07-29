@@ -20,7 +20,9 @@ const prisma        = require('../prisma/client.js');
 const shopeeService = require('./shopee.js');
 const { ensureFreshToken, expandShopeeOrderToPackages } = require('./syncDirect.js');
 
-const AWB_DIR = path.resolve('./storage/awb');
+const config = require('../config/index.js');
+
+const AWB_DIR = path.join(config.storage.dir, 'awb');
 
 // ── Fulfillment status sets (KB §3.2) ─────────────────────────────────────────
 
