@@ -14,7 +14,7 @@
  */
 
 const prisma = require('../prisma/client.js');
-const { syncQueue, connection } = require('./queue.js');
+const { syncQueue, connection, isRedisReady } = require('./queue.js');
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -74,6 +74,10 @@ function waitForRedis(timeoutMs = 10_000) {
  * @param {string} storeId
  */
 async function addStore(storeId) {
+  if (!isRedisReady()) {
+    console.warn(`[scheduler] Redis not available — skipping job registration for store ${storeId}`);
+    return;
+  }
   await syncQueue.add(
     'sync-store',
     { storeId },
@@ -88,6 +92,10 @@ async function addStore(storeId) {
  * @param {string} storeId
  */
 async function removeStore(storeId) {
+  if (!isRedisReady()) {
+    console.warn(`[scheduler] Redis not available — cannot remove job for store ${storeId}`);
+    return;
+  }
   try {
     await syncQueue.removeRepeatable('sync-store', { every: SYNC_INTERVAL_MS }, `auto-sync-${storeId}`);
     console.log(`[scheduler] Repeatable sync removed for store ${storeId}`);

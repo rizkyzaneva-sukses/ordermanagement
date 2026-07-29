@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const prisma = require('../prisma/client.js');
-const { syncQueue } = require('../services/queue.js');
+const { syncQueue, isRedisReady } = require('../services/queue.js');
 const { authenticate } = require('../middleware/auth.js');
 const pdfService = require('../services/pdf.js');
 
@@ -204,14 +204,36 @@ router.post('/sync', async (req, res) => {
       return res.json({ success: true, data: { message: 'No stores to sync', storesQueued: 0 } });
     }
 
-    for (const sid of storeIds) {
-      await syncQueue.add('sync-store', { storeId: sid }, { removeOnComplete: true });
+    // ── Redis available → enqueue via BullMQ ──────────────────────────────────
+    if (isRedisReady()) {
+      for (const sid of storeIds) {
+        await syncQueue.add('sync-store', { storeId: sid }, { removeOnComplete: true });
+      }
+      return res.json({
+        success: true,
+        data: { message: `Queued sync for ${storeIds.length} store(s)`, storesQueued: storeIds.length },
+      });
     }
 
-    return res.json({
+    // ── Redis unavailable → run sync directly (in-process fallback) ───────────
+    console.warn('[orders/sync] Redis not available — running sync directly in-process');
+    const { syncStore } = require('../services/syncDirect.js');
+
+    // Respond immediately so the HTTP request doesn't hang
+    res.json({
       success: true,
-      data: { message: `Queued sync for ${storeIds.length} store(s)`, storesQueued: storeIds.length },
+      data: { message: `Running direct sync for ${storeIds.length} store(s) (Redis unavailable)`, storesQueued: storeIds.length },
     });
+
+    for (const sid of storeIds) {
+      try {
+        await syncStore(sid);
+      } catch (syncErr) {
+        console.error(`[orders/sync] Direct sync failed for store ${sid}:`, syncErr.message);
+      }
+    }
+
+
   } catch (err) {
     console.error('POST /orders/sync error:', err);
     return res.status(500).json({ success: false, error: 'Failed to trigger sync' });
