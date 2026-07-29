@@ -846,17 +846,41 @@ async function getTrackingEvents(orderRowId) {
  * @param {Object} order - Local order row
  * @returns {{ ok: boolean, reason?: string }}
  */
-function checkAwbPrintable(order) {
+/** Order statuses where the parcel is gone or dead — nothing left to label. */
+const ORDER_STATUS_TOO_LATE = [
+  'SHIPPED',
+  'TO_CONFIRM_RECEIVE',
+  'COMPLETED',
+  'CANCELLED',
+  'TO_RETURN',
+];
+
+function checkAwbPrintable(order, options = {}) {
+  const { shopeeIssued = false } = options;
+
   if (!order.trackingNumber) {
     return { ok: false, reason: 'no tracking number yet' };
   }
 
+  // Shopee only generates an air waybill while the order is PROCESSED (KB §7.3).
+  // Its First Mile guide is blunt about the upper bound: a SHIPPED order "can no
+  // longer print airwaybill via openAPI" — only through Seller Centre. Checking
+  // here turns a confusing API rejection into a clear message.
+  if (shopeeIssued && order.status !== 'PROCESSED') {
+    return {
+      ok: false,
+      reason: `Shopee only issues an air waybill while the order is PROCESSED (this one is ${order.status})`,
+    };
+  }
+
   const ls = order.logisticsStatus;
-  // Unknown fulfillment state (legacy row, or a TikTok order): fall back to the
-  // order status rather than blocking outright.
+
+  // Unknown fulfillment state — every row predating that column, and all TikTok
+  // orders. Fall back to the order status, which still rules out anything the
+  // courier has already taken.
   if (!ls) {
-    if (['CANCELLED', 'COMPLETED', 'TO_RETURN'].includes(order.status)) {
-      return { ok: false, reason: `order status is ${order.status}` };
+    if (ORDER_STATUS_TOO_LATE.includes(order.status)) {
+      return { ok: false, reason: `order is already ${order.status}` };
     }
     return { ok: true };
   }
@@ -909,7 +933,7 @@ async function fetchAwb(orderRowIds, options = {}) {
   }
 
   const blocked = rows
-    .map(r => ({ row: r, check: checkAwbPrintable(r) }))
+    .map(r => ({ row: r, check: checkAwbPrintable(r, { shopeeIssued: true }) }))
     .filter(x => !x.check.ok);
 
   if (blocked.length > 0) {
