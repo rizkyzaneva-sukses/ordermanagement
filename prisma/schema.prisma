@@ -63,18 +63,38 @@ model Order {
   id               String      @id @default(cuid())
   orderId          String
   storeId          String
+  // Shipping unit identifier. A Shopee order can be split into several packages
+  // and each is shipped, tracked and labelled independently (KB §1), so a row
+  // here is really one package. Empty string = the order's single/default
+  // package; kept non-null because Postgres treats NULLs as distinct and would
+  // let duplicates through the unique constraint below.
+  packageNumber    String      @default("")
   buyerName        String
   buyerAddress     String
   buyerPhone       String?
   buyerCity        String?
   buyerProvince    String?
   buyerPostalCode  String?
+  buyerNote        String?     // Catatan buyer ke seller (dari field "note" Shopee API)
+  paymentMethod    String?     // COD / NON_COD — penting untuk operasional
   items            String      @default("[]")
   shippingCourier  String
   shippingService  String
   trackingNumber   String?
   shippingLabelUrl String?
   status           String      @default("PENDING")
+  // Fulfillment status from Shopee (KB §3.2). Distinct from `status`: it is what
+  // decides whether an AWB may still be printed — printing is only allowed
+  // before LOGISTICS_PICKUP_DONE (KB §7.3).
+  logisticsStatus  String?
+  // Shopee logistics channel. mass_ship_order only accepts a batch sharing one
+  // channel (KB §4.2), so it has to be known before batching.
+  logisticsChannelId Int?
+  cancelReason     String?     // Reason recorded when the order was cancelled
+  awbPath          String?     // Local path of the downloaded Shopee AWB
+  awbFormat        String?     // pdf | html | zip — Shopee varies by market (KB §7.2)
+  awbDocumentType  String?     // e.g. NORMAL_AIR_WAYBILL (KB §7.1)
+  awbFetchedAt     DateTime?
   isBatchSelected  Boolean     @default(false)
   batchId          String?
   orderDate        DateTime
@@ -91,7 +111,10 @@ model Order {
   processedBy   User?  @relation("ProcessedBy", fields: [processedById], references: [id], onDelete: SetNull)
   printedBy     User?  @relation("PrintedBy", fields: [printedById], references: [id], onDelete: SetNull)
 
+  @@unique([storeId, orderId, packageNumber])
   @@index([storeId, status])
+  @@index([storeId, logisticsStatus])
+  @@index([storeId, logisticsChannelId])
   @@index([batchId])
   @@index([printedAt])
   @@map("orders")

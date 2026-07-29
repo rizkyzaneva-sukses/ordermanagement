@@ -1,0 +1,1143 @@
+'use strict';
+
+/**
+ * fulfillment.js — write-side Shopee operations: arranging shipment, retrying a
+ * failed pickup, cancelling, and obtaining the official Shopee AWB.
+ *
+ * Everything here follows shopee-order-management-kb.md. Two of its rules shape
+ * the whole module:
+ *
+ *   Rule #1 — never act on a locally cached status. Every write re-reads the
+ *             live order from Shopee first.
+ *   Rule #6 — ship_order is not idempotent. A package already in
+ *             LOGISTICS_REQUEST_CREATED must not be shipped again.
+ */
+
+const fs   = require('fs');
+const path = require('path');
+
+const prisma        = require('../prisma/client.js');
+const shopeeService = require('./shopee.js');
+const { ensureFreshToken, expandShopeeOrderToPackages } = require('./syncDirect.js');
+
+const AWB_DIR = path.resolve('./storage/awb');
+
+// ── Fulfillment status sets (KB §3.2) ─────────────────────────────────────────
+
+/** Shipment has been arranged; the AWB exists and the parcel is still with us. */
+const AWB_PRINTABLE = new Set([
+  'LOGISTICS_REQUEST_CREATED',
+  'LOGISTICS_PICKUP_RETRY',
+]);
+
+/** Shipment not arranged yet — there is nothing to print (KB §7.3). */
+const AWB_TOO_EARLY = new Set([
+  'LOGISTICS_NOT_START',
+  'LOGISTICS_READY',
+  'LOGISTICS_PENDING_ARRANGE',
+]);
+
+/** Parcel already handed over, delivered, or dead — printing window closed. */
+const AWB_TOO_LATE = new Set([
+  'LOGISTICS_PICKUP_DONE',
+  'LOGISTICS_DELIVERY_DONE',
+  'LOGISTICS_DELIVERY_FAILED',
+  'LOGISTICS_LOST',
+  'LOGISTICS_INVALID',
+  'LOGISTICS_REQUEST_CANCELED',
+  'LOGISTICS_PICKUP_FAILED',
+  'LOGISTICS_COD_REJECTED',
+]);
+
+// ── Errors ────────────────────────────────────────────────────────────────────
+
+/**
+ * Create an error carrying an HTTP status so routes can translate it directly
+ * instead of every caller re-deriving one from the message.
+ */
+function fail(statusCode, message) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  return err;
+}
+
+// ── Context loading ───────────────────────────────────────────────────────────
+
+/**
+ * Load an order row together with its store and a guaranteed-fresh token.
+ *
+ * @param {string} orderRowId - Local Order.id (not the Shopee order_sn)
+ * @returns {Promise<{ order: Object, store: Object, accessToken: string }>}
+ */
+async function loadContext(orderRowId) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderRowId },
+    include: { store: true },
+  });
+
+  if (!order) throw fail(404, 'Order not found');
+  if (!order.store) throw fail(500, `Order ${orderRowId} has no store attached`);
+  if (order.store.platform !== 'SHOPEE') {
+    throw fail(400, `Fulfillment actions are only supported for Shopee stores (this one is ${order.store.platform})`);
+  }
+
+  const accessToken = await ensureFreshToken(order.store);
+  return { order, store: order.store, accessToken };
+}
+
+/**
+ * Re-read the authoritative order and package state from Shopee (KB Rule #1).
+ *
+ * @param {Object} ctx - From loadContext
+ * @returns {Promise<{ orderStatus: string, logisticsStatus: string|null, trackingNumber: string|null, itemList: Array }>}
+ */
+async function fetchLiveState(ctx) {
+  const { order, store, accessToken } = ctx;
+
+  const resp = await shopeeService.getOrderDetail(accessToken, store.shopId, [order.orderId]);
+  const detail = resp.response?.order_list?.[0];
+
+  if (!detail) {
+    throw fail(404, `Shopee has no order ${order.orderId} for this shop`);
+  }
+
+  const packages = Array.isArray(detail.package_list) ? detail.package_list : [];
+  // Match the specific package this row represents; a single-package order has
+  // an empty packageNumber locally and exactly one entry here.
+  const pkg = order.packageNumber
+    ? packages.find(p => String(p.package_number || '') === order.packageNumber)
+    : packages[0];
+
+  let logisticsStatus = pkg?.logistics_status || null;
+
+  // For a split order, get_package_detail is the authoritative per-package read
+  // (KB Rule #1 sanctions either endpoint). Treat it as a refinement only: if it
+  // is unavailable or shaped unexpectedly, the order-detail value still stands.
+  if (order.packageNumber) {
+    try {
+      const pkgResp = await shopeeService.getPackageDetail(accessToken, store.shopId, [order.packageNumber]);
+      const pkgDetail = pkgResp.response?.package_list?.[0] || pkgResp.response?.[0];
+      if (pkgDetail?.logistics_status) {
+        if (pkgDetail.logistics_status !== logisticsStatus) {
+          console.log(`[fulfillment] ${order.orderId}/${order.packageNumber}: package detail reports ${pkgDetail.logistics_status} (order detail said ${logisticsStatus || 'nothing'})`);
+        }
+        logisticsStatus = pkgDetail.logistics_status;
+      }
+    } catch (err) {
+      console.warn(`[fulfillment] get_package_detail unavailable for ${order.packageNumber}, using order detail: ${err.message}`);
+    }
+  }
+
+  return {
+    orderStatus:     detail.order_status || null,
+    logisticsStatus,
+    trackingNumber:  detail.tracking_number || null,
+    itemList:        detail.item_list || [],
+    raw:             detail,
+  };
+}
+
+/**
+ * Persist whatever the live read told us, so the local row stops drifting even
+ * when the action itself fails.
+ */
+async function syncRowFromLiveState(orderRowId, live, extra = {}) {
+  const data = { ...extra };
+  if (live.orderStatus)     data.status = live.orderStatus;
+  if (live.logisticsStatus) data.logisticsStatus = live.logisticsStatus;
+  if (live.trackingNumber)  data.trackingNumber = live.trackingNumber;
+
+  if (Object.keys(data).length === 0) return null;
+  return prisma.order.update({ where: { id: orderRowId }, data });
+}
+
+// ── Shipping ──────────────────────────────────────────────────────────────────
+
+/**
+ * Fetch the shipping modes and pickup options Shopee will accept for a package.
+ *
+ * Feeds the UI so an operator can choose an address and time slot before
+ * committing to `arrangeShipment`.
+ *
+ * @param {string} orderRowId
+ * @returns {Promise<Object>}
+ */
+async function getShippingOptions(orderRowId) {
+  const ctx = await loadContext(orderRowId);
+  const live = await fetchLiveState(ctx);
+  await syncRowFromLiveState(orderRowId, live);
+
+  const resp = await shopeeService.getShippingParameter(
+    ctx.accessToken, ctx.store.shopId, ctx.order.orderId, ctx.order.packageNumber || undefined);
+
+  const infoNeeded = resp.response?.info_needed || {};
+  const available = ['pickup', 'dropoff', 'non_integrated']
+    .filter(m => Object.prototype.hasOwnProperty.call(infoNeeded, m));
+
+  return {
+    orderStatus:     live.orderStatus,
+    logisticsStatus: live.logisticsStatus,
+    availableModes:  available,
+    suggestedMode:   available[0] || null,
+    infoNeeded,
+    pickup:          resp.response?.pickup || null,
+    dropoff:         resp.response?.dropoff || null,
+    slug:            resp.response?.slug || null,
+  };
+}
+
+/**
+ * Arrange shipment for one package.
+ *
+ * Refuses to act unless Shopee currently reports the order as shippable, and
+ * short-circuits when the package has already been arranged (KB Rule #6) —
+ * in that case it only refreshes the tracking number.
+ *
+ * @param {string} orderRowId
+ * @param {Object} [options={}]
+ * @param {'pickup'|'dropoff'|'non_integrated'} [options.mode] - Auto-selected when omitted
+ * @param {Object} [options.modeData={}]
+ * @param {string} [options.userId] - Recorded as the operator who processed it
+ * @returns {Promise<Object>}
+ */
+async function arrangeShipment(orderRowId, options = {}) {
+  const ctx = await loadContext(orderRowId);
+  const live = await fetchLiveState(ctx);
+  await syncRowFromLiveState(orderRowId, live);
+
+  // KB Rule #6: already arranged → do not send a second ship_order
+  if (live.logisticsStatus && !AWB_TOO_EARLY.has(live.logisticsStatus)) {
+    if (AWB_TOO_LATE.has(live.logisticsStatus) && live.logisticsStatus !== 'LOGISTICS_PICKUP_RETRY') {
+      throw fail(409, `Package is already past the shipping stage (${live.logisticsStatus})`);
+    }
+
+    console.log(`[fulfillment] ${ctx.order.orderId} already arranged (${live.logisticsStatus}) — refreshing tracking only`);
+    const tracking = await shopeeService.pollTrackingNumber(
+      ctx.accessToken, ctx.store.shopId, ctx.order.orderId, ctx.order.packageNumber || undefined);
+
+    const updated = await syncRowFromLiveState(orderRowId, live, tracking ? { trackingNumber: tracking } : {});
+    return { alreadyArranged: true, logisticsStatus: live.logisticsStatus, trackingNumber: tracking, order: updated };
+  }
+
+  if (live.orderStatus && !['READY_TO_SHIP', 'RETRY_SHIP'].includes(live.orderStatus)) {
+    throw fail(409, `Order status is ${live.orderStatus}; only READY_TO_SHIP or RETRY_SHIP can be shipped`);
+  }
+
+  const paramResp = await shopeeService.getShippingParameter(
+    ctx.accessToken, ctx.store.shopId, ctx.order.orderId, ctx.order.packageNumber || undefined);
+
+  const infoNeeded = paramResp.response?.info_needed || {};
+  const mode = options.mode || shopeeService.pickShippingMode(infoNeeded);
+
+  if (!Object.prototype.hasOwnProperty.call(infoNeeded, mode)) {
+    throw fail(400, `Channel does not accept mode "${mode}" (accepts: ${Object.keys(infoNeeded).join(', ') || 'none'})`);
+  }
+
+  await shopeeService.shipOrder(ctx.accessToken, ctx.store.shopId, {
+    orderSn:       ctx.order.orderId,
+    packageNumber: ctx.order.packageNumber || undefined,
+    mode,
+    modeData:      options.modeData || {},
+    slug:          paramResp.response?.slug || undefined,
+  });
+
+  // The tracking number often lags the ship_order call (KB §9)
+  const trackingNumber = await shopeeService.pollTrackingNumber(
+    ctx.accessToken, ctx.store.shopId, ctx.order.orderId, ctx.order.packageNumber || undefined);
+
+  const updated = await prisma.order.update({
+    where: { id: orderRowId },
+    data: {
+      status:          'PROCESSED',
+      // KB §5.2: non_integrated skips straight to pickup-done
+      logisticsStatus: mode === 'non_integrated' ? 'LOGISTICS_PICKUP_DONE' : 'LOGISTICS_REQUEST_CREATED',
+      trackingNumber:  trackingNumber || ctx.order.trackingNumber,
+      processedAt:     new Date(),
+      ...(options.userId ? { processedById: options.userId } : {}),
+    },
+  });
+
+  console.log(`[fulfillment] Shipped ${ctx.order.orderId} pkg=${ctx.order.packageNumber || '(default)'} mode=${mode} tracking=${trackingNumber || '(pending)'}`);
+
+  return { alreadyArranged: false, mode, trackingNumber, order: updated };
+}
+
+/**
+ * Arrange shipment for many packages in one Shopee call.
+ *
+ * Shopee only accepts a batch whose packages share a logistics channel and
+ * warehouse (KB §4.2). Rather than guess at that, we send the batch and report
+ * back Shopee's own per-order verdict, so a rejected subset is visible instead
+ * of silently dropped.
+ *
+ * @param {string[]} orderRowIds
+ * @param {Object} [options={}]
+ * @param {'pickup'|'dropoff'|'non_integrated'} [options.mode]
+ * @param {Object} [options.modeData={}]
+ * @param {string} [options.userId]
+ * @returns {Promise<{ shipped: Object[], failed: Object[] }>}
+ */
+async function massArrangeShipment(orderRowIds, options = {}) {
+  if (!Array.isArray(orderRowIds) || orderRowIds.length === 0) {
+    throw fail(400, 'orderRowIds must be a non-empty array');
+  }
+  if (orderRowIds.length > 50) {
+    throw fail(400, 'Shopee accepts at most 50 packages per mass_ship_order call');
+  }
+
+  const rows = await prisma.order.findMany({
+    where: { id: { in: orderRowIds } },
+    include: { store: true },
+  });
+
+  if (rows.length === 0) throw fail(404, 'No orders found');
+
+  const storeIds = [...new Set(rows.map(r => r.storeId))];
+  if (storeIds.length > 1) {
+    throw fail(400, 'All packages in one mass ship request must belong to the same store');
+  }
+
+  const store = rows[0].store;
+  if (store.platform !== 'SHOPEE') {
+    throw fail(400, `Mass ship is only supported for Shopee stores (this one is ${store.platform})`);
+  }
+
+  const accessToken = await ensureFreshToken(store);
+
+  // Shopee rejects a batch that mixes logistics channels (KB §4.2), so split the
+  // selection into per-channel batches rather than sending one doomed request.
+  // Rows synced before the channel was recorded fall back to the carrier name,
+  // which is a coarser but still useful grouping.
+  const batches = new Map();
+  for (const row of rows) {
+    const key = row.logisticsChannelId != null
+      ? `channel:${row.logisticsChannelId}`
+      : `carrier:${row.shippingCourier || 'unknown'}`;
+    if (!batches.has(key)) batches.set(key, []);
+    batches.get(key).push(row);
+  }
+
+  console.log(`[fulfillment] Mass ship split into ${batches.size} channel batch(es)`);
+
+  const allShipped = [];
+  const allFailed = [];
+  const modesUsed = new Set();
+
+  for (const [key, batchRows] of batches) {
+    try {
+      const result = await shipOneBatch(accessToken, store, batchRows, options);
+      allShipped.push(...result.shipped);
+      allFailed.push(...result.failed);
+      modesUsed.add(result.mode);
+    } catch (err) {
+      console.warn(`[fulfillment] Mass ship batch ${key} failed entirely: ${err.message}`);
+      allFailed.push(...batchRows.map(r => ({ orderId: r.orderId, message: err.message })));
+    }
+  }
+
+  console.log(`[fulfillment] Mass ship overall: ${allShipped.length} shipped, ${allFailed.length} rejected`);
+
+  return {
+    mode: modesUsed.size === 1 ? [...modesUsed][0] : [...modesUsed].join('+'),
+    batches: batches.size,
+    shipped: allShipped,
+    failed: allFailed,
+  };
+}
+
+/**
+ * Ship one single-channel batch and persist the outcome.
+ *
+ * Split out of `massArrangeShipment` so each channel batch succeeds or fails on
+ * its own rather than taking the whole selection down with it.
+ *
+ * @returns {Promise<{ mode: string, shipped: Object[], failed: Object[] }>}
+ */
+async function shipOneBatch(accessToken, store, rows, options = {}) {
+  let mode = options.mode;
+  if (!mode) {
+    const paramResp = await shopeeService.getMassShippingParameter(accessToken, store.shopId,
+      rows.map(r => ({ order_sn: r.orderId, package_number: r.packageNumber || undefined })));
+    mode = shopeeService.pickShippingMode(paramResp.response?.info_needed || {});
+  }
+
+  const resp = await shopeeService.massShipOrder(accessToken, store.shopId, {
+    orders: rows.map(r => ({ orderSn: r.orderId, packageNumber: r.packageNumber || undefined })),
+    mode,
+    modeData: options.modeData || {},
+  });
+
+  const failures = resp.response?.result_list?.filter(r => r.fail_error || r.fail_message) || [];
+  const failedSns = new Set(failures.map(f => f.order_sn));
+
+  const shippedRows = rows.filter(r => !failedSns.has(r.orderId));
+
+  if (shippedRows.length > 0) {
+    await prisma.order.updateMany({
+      where: { id: { in: shippedRows.map(r => r.id) } },
+      data: {
+        status:          'PROCESSED',
+        logisticsStatus: mode === 'non_integrated' ? 'LOGISTICS_PICKUP_DONE' : 'LOGISTICS_REQUEST_CREATED',
+        processedAt:     new Date(),
+        ...(options.userId ? { processedById: options.userId } : {}),
+      },
+    });
+
+    // Tracking numbers lag the ship call, so gather what is available now and
+    // let the next sync pick up the rest (KB §9).
+    try {
+      const trackingResp = await shopeeService.getMassTrackingNumber(accessToken, store.shopId,
+        shippedRows.map(r => ({ order_sn: r.orderId, package_number: r.packageNumber || undefined })));
+
+      const results = trackingResp.response?.success_list || trackingResp.response?.order_list || [];
+      for (const result of results) {
+        if (!result.tracking_number) continue;
+        const row = shippedRows.find(r =>
+          r.orderId === result.order_sn &&
+          (r.packageNumber || '') === String(result.package_number || ''));
+        if (row) {
+          await prisma.order.update({
+            where: { id: row.id },
+            data: { trackingNumber: result.tracking_number },
+          });
+        }
+      }
+    } catch (err) {
+      console.warn(`[fulfillment] Mass tracking lookup after ship failed: ${err.message}`);
+    }
+  }
+
+  console.log(`[fulfillment] Batch of ${rows.length} mode=${mode}: ${shippedRows.length} shipped, ${failures.length} rejected`);
+
+  return {
+    mode,
+    shipped: shippedRows.map(r => ({ id: r.id, orderId: r.orderId })),
+    failed: failures.map(f => ({ orderId: f.order_sn, error: f.fail_error, message: f.fail_message })),
+  };
+}
+
+/**
+ * Re-arrange a pickup that the 3PL failed to complete (KB §3.3 transition 9).
+ *
+ * @param {string} orderRowId
+ * @param {Object} options
+ * @param {number} options.addressId
+ * @param {string} options.pickupTimeId
+ * @returns {Promise<Object>}
+ */
+async function retryShipment(orderRowId, { addressId, pickupTimeId } = {}) {
+  const ctx = await loadContext(orderRowId);
+  const live = await fetchLiveState(ctx);
+  await syncRowFromLiveState(orderRowId, live);
+
+  const retryable = live.orderStatus === 'RETRY_SHIP' || live.logisticsStatus === 'LOGISTICS_PICKUP_RETRY';
+  if (!retryable) {
+    throw fail(409, `Order is not awaiting a pickup retry (status=${live.orderStatus}, logistics=${live.logisticsStatus})`);
+  }
+
+  await shopeeService.updateShippingOrder(ctx.accessToken, ctx.store.shopId, {
+    orderSn:       ctx.order.orderId,
+    packageNumber: ctx.order.packageNumber || undefined,
+    addressId,
+    pickupTimeId,
+  });
+
+  const updated = await prisma.order.update({
+    where: { id: orderRowId },
+    data: { status: 'PROCESSED', logisticsStatus: 'LOGISTICS_REQUEST_CREATED' },
+  });
+
+  console.log(`[fulfillment] Pickup re-arranged for ${ctx.order.orderId} address=${addressId} slot=${pickupTimeId}`);
+  return { order: updated };
+}
+
+// ── Split / unsplit (KB §6) ───────────────────────────────────────────────────
+
+/** Non-TW markets cap a split at 5 packages; TW allows 30 (KB §6 rule 5). */
+const MAX_SPLIT_PACKAGES = 5;
+
+/**
+ * Rebuild the local package rows for one order straight from Shopee.
+ *
+ * A split replaces one row with several and an unsplit does the reverse, so the
+ * rows have to be re-derived rather than patched. Rows that no longer exist
+ * upstream are removed, except any that carry print history.
+ */
+async function resyncOrderPackages(store, orderSn, accessToken) {
+  const resp = await shopeeService.getOrderDetail(accessToken, store.shopId, [orderSn]);
+  const detail = resp.response?.order_list?.[0];
+  if (!detail) return { created: 0, updated: 0, removed: 0 };
+
+  const rows = expandShopeeOrderToPackages(detail);
+  const existing = await prisma.order.findMany({ where: { storeId: store.id, orderId: orderSn } });
+
+  let created = 0;
+  let updated = 0;
+
+  for (const row of rows) {
+    const packageNumber = row.packageNumber || '';
+    const match = existing.find(e => e.packageNumber === packageNumber);
+
+    const data = {
+      status:             row.status || 'READY_TO_SHIP',
+      logisticsStatus:    row.logisticsStatus || null,
+      logisticsChannelId: row.logisticsChannelId ?? null,
+      shippingCourier:    row.shippingCourier || '',
+      shippingService:    row.shippingService || '',
+      trackingNumber:     row.trackingNumber || null,
+      items:              JSON.stringify(row.items || []),
+    };
+
+    if (match) {
+      await prisma.order.update({ where: { id: match.id }, data });
+      updated++;
+    } else {
+      await prisma.order.create({
+        data: {
+          ...data,
+          orderId:         orderSn,
+          storeId:         store.id,
+          packageNumber,
+          buyerName:       row.buyerName,
+          buyerAddress:    row.buyerAddress,
+          buyerPhone:      row.buyerPhone,
+          buyerCity:       row.buyerCity,
+          buyerProvince:   row.buyerProvince,
+          buyerPostalCode: row.buyerPostalCode,
+          buyerNote:       row.buyerNote || null,
+          paymentMethod:   row.paymentMethod || null,
+          orderDate:       row.orderDate,
+        },
+      });
+      created++;
+    }
+  }
+
+  const livePackages = new Set(rows.map(r => r.packageNumber || ''));
+  const orphans = existing.filter(e => !livePackages.has(e.packageNumber));
+
+  // A printed row is kept even when Shopee no longer lists the package, so the
+  // print history is not silently destroyed.
+  const removable = orphans.filter(o => !o.printedAt);
+  if (orphans.length > removable.length) {
+    console.warn(`[fulfillment] ${orphans.length - removable.length} stale package row(s) for ${orderSn} kept because they were already printed`);
+  }
+
+  if (removable.length > 0) {
+    await prisma.order.deleteMany({ where: { id: { in: removable.map(o => o.id) } } });
+  }
+
+  console.log(`[fulfillment] Resynced ${orderSn}: ${created} created, ${updated} updated, ${removable.length} removed`);
+  return { created, updated, removed: removable.length };
+}
+
+/**
+ * Items of an order plus the grouping constraints that limit how it may split.
+ *
+ * Feeds the UI so an operator is not offered splits Shopee will reject.
+ *
+ * @param {string} orderRowId
+ * @returns {Promise<Object>}
+ */
+async function getSplitOptions(orderRowId) {
+  const ctx = await loadContext(orderRowId);
+  const live = await fetchLiveState(ctx);
+  await syncRowFromLiveState(orderRowId, live);
+
+  const items = live.itemList.map(i => ({
+    itemId:           i.item_id,
+    modelId:          i.model_id || 0,
+    orderItemId:      i.order_item_id ?? i.item_id,
+    promotionGroupId: i.promotion_group_id ?? 0,
+    addOnDealId:      i.add_on_deal_id ?? 0,
+    name:             i.item_name || 'Product',
+    variant:          i.model_name || null,
+    quantity:         i.model_quantity_purchased || 1,
+  }));
+
+  // Items sharing an orderItemId are one bundle deal; sharing an addOnDealId are
+  // one add-on deal. Neither may straddle two packages (KB §6 rules 2–3).
+  const groups = new Map();
+  for (const item of items) {
+    const key = item.addOnDealId
+      ? `addon:${item.addOnDealId}`
+      : `bundle:${item.orderItemId}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+
+  const lockedGroups = [...groups.entries()]
+    .filter(([, members]) => members.length > 1)
+    .map(([key, members]) => ({
+      key,
+      reason: key.startsWith('addon') ? 'add-on deal' : 'bundle deal',
+      itemIds: members.map(m => m.itemId),
+    }));
+
+  return {
+    orderStatus: live.orderStatus,
+    splittable: live.orderStatus === 'READY_TO_SHIP',
+    maxPackages: MAX_SPLIT_PACKAGES,
+    items,
+    lockedGroups,
+  };
+}
+
+/**
+ * Validate a proposed split against the KB §6 rules before sending it.
+ *
+ * Returns the list of violations rather than throwing on the first one, so the
+ * UI can show everything that is wrong at once.
+ *
+ * @param {Array<{items: Array}>} packages - Proposed packages
+ * @param {Array} allItems - Every item on the order
+ * @returns {string[]} Violations, empty when the split is legal
+ */
+function validateSplit(packages, allItems) {
+  const problems = [];
+
+  if (!Array.isArray(packages) || packages.length < 2) {
+    problems.push('A split needs at least 2 packages');
+    return problems;
+  }
+  if (packages.length > MAX_SPLIT_PACKAGES) {
+    problems.push(`At most ${MAX_SPLIT_PACKAGES} packages are allowed`);
+  }
+  if (packages.some(p => !Array.isArray(p.items) || p.items.length === 0)) {
+    problems.push('Every package must contain at least one item');
+  }
+
+  const keyOf = (i) => `${i.itemId}::${i.modelId || 0}::${i.orderItemId ?? i.itemId}`;
+
+  const assigned = packages.flatMap(p => p.items || []);
+  const assignedKeys = assigned.map(keyOf);
+  const expectedKeys = allItems.map(keyOf);
+
+  const duplicates = assignedKeys.filter((k, i) => assignedKeys.indexOf(k) !== i);
+  if (duplicates.length > 0) {
+    problems.push('An item was placed in more than one package');
+  }
+
+  const missing = expectedKeys.filter(k => !assignedKeys.includes(k));
+  if (missing.length > 0) {
+    problems.push(`The split must include every item on the order (${missing.length} missing)`);
+  }
+
+  // Bundle and add-on deals must stay together (KB §6 rules 2–3)
+  const groupLocation = new Map();
+  packages.forEach((pkg, index) => {
+    for (const item of pkg.items || []) {
+      const groupKey = item.addOnDealId
+        ? `addon:${item.addOnDealId}`
+        : `bundle:${item.orderItemId ?? item.itemId}`;
+
+      const seenAt = groupLocation.get(groupKey);
+      if (seenAt !== undefined && seenAt !== index) {
+        const label = groupKey.startsWith('addon') ? 'An add-on deal' : 'A bundle deal';
+        const message = `${label} was split across packages, which Shopee does not allow`;
+        if (!problems.includes(message)) problems.push(message);
+      } else {
+        groupLocation.set(groupKey, index);
+      }
+    }
+  });
+
+  return problems;
+}
+
+/**
+ * Split an order into packages.
+ *
+ * @param {string} orderRowId
+ * @param {Array<{items: Array}>} packages
+ * @returns {Promise<Object>}
+ */
+async function splitOrder(orderRowId, packages) {
+  const ctx = await loadContext(orderRowId);
+  const live = await fetchLiveState(ctx);
+  await syncRowFromLiveState(orderRowId, live);
+
+  if (live.orderStatus !== 'READY_TO_SHIP') {
+    throw fail(409, `Order status is ${live.orderStatus}; only READY_TO_SHIP orders can be split (KB §6)`);
+  }
+
+  const allItems = live.itemList.map(i => ({
+    itemId:      i.item_id,
+    modelId:     i.model_id || 0,
+    orderItemId: i.order_item_id ?? i.item_id,
+    addOnDealId: i.add_on_deal_id ?? 0,
+  }));
+
+  const problems = validateSplit(packages, allItems);
+  if (problems.length > 0) {
+    throw fail(400, problems.join('; '));
+  }
+
+  const payload = packages.map(pkg => ({
+    item_list: pkg.items.map(item => ({
+      item_id:            item.itemId,
+      model_id:           item.modelId || 0,
+      order_item_id:      item.orderItemId ?? item.itemId,
+      promotion_group_id: item.promotionGroupId ?? 0,
+    })),
+  }));
+
+  await shopeeService.splitOrder(ctx.accessToken, ctx.store.shopId, ctx.order.orderId, payload);
+
+  const resync = await resyncOrderPackages(ctx.store, ctx.order.orderId, ctx.accessToken);
+
+  console.log(`[fulfillment] Split ${ctx.order.orderId} into ${packages.length} package(s)`);
+  return { orderId: ctx.order.orderId, packages: packages.length, ...resync };
+}
+
+/**
+ * Merge a previously split order back into one package.
+ *
+ * @param {string} orderRowId
+ * @returns {Promise<Object>}
+ */
+async function unsplitOrder(orderRowId) {
+  const ctx = await loadContext(orderRowId);
+  const live = await fetchLiveState(ctx);
+  await syncRowFromLiveState(orderRowId, live);
+
+  if (live.orderStatus !== 'READY_TO_SHIP') {
+    throw fail(409, `Order status is ${live.orderStatus}; a split can only be undone while READY_TO_SHIP (KB §6 rule 7)`);
+  }
+
+  await shopeeService.unsplitOrder(ctx.accessToken, ctx.store.shopId, ctx.order.orderId);
+
+  const resync = await resyncOrderPackages(ctx.store, ctx.order.orderId, ctx.accessToken);
+
+  console.log(`[fulfillment] Unsplit ${ctx.order.orderId}`);
+  return { orderId: ctx.order.orderId, ...resync };
+}
+
+// ── Cancellation ──────────────────────────────────────────────────────────────
+
+/**
+ * Cancel an order as the seller.
+ *
+ * `OUT_OF_STOCK` needs the affected items; when the caller does not supply them
+ * we take every item on the order, which is what cancelling the whole order means.
+ *
+ * @param {string} orderRowId
+ * @param {Object} options
+ * @param {'OUT_OF_STOCK'|'UNDELIVERABLE_AREA'} options.reason
+ * @param {Array} [options.itemList]
+ * @returns {Promise<Object>}
+ */
+async function cancelOrder(orderRowId, { reason, itemList } = {}) {
+  const ctx = await loadContext(orderRowId);
+  const live = await fetchLiveState(ctx);
+  await syncRowFromLiveState(orderRowId, live);
+
+  if (!['READY_TO_SHIP', 'PROCESSED', 'UNPAID'].includes(live.orderStatus)) {
+    throw fail(409, `Order status is ${live.orderStatus}; it can no longer be cancelled by the seller`);
+  }
+
+  let items = itemList;
+  if (reason === 'OUT_OF_STOCK' && (!Array.isArray(items) || items.length === 0)) {
+    items = live.itemList.map(i => ({ item_id: i.item_id, model_id: i.model_id || 0 }));
+    if (items.length === 0) {
+      throw fail(400, 'Cannot cancel for OUT_OF_STOCK: Shopee returned no items for this order');
+    }
+  }
+
+  await shopeeService.cancelOrder(ctx.accessToken, ctx.store.shopId, ctx.order.orderId, reason, items);
+
+  // Every package of the order dies with it, not just this row
+  await prisma.order.updateMany({
+    where: { storeId: ctx.store.id, orderId: ctx.order.orderId },
+    data: { status: 'CANCELLED', cancelReason: reason, isBatchSelected: false },
+  });
+
+  console.log(`[fulfillment] Cancelled ${ctx.order.orderId} reason=${reason}`);
+  return { orderId: ctx.order.orderId, reason };
+}
+
+/**
+ * Approve or reject a buyer's cancellation request.
+ *
+ * Silence counts as approval on Shopee's side (KB §2.2), so a rejection has to
+ * be sent explicitly and before the window closes.
+ *
+ * @param {string} orderRowId
+ * @param {'ACCEPT'|'REJECT'} operation
+ * @returns {Promise<Object>}
+ */
+async function respondToCancellation(orderRowId, operation) {
+  const ctx = await loadContext(orderRowId);
+  const live = await fetchLiveState(ctx);
+  await syncRowFromLiveState(orderRowId, live);
+
+  if (live.orderStatus !== 'IN_CANCEL') {
+    throw fail(409, `Order status is ${live.orderStatus}; there is no pending buyer cancellation to answer`);
+  }
+
+  await shopeeService.handleBuyerCancellation(ctx.accessToken, ctx.store.shopId, ctx.order.orderId, operation);
+
+  // A rejection returns the order to its previous status, which only Shopee
+  // knows — re-read instead of guessing (KB Rule #1).
+  const after = await fetchLiveState(ctx);
+  await prisma.order.updateMany({
+    where: { storeId: ctx.store.id, orderId: ctx.order.orderId },
+    data: {
+      status: after.orderStatus || (operation === 'ACCEPT' ? 'CANCELLED' : live.orderStatus),
+      ...(operation === 'ACCEPT' ? { cancelReason: 'BUYER_REQUEST', isBatchSelected: false } : {}),
+    },
+  });
+
+  console.log(`[fulfillment] ${operation === 'ACCEPT' ? 'Accepted' : 'Rejected'} buyer cancellation for ${ctx.order.orderId}`);
+  return { orderId: ctx.order.orderId, operation, status: after.orderStatus };
+}
+
+// ── Tracking ──────────────────────────────────────────────────────────────────
+
+/**
+ * Pull the tracking number for one package on demand.
+ *
+ * @param {string} orderRowId
+ * @returns {Promise<{ trackingNumber: string|null }>}
+ */
+async function refreshTracking(orderRowId) {
+  const ctx = await loadContext(orderRowId);
+
+  const resp = await shopeeService.getTrackingNumber(
+    ctx.accessToken, ctx.store.shopId, ctx.order.orderId, ctx.order.packageNumber || undefined);
+
+  const trackingNumber = resp.response?.tracking_number || null;
+
+  if (trackingNumber && trackingNumber !== ctx.order.trackingNumber) {
+    await prisma.order.update({
+      where: { id: orderRowId },
+      data: { trackingNumber },
+    });
+  }
+
+  return { trackingNumber };
+}
+
+/**
+ * Get the 3PL event history for a package (status enum in KB §10.4).
+ *
+ * @param {string} orderRowId
+ * @returns {Promise<{ currentStatus: string|null, events: Array }>}
+ */
+async function getTrackingEvents(orderRowId) {
+  const ctx = await loadContext(orderRowId);
+
+  const resp = await shopeeService.getTrackingInfo(
+    ctx.accessToken, ctx.store.shopId, ctx.order.orderId, ctx.order.packageNumber || undefined);
+
+  return {
+    currentStatus: resp.response?.logistics_status || null,
+    events: resp.response?.tracking_info || [],
+  };
+}
+
+// ── Air waybills ──────────────────────────────────────────────────────────────
+
+/**
+ * Decide whether an order row is inside the AWB printing window (KB §7.3).
+ *
+ * @param {Object} order - Local order row
+ * @returns {{ ok: boolean, reason?: string }}
+ */
+function checkAwbPrintable(order) {
+  if (!order.trackingNumber) {
+    return { ok: false, reason: 'no tracking number yet' };
+  }
+
+  const ls = order.logisticsStatus;
+  // Unknown fulfillment state (legacy row, or a TikTok order): fall back to the
+  // order status rather than blocking outright.
+  if (!ls) {
+    if (['CANCELLED', 'COMPLETED', 'TO_RETURN'].includes(order.status)) {
+      return { ok: false, reason: `order status is ${order.status}` };
+    }
+    return { ok: true };
+  }
+
+  if (AWB_TOO_EARLY.has(ls)) return { ok: false, reason: `shipment not arranged yet (${ls})` };
+  if (AWB_TOO_LATE.has(ls))  return { ok: false, reason: `printing window closed (${ls})` };
+  if (!AWB_PRINTABLE.has(ls)) return { ok: false, reason: `unexpected fulfillment status (${ls})` };
+
+  return { ok: true };
+}
+
+/**
+ * Fetch the official Shopee AWB for a set of order rows.
+ *
+ * All rows must belong to the same store, because the document request is
+ * authenticated per shop. Rows outside the printing window are rejected up
+ * front — `download_shipping_document` fails the entire request if even one
+ * package is not READY (KB §7.3), so partial batches are not worth attempting.
+ *
+ * @param {string[]} orderRowIds
+ * @param {Object} [options={}]
+ * @param {string} [options.shippingDocumentType]
+ * @returns {Promise<{ buffer: Buffer, format: string, documentType: string, filePath: string, orderRowIds: string[] }>}
+ */
+async function fetchAwb(orderRowIds, options = {}) {
+  if (!Array.isArray(orderRowIds) || orderRowIds.length === 0) {
+    throw fail(400, 'orderRowIds must be a non-empty array');
+  }
+  if (orderRowIds.length > 50) {
+    throw fail(400, 'Shopee accepts at most 50 packages per shipping-document request');
+  }
+
+  const rows = await prisma.order.findMany({
+    where: { id: { in: orderRowIds } },
+    include: { store: true },
+  });
+
+  if (rows.length !== orderRowIds.length) {
+    throw fail(404, 'Some orders were not found');
+  }
+
+  const storeIds = [...new Set(rows.map(r => r.storeId))];
+  if (storeIds.length > 1) {
+    throw fail(400, 'All packages in one AWB request must belong to the same store');
+  }
+
+  const store = rows[0].store;
+  if (store.platform !== 'SHOPEE') {
+    throw fail(400, `Shopee AWBs are not available for ${store.platform} stores`);
+  }
+
+  const blocked = rows
+    .map(r => ({ row: r, check: checkAwbPrintable(r) }))
+    .filter(x => !x.check.ok);
+
+  if (blocked.length > 0) {
+    const detail = blocked.map(b => `${b.row.orderId}: ${b.check.reason}`).join('; ');
+    throw fail(409, `${blocked.length} package(s) cannot be printed — ${detail}`);
+  }
+
+  const accessToken = await ensureFreshToken(store);
+
+  const doc = await shopeeService.fetchShippingDocument(
+    accessToken,
+    store.shopId,
+    rows.map(r => ({
+      orderSn:        r.orderId,
+      packageNumber:  r.packageNumber || undefined,
+      trackingNumber: r.trackingNumber || undefined,
+    })),
+    { shippingDocumentType: options.shippingDocumentType },
+  );
+
+  fs.mkdirSync(AWB_DIR, { recursive: true });
+  const fileName = `awb-${Date.now()}-${rows.length}pkg.${doc.format === 'unknown' ? 'bin' : doc.format}`;
+  const filePath = path.join(AWB_DIR, fileName);
+  fs.writeFileSync(filePath, doc.buffer);
+
+  await prisma.order.updateMany({
+    where: { id: { in: orderRowIds } },
+    data: {
+      awbPath:         filePath,
+      awbFormat:       doc.format,
+      awbDocumentType: doc.documentType,
+      awbFetchedAt:    new Date(),
+    },
+  });
+
+  console.log(`[fulfillment] Downloaded Shopee AWB for ${rows.length} package(s) → ${filePath} (${doc.format})`);
+
+  return { ...doc, filePath, orderRowIds };
+}
+
+/**
+ * Read back an AWB already downloaded for an order row.
+ *
+ * Avoids hitting Shopee again for a reprint, and still works after the package
+ * has left the printing window — the file was fetched while it was still valid.
+ *
+ * @param {string} orderRowId
+ * @returns {Promise<{ buffer: Buffer, format: string, filePath: string }>}
+ */
+async function readStoredAwb(orderRowId) {
+  const order = await prisma.order.findUnique({ where: { id: orderRowId } });
+  if (!order) throw fail(404, 'Order not found');
+
+  if (!order.awbPath) {
+    throw fail(404, 'No Shopee air waybill has been downloaded for this order yet');
+  }
+  if (!fs.existsSync(order.awbPath)) {
+    throw fail(410, 'The stored air waybill file is no longer on disk — download it again from Shopee');
+  }
+
+  return {
+    buffer: fs.readFileSync(order.awbPath),
+    format: order.awbFormat || 'unknown',
+    filePath: order.awbPath,
+  };
+}
+
+/**
+ * Delete AWB files older than the retention window.
+ *
+ * Air waybills are only useful until the parcel is collected, but the files
+ * accumulate indefinitely otherwise. Rows pointing at a removed file keep their
+ * `awbFetchedAt` for audit while `awbPath` is cleared.
+ *
+ * @param {number} [retentionDays=30]
+ * @returns {Promise<{ deleted: number, freedBytes: number }>}
+ */
+async function cleanupOldAwbFiles(retentionDays = 30) {
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+
+  const stale = await prisma.order.findMany({
+    where: { awbPath: { not: null }, awbFetchedAt: { lt: cutoff } },
+    select: { id: true, awbPath: true },
+  });
+
+  if (stale.length === 0) return { deleted: 0, freedBytes: 0 };
+
+  let deleted = 0;
+  let freedBytes = 0;
+
+  // Several rows share one file when the AWB covered a batch
+  const paths = [...new Set(stale.map(r => r.awbPath))];
+  for (const filePath of paths) {
+    try {
+      if (fs.existsSync(filePath)) {
+        freedBytes += fs.statSync(filePath).size;
+        fs.unlinkSync(filePath);
+      }
+      deleted++;
+    } catch (err) {
+      console.warn(`[fulfillment] Could not delete stale AWB ${filePath}: ${err.message}`);
+    }
+  }
+
+  await prisma.order.updateMany({
+    where: { id: { in: stale.map(r => r.id) } },
+    data: { awbPath: null },
+  });
+
+  console.log(`[fulfillment] AWB cleanup: removed ${deleted} file(s), freed ${(freedBytes / 1024).toFixed(0)} KB, cleared ${stale.length} row reference(s)`);
+  return { deleted, freedBytes };
+}
+
+/**
+ * Fetch the raw AWB field data used to render a self-designed label (KB §5 7a).
+ *
+ * @param {string[]} orderRowIds
+ * @returns {Promise<Object>}
+ */
+async function fetchAwbDataInfo(orderRowIds) {
+  if (!Array.isArray(orderRowIds) || orderRowIds.length === 0) {
+    throw fail(400, 'orderRowIds must be a non-empty array');
+  }
+
+  const rows = await prisma.order.findMany({
+    where: { id: { in: orderRowIds } },
+    include: { store: true },
+  });
+
+  if (rows.length === 0) throw fail(404, 'No orders found');
+
+  const storeIds = [...new Set(rows.map(r => r.storeId))];
+  if (storeIds.length > 1) {
+    throw fail(400, 'All packages in one request must belong to the same store');
+  }
+
+  const store = rows[0].store;
+  if (store.platform !== 'SHOPEE') {
+    throw fail(400, `Not available for ${store.platform} stores`);
+  }
+
+  const accessToken = await ensureFreshToken(store);
+
+  const resp = await shopeeService.getShippingDocumentDataInfo(
+    accessToken,
+    store.shopId,
+    rows.map(r => ({ orderSn: r.orderId, packageNumber: r.packageNumber || undefined })),
+  );
+
+  return resp.response || {};
+}
+
+/**
+ * Best-effort lookup of official AWB field data for a set of order rows.
+ *
+ * Used to enrich self-printed labels with the courier routing information that
+ * only Shopee holds (KB §5 step 7a). Deliberately never throws: a label without
+ * a sort code is still printable, so a failure here must not abort a print run.
+ *
+ * @param {Object[]} rows - Order rows including their store
+ * @returns {Promise<Map<string, Object>>} Keyed by `${orderId}::${packageNumber}`
+ */
+async function fetchAwbDataForRows(rows) {
+  const map = new Map();
+
+  const shopeeRows = rows.filter(r => r.store?.platform === 'SHOPEE' && r.trackingNumber);
+  if (shopeeRows.length === 0) return map;
+
+  // One request per shop, batched to Shopee's 50-package limit
+  const byStore = new Map();
+  for (const row of shopeeRows) {
+    if (!byStore.has(row.storeId)) byStore.set(row.storeId, []);
+    byStore.get(row.storeId).push(row);
+  }
+
+  for (const storeRows of byStore.values()) {
+    const store = storeRows[0].store;
+
+    let accessToken;
+    try {
+      accessToken = await ensureFreshToken(store);
+    } catch (err) {
+      console.warn(`[fulfillment] Skipping AWB data for store ${store.id}: ${err.message}`);
+      continue;
+    }
+
+    for (let i = 0; i < storeRows.length; i += 50) {
+      const chunk = storeRows.slice(i, i + 50);
+      try {
+        const resp = await shopeeService.getShippingDocumentDataInfo(
+          accessToken,
+          store.shopId,
+          chunk.map(r => ({ orderSn: r.orderId, packageNumber: r.packageNumber || undefined })),
+        );
+
+        const results = resp.response?.data_info_list || resp.response?.result_list || [];
+        for (const entry of results) {
+          const key = `${entry.order_sn}::${entry.package_number || ''}`;
+          map.set(key, entry);
+        }
+      } catch (err) {
+        console.warn(`[fulfillment] AWB data lookup failed for ${chunk.length} package(s): ${err.message}`);
+      }
+    }
+  }
+
+  console.log(`[fulfillment] Resolved official AWB data for ${map.size}/${shopeeRows.length} package(s)`);
+  return map;
+}
+
+module.exports = {
+  fetchAwbDataForRows,
+  getShippingOptions,
+  arrangeShipment,
+  massArrangeShipment,
+  retryShipment,
+  getSplitOptions,
+  splitOrder,
+  unsplitOrder,
+  validateSplit,
+  cancelOrder,
+  respondToCancellation,
+  refreshTracking,
+  getTrackingEvents,
+  checkAwbPrintable,
+  fetchAwb,
+  readStoredAwb,
+  cleanupOldAwbFiles,
+  fetchAwbDataInfo,
+  AWB_PRINTABLE,
+  AWB_TOO_EARLY,
+  AWB_TOO_LATE,
+};

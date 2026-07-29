@@ -3,20 +3,23 @@
 import { useEffect, useState } from 'react'
 import api from '@/lib/api'
 import {
-  Clock,
-  Settings,
+  Package,
+  PackageCheck,
   Truck,
-  XCircle,
+  AlertTriangle,
   RefreshCw,
   Store,
   Loader2,
 } from 'lucide-react'
 
 interface DashboardStats {
-  pending: number
-  processing: number
+  toShip: number
+  awaitingPickup: number
   shipped: number
+  needsAttention: number
   cancelled: number
+  unpaid: number
+  completed: number
 }
 
 interface StoreInfo {
@@ -24,6 +27,7 @@ interface StoreInfo {
   name: string
   platform: 'SHOPEE' | 'TIKTOK'
   orderCount: number
+  packageCount: number
   status: 'ACTIVE' | 'EXPIRED' | 'ERROR'
 }
 
@@ -78,18 +82,20 @@ export default function DashboardPage() {
     )
   }
 
+  // Buckets mirror the platform's real order statuses (KB §2.1) — the old
+  // Pending/Diproses tiles counted statuses Shopee never sends.
   const summaryCards = [
     {
-      label: 'Pending',
-      value: stats?.pending ?? 0,
-      icon: Clock,
+      label: 'Siap Kirim',
+      value: stats?.toShip ?? 0,
+      icon: Package,
       color: 'text-amber-600 dark:text-amber-400',
       iconBg: 'bg-amber-100 dark:bg-amber-950/70',
     },
     {
-      label: 'Diproses',
-      value: stats?.processing ?? 0,
-      icon: Settings,
+      label: 'Menunggu Pickup',
+      value: stats?.awaitingPickup ?? 0,
+      icon: PackageCheck,
       color: 'text-blue-600 dark:text-blue-400',
       iconBg: 'bg-blue-100 dark:bg-blue-950/70',
     },
@@ -101,9 +107,9 @@ export default function DashboardPage() {
       iconBg: 'bg-emerald-100 dark:bg-emerald-950/70',
     },
     {
-      label: 'Dibatalkan',
-      value: stats?.cancelled ?? 0,
-      icon: XCircle,
+      label: 'Perlu Tindakan',
+      value: stats?.needsAttention ?? 0,
+      icon: AlertTriangle,
       color: 'text-rose-600 dark:text-rose-400',
       iconBg: 'bg-rose-100 dark:bg-rose-950/70',
     },
@@ -180,7 +186,11 @@ export default function DashboardPage() {
                 </div>
                 <div className="text-right">
                   <p className="text-lg font-semibold text-gray-900 dark:text-slate-100">{store.orderCount}</p>
-                  <p className="text-xs text-gray-500 dark:text-slate-400">pesanan</p>
+                  <p className="text-xs text-gray-500 dark:text-slate-400">
+                    pesanan
+                    {/* Only worth showing when the shop actually has split orders */}
+                    {store.packageCount > store.orderCount && ` · ${store.packageCount} paket`}
+                  </p>
                 </div>
               </div>
             ))

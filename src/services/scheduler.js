@@ -15,6 +15,7 @@
 
 const prisma = require('../prisma/client.js');
 const { syncQueue, connection, isRedisReady } = require('./queue.js');
+const fulfillmentService = require('./fulfillment.js');
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -104,6 +105,46 @@ async function removeStore(storeId) {
   }
 }
 
+// ── AWB housekeeping ──────────────────────────────────────────────────────────
+
+const AWB_RETENTION_DAYS  = parseInt(process.env.AWB_RETENTION_DAYS, 10) || 30;
+const AWB_CLEANUP_EVERY_MS = 24 * 60 * 60 * 1000;
+
+let awbCleanupTimer = null;
+
+/**
+ * Periodically delete downloaded air waybills past the retention window.
+ *
+ * Deliberately not a BullMQ job: this is local disk housekeeping for the
+ * process that wrote the files, and it must keep working when Redis is down.
+ */
+function startAwbCleanup() {
+  if (awbCleanupTimer) return;
+
+  const run = async () => {
+    try {
+      await fulfillmentService.cleanupOldAwbFiles(AWB_RETENTION_DAYS);
+    } catch (err) {
+      console.error('[scheduler] AWB cleanup failed:', err.message);
+    }
+  };
+
+  run();
+  awbCleanupTimer = setInterval(run, AWB_CLEANUP_EVERY_MS);
+  // Do not hold the process open just for housekeeping
+  if (typeof awbCleanupTimer.unref === 'function') awbCleanupTimer.unref();
+
+  console.log(`[scheduler] AWB cleanup scheduled daily (retention: ${AWB_RETENTION_DAYS} days)`);
+}
+
+/** Stop the housekeeping timer (used by tests and graceful shutdown). */
+function stopAwbCleanup() {
+  if (awbCleanupTimer) {
+    clearInterval(awbCleanupTimer);
+    awbCleanupTimer = null;
+  }
+}
+
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 /**
@@ -112,6 +153,10 @@ async function removeStore(storeId) {
  */
 async function start() {
   console.log(`[scheduler] Starting — sync interval: ${SYNC_INTERVAL_MS / 60_000} min`);
+
+  // Housekeeping runs on a plain timer, before the Redis gate below: disk fills
+  // up whether or not the queue is available.
+  startAwbCleanup();
 
   // Wait for Redis to be ready before registering jobs
   const isReady = await waitForRedis(10_000);
@@ -148,5 +193,5 @@ async function start() {
   console.log('[scheduler] All repeatable sync jobs registered');
 }
 
-module.exports = { start, addStore, removeStore };
+module.exports = { start, addStore, removeStore, startAwbCleanup, stopAwbCleanup };
 

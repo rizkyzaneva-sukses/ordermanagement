@@ -1,6 +1,7 @@
 const { Worker } = require('bullmq');
 const { handleSync }      = require('./services/syncDirect.js');
 const pdfService          = require('./services/pdf.js');
+const fulfillmentService  = require('./services/fulfillment.js');
 const prisma              = require('./prisma/client.js');
 const { connection }      = require('./services/queue.js');
 const path = require('path');
@@ -37,6 +38,23 @@ async function handlePrintBatch(job) {
     throw new Error(`No orders found in batch ${batchId}`);
   }
 
+  // Re-check the KB §7.3 printing window. The route already validated this at
+  // enqueue time, but a queued batch can sit long enough for the 3PL to collect
+  // the parcel in the meantime, and a label printed after that is worthless.
+  const notPrintable = orders
+    .map((o) => ({ order: o, check: fulfillmentService.checkAwbPrintable(o) }))
+    .filter((x) => !x.check.ok);
+
+  if (notPrintable.length > 0) {
+    const detail = notPrintable.map((x) => `${x.order.orderId} (${x.check.reason})`).join(', ');
+    await prisma.printBatch.update({
+      where: { id: batchId },
+      data: { status: 'FAILED' },
+    });
+    // Non-retryable: waiting will not move these packages back into the window
+    throw new Error(`Batch ${batchId} no longer printable: ${detail}`);
+  }
+
   // Parse items (stored as JSON string in DB) before generating PDF
   const ordersWithItems = orders.map((o) => {
     let items = o.items;
@@ -46,8 +64,9 @@ async function handlePrintBatch(job) {
     return { ...o, items: Array.isArray(items) ? items : [] };
   });
 
-  // Generate batch PDF
-  const pdfBuffer = await pdfService.generateBatchPdf(ordersWithItems);
+  // Generate batch PDF, enriched with Shopee's AWB routing data (KB §5 step 7a)
+  const awbDataMap = await fulfillmentService.fetchAwbDataForRows(orders);
+  const pdfBuffer = await pdfService.generateBatchPdf(ordersWithItems, awbDataMap);
 
   // Save PDF to disk
   const pdfDir = path.resolve('./storage/pdfs');

@@ -4,6 +4,7 @@ const prisma = require('../prisma/client.js');
 const { syncQueue, isRedisReady } = require('../services/queue.js');
 const { authenticate } = require('../middleware/auth.js');
 const pdfService = require('../services/pdf.js');
+const fulfillmentService = require('../services/fulfillment.js');
 
 // All order routes require auth
 router.use(authenticate);
@@ -264,11 +265,15 @@ router.post('/batch-select', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Some orders not found' });
     }
 
-    const noTracking = orders.filter((o) => !o.trackingNumber);
-    if (noTracking.length > 0) {
+    const notPrintable = orders
+      .map((o) => ({ order: o, check: fulfillmentService.checkAwbPrintable(o) }))
+      .filter((x) => !x.check.ok);
+
+    if (notPrintable.length > 0) {
       return res.status(400).json({
         success: false,
-        error: `${noTracking.length} order(s) missing tracking number`,
+        error: `${notPrintable.length} order(s) cannot be selected: ` +
+          notPrintable.map((x) => `${x.order.orderId} (${x.check.reason})`).join(', '),
       });
     }
 
@@ -357,6 +362,10 @@ router.post('/print-details', async (req, res) => {
       return {
         id: o.id,
         orderId: o.orderId,
+        // A split order yields several rows sharing one orderId; the package
+        // number is what tells them apart on the packing bench.
+        packageNumber: o.packageNumber || '',
+        logisticsStatus: o.logisticsStatus || null,
         storeId: o.storeId,
         storeName: o.store?.name || 'Toko',
         platform: o.store?.platform || 'SHOPEE',
@@ -410,13 +419,20 @@ router.post('/print', async (req, res) => {
       return res.status(404).json({ success: false, error: 'No orders found' });
     }
 
-    // Validate: all orders must have tracking numbers
-    const noTracking = orders.filter((o) => !o.trackingNumber);
-    if (noTracking.length > 0 && !reprint) {
-      return res.status(400).json({
-        success: false,
-        error: `${noTracking.length} order(s) missing tracking number`,
-      });
+    // Validate: still inside the label printing window (KB §7.3). Skipped for
+    // an explicit reprint of labels already issued.
+    if (!reprint) {
+      const notPrintable = orders
+        .map((o) => ({ order: o, check: fulfillmentService.checkAwbPrintable(o) }))
+        .filter((x) => !x.check.ok);
+
+      if (notPrintable.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: `${notPrintable.length} order(s) cannot be printed: ` +
+            notPrintable.map((x) => `${x.order.orderId} (${x.check.reason})`).join(', '),
+        });
+      }
     }
 
     // Parse items for each order
@@ -428,8 +444,11 @@ router.post('/print', async (req, res) => {
       return { ...o, items: Array.isArray(items) ? items : [] };
     });
 
+    // Enrich with Shopee's own AWB routing data where available (KB §5 step 7a)
+    const awbDataMap = await fulfillmentService.fetchAwbDataForRows(orders);
+
     // Generate batch PDF
-    const pdfBuffer = await pdfService.generateBatchPdf(ordersWithItems);
+    const pdfBuffer = await pdfService.generateBatchPdf(ordersWithItems, awbDataMap);
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="resi-${new Date().toISOString().slice(0, 10)}.pdf"`);
@@ -466,5 +485,187 @@ router.post('/mark-printed', async (req, res) => {
     return res.status(500).json({ success: false, error: 'Failed to mark orders as printed' });
   }
 });
+
+// ── Fulfillment (Shopee write operations) ─────────────────────────────────────
+//
+// Every handler below reaches out to Shopee and re-reads the live order before
+// acting (KB Rule #1), so they are deliberately not batched into the generic
+// update endpoints.
+
+/**
+ * Confirm the caller may act on this order row, and return it.
+ * STAFF are limited to the stores they have been granted.
+ */
+async function loadAccessibleOrder(user, orderRowId) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderRowId },
+    select: { id: true, storeId: true, orderId: true },
+  });
+
+  if (!order) {
+    const err = new Error('Order not found');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  if (user.role === 'STAFF') {
+    const access = await prisma.storeAccess.findFirst({
+      where: { userId: user.id, storeId: order.storeId },
+    });
+    if (!access) {
+      const err = new Error('No access to this store');
+      err.statusCode = 403;
+      throw err;
+    }
+  }
+
+  return order;
+}
+
+/** Same check for a set of rows, used by the batch endpoints. */
+async function assertAccessibleOrders(user, orderRowIds) {
+  if (user.role !== 'STAFF') return;
+
+  const rows = await prisma.order.findMany({
+    where: { id: { in: orderRowIds } },
+    select: { storeId: true },
+  });
+
+  const access = await prisma.storeAccess.findMany({
+    where: { userId: user.id },
+    select: { storeId: true },
+  });
+  const allowed = new Set(access.map(a => a.storeId));
+
+  const denied = rows.filter(r => !allowed.has(r.storeId));
+  if (denied.length > 0) {
+    const err = new Error(`No access to ${denied.length} of the selected order(s)`);
+    err.statusCode = 403;
+    throw err;
+  }
+}
+
+/**
+ * Wrap a fulfillment handler so service-level errors keep their intended HTTP
+ * status instead of collapsing into a generic 500.
+ */
+function fulfillmentRoute(label, handler) {
+  return async (req, res) => {
+    try {
+      const data = await handler(req);
+      return res.json({ success: true, data });
+    } catch (err) {
+      const status = err.statusCode || 500;
+      if (status >= 500) console.error(`${label} error:`, err);
+      else console.warn(`${label} rejected: ${err.message}`);
+      return res.status(status).json({ success: false, error: err.message || label + ' failed' });
+    }
+  };
+}
+
+/**
+ * POST /ship-mass - Arrange shipment for many packages at once
+ * Body: { ids: string[], mode?, modeData? }
+ */
+router.post('/ship-mass', fulfillmentRoute('Mass ship', async (req) => {
+  const { ids, mode, modeData } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    const err = new Error('ids must be a non-empty array');
+    err.statusCode = 400;
+    throw err;
+  }
+  await assertAccessibleOrders(req.user, ids);
+  return fulfillmentService.massArrangeShipment(ids, { mode, modeData, userId: req.user.id });
+}));
+
+/**
+ * GET /:id/shipping-options - Modes, pickup addresses and time slots
+ */
+router.get('/:id/shipping-options', fulfillmentRoute('Shipping options', async (req) => {
+  await loadAccessibleOrder(req.user, req.params.id);
+  return fulfillmentService.getShippingOptions(req.params.id);
+}));
+
+/**
+ * POST /:id/ship - Arrange shipment for one package
+ * Body: { mode?, modeData? }
+ */
+router.post('/:id/ship', fulfillmentRoute('Ship', async (req) => {
+  await loadAccessibleOrder(req.user, req.params.id);
+  const { mode, modeData } = req.body || {};
+  return fulfillmentService.arrangeShipment(req.params.id, { mode, modeData, userId: req.user.id });
+}));
+
+/**
+ * POST /:id/retry-ship - Re-arrange a failed pickup (status RETRY_SHIP)
+ * Body: { addressId, pickupTimeId }
+ */
+router.post('/:id/retry-ship', fulfillmentRoute('Retry ship', async (req) => {
+  await loadAccessibleOrder(req.user, req.params.id);
+  const { addressId, pickupTimeId } = req.body || {};
+  return fulfillmentService.retryShipment(req.params.id, { addressId, pickupTimeId });
+}));
+
+/**
+ * POST /:id/cancel - Seller-initiated cancellation
+ * Body: { reason: 'OUT_OF_STOCK' | 'UNDELIVERABLE_AREA', itemList? }
+ */
+router.post('/:id/cancel', fulfillmentRoute('Cancel', async (req) => {
+  await loadAccessibleOrder(req.user, req.params.id);
+  const { reason, itemList } = req.body || {};
+  return fulfillmentService.cancelOrder(req.params.id, { reason, itemList });
+}));
+
+/**
+ * POST /:id/handle-cancellation - Approve or reject a buyer's cancel request
+ * Body: { operation: 'ACCEPT' | 'REJECT' }
+ */
+router.post('/:id/handle-cancellation', fulfillmentRoute('Handle cancellation', async (req) => {
+  await loadAccessibleOrder(req.user, req.params.id);
+  const { operation } = req.body || {};
+  return fulfillmentService.respondToCancellation(req.params.id, operation);
+}));
+
+/**
+ * GET /:id/split-options - Items and the grouping rules limiting a split
+ */
+router.get('/:id/split-options', fulfillmentRoute('Split options', async (req) => {
+  await loadAccessibleOrder(req.user, req.params.id);
+  return fulfillmentService.getSplitOptions(req.params.id);
+}));
+
+/**
+ * POST /:id/split - Divide the order into packages
+ * Body: { packages: [{ items: [{ itemId, modelId, orderItemId, promotionGroupId, addOnDealId }] }] }
+ */
+router.post('/:id/split', fulfillmentRoute('Split order', async (req) => {
+  await loadAccessibleOrder(req.user, req.params.id);
+  const { packages } = req.body || {};
+  return fulfillmentService.splitOrder(req.params.id, packages);
+}));
+
+/**
+ * POST /:id/unsplit - Merge a split order back into one package
+ */
+router.post('/:id/unsplit', fulfillmentRoute('Unsplit order', async (req) => {
+  await loadAccessibleOrder(req.user, req.params.id);
+  return fulfillmentService.unsplitOrder(req.params.id);
+}));
+
+/**
+ * POST /:id/refresh-tracking - Pull the tracking number on demand
+ */
+router.post('/:id/refresh-tracking', fulfillmentRoute('Refresh tracking', async (req) => {
+  await loadAccessibleOrder(req.user, req.params.id);
+  return fulfillmentService.refreshTracking(req.params.id);
+}));
+
+/**
+ * GET /:id/tracking-info - 3PL event history
+ */
+router.get('/:id/tracking-info', fulfillmentRoute('Tracking info', async (req) => {
+  await loadAccessibleOrder(req.user, req.params.id);
+  return fulfillmentService.getTrackingEvents(req.params.id);
+}));
 
 module.exports = router;

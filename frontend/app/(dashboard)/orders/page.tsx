@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import api from '@/lib/api'
+import OrderActions from '@/components/OrderActions'
 import {
   RefreshCw,
   Search,
@@ -12,12 +13,15 @@ import {
   Loader2,
   Package,
   Filter,
+  Truck,
+  FileDown,
   X,
 } from 'lucide-react'
 
 interface Order {
   id: string
   orderId: string
+  packageNumber?: string
   storeId: string
   storeName: string
   platform: 'SHOPEE' | 'TIKTOK'
@@ -25,6 +29,8 @@ interface Order {
   courier: string
   trackingNumber?: string
   status: string
+  logisticsStatus?: string | null
+  awbFetchedAt?: string | null
   printed: boolean
   createdAt: string
 }
@@ -53,9 +59,36 @@ const statusBadgeClass: Record<string, string> = {
   PENDING: 'badge-pending',
   PROCESSING: 'badge-processing',
   READY_TO_SHIP: 'badge-ready-to-ship',
+  PROCESSED: 'badge-processing',
+  RETRY_SHIP: 'badge-pending',
+  IN_CANCEL: 'badge-pending',
   SHIPPED: 'badge-shipped',
   CANCELLED: 'badge-cancelled',
 }
+
+/**
+ * Short Indonesian label for a Shopee fulfillment status (KB §3.2). Shown
+ * alongside the order status because it — not the order status — is what
+ * decides whether a label may still be printed.
+ */
+const logisticsLabel: Record<string, string> = {
+  LOGISTICS_NOT_START: 'Belum siap',
+  LOGISTICS_READY: 'Siap diatur',
+  LOGISTICS_REQUEST_CREATED: 'Pengiriman diatur',
+  LOGISTICS_PICKUP_DONE: 'Sudah dijemput',
+  LOGISTICS_PICKUP_RETRY: 'Pickup gagal, perlu ulang',
+  LOGISTICS_PICKUP_FAILED: 'Pickup gagal',
+  LOGISTICS_DELIVERY_DONE: 'Terkirim',
+  LOGISTICS_DELIVERY_FAILED: 'Gagal kirim',
+  LOGISTICS_INVALID: 'Dibatalkan',
+  LOGISTICS_REQUEST_CANCELED: 'Pengiriman dibatalkan',
+  LOGISTICS_LOST: 'Paket hilang',
+  LOGISTICS_PENDING_ARRANGE: 'Menunggu diatur',
+  LOGISTICS_COD_REJECTED: 'COD ditolak',
+}
+
+/** Fulfillment states in which the AWB may still be printed (KB §7.3). */
+const PRINTABLE_LOGISTICS = new Set(['LOGISTICS_REQUEST_CREATED', 'LOGISTICS_PICKUP_RETRY'])
 
 const platformBadgeClass: Record<string, string> = {
   SHOPEE: 'badge-shopee',
@@ -73,6 +106,8 @@ export default function OrdersPage() {
   const [syncing, setSyncing] = useState(false)
   const [stores, setStores] = useState<Store[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkMessage, setBulkMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   // Filters
   const [printFilter, setPrintFilter] = useState<PrintFilter>(
@@ -121,6 +156,9 @@ export default function OrdersPage() {
         storeName: o.storeName || o.store?.name || 'Toko',
         platform: o.platform || o.store?.platform || 'SHOPEE',
         courier: o.courier || o.shippingCourier || '-',
+        packageNumber: o.packageNumber || '',
+        logisticsStatus: o.logisticsStatus ?? null,
+        awbFetchedAt: o.awbFetchedAt ?? null,
         printed: o.printed !== undefined ? o.printed : Boolean(o.printedAt),
       }))
 
@@ -177,10 +215,26 @@ export default function OrdersPage() {
     router.push(`/orders?${params.toString()}`)
   }
 
+  /**
+   * Printable means: has a tracking number and the fulfillment status is still
+   * inside the KB §7.3 window. Rows whose fulfillment status is unknown
+   * (TikTok, or synced before the column existed) fall back to the tracking
+   * number alone.
+   */
+  const isPrintable = (order: Order) => {
+    if (order.printed) return false
+    if (!order.trackingNumber) return false
+    if (order.logisticsStatus) return PRINTABLE_LOGISTICS.has(order.logisticsStatus)
+    return true
+  }
+
+  /** Shippable means Shopee still accepts a ship_order for this package. */
+  const isShippable = (order: Order) =>
+    order.platform === 'SHOPEE' && ['READY_TO_SHIP', 'RETRY_SHIP'].includes(order.status)
+
   const isCheckboxEnabled = (order: Order) => {
-    if (printFilter === 'belum') return !!order.trackingNumber
     if (printFilter === 'sudah') return false
-    return !order.printed
+    return isPrintable(order) || isShippable(order)
   }
 
   const toggleSelect = (orderId: string) => {
@@ -206,14 +260,94 @@ export default function OrdersPage() {
 
   const selectedOrders = orders.filter((o) => selected.has(o.id))
   const selectedPlatforms = new Set(selectedOrders.map((o) => o.platform))
-  const shopeeCount = selectedOrders.filter((o) => o.platform === 'SHOPEE').length
-  const tiktokCount = selectedOrders.filter((o) => o.platform === 'TIKTOK').length
+  const shopeeCount = selectedOrders.filter((o) => o.platform === 'SHOPEE' && isPrintable(o)).length
+  const tiktokCount = selectedOrders.filter((o) => o.platform === 'TIKTOK' && isPrintable(o)).length
+
+  const shippableSelected = selectedOrders.filter(isShippable)
+  const awbSelected = selectedOrders.filter((o) => o.platform === 'SHOPEE' && isPrintable(o))
+  // One AWB request covers a single shop, so the button is only meaningful when
+  // the selection has not spread across stores.
+  const awbStoreIds = new Set(awbSelected.map((o) => o.storeId))
 
   const handlePrint = (platformFilter: string) => {
     const ids = selectedOrders
-      .filter((o) => o.platform === platformFilter)
+      .filter((o) => o.platform === platformFilter && isPrintable(o))
       .map((o) => o.id)
     router.push(`/print?ids=${ids.join(',')}`)
+  }
+
+  /** Pull a readable message out of an error whose body may be a Blob. */
+  const readError = async (err: any): Promise<string> => {
+    const body = err?.response?.data
+    if (body instanceof Blob) {
+      try {
+        return JSON.parse(await body.text())?.error || 'Gagal memproses permintaan'
+      } catch {
+        return 'Gagal memproses permintaan'
+      }
+    }
+    return body?.error || err?.message || 'Gagal memproses permintaan'
+  }
+
+  const handleMassShip = async () => {
+    if (shippableSelected.length === 0) return
+    setBulkBusy(true)
+    setBulkMessage(null)
+    try {
+      const res = await api.post<any>('/orders/ship-mass', {
+        ids: shippableSelected.map((o) => o.id),
+      })
+      const shipped = res.data?.shipped?.length ?? 0
+      const failed = res.data?.failed ?? []
+
+      setBulkMessage({
+        type: failed.length > 0 ? 'error' : 'success',
+        text: failed.length > 0
+          ? `${shipped} pesanan dikirim, ${failed.length} ditolak Shopee: ` +
+            failed.map((f: any) => `${f.orderId} (${f.message || f.error})`).join(', ')
+          : `${shipped} pesanan berhasil diatur pengirimannya.`,
+      })
+
+      setSelected(new Set())
+      await fetchOrders()
+    } catch (err) {
+      setBulkMessage({ type: 'error', text: await readError(err) })
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
+  const handleDownloadAwb = async () => {
+    if (awbSelected.length === 0) return
+    setBulkBusy(true)
+    setBulkMessage(null)
+    try {
+      const res = await api.post('/print/awb', { ids: awbSelected.map((o) => o.id) }, {
+        responseType: 'blob',
+      })
+
+      // Shopee decides the format — pdf, html or zip (KB §7.2)
+      const disposition = res.headers?.['content-disposition'] || ''
+      const suggested = /filename="([^"]+)"/.exec(disposition)?.[1]
+      const blob = res.data as Blob
+
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = suggested || `awb-${Date.now()}`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(url)
+
+      setBulkMessage({ type: 'success', text: `AWB Shopee untuk ${awbSelected.length} paket berhasil diunduh.` })
+      setSelected(new Set())
+      await fetchOrders()
+    } catch (err) {
+      setBulkMessage({ type: 'error', text: await readError(err) })
+    } finally {
+      setBulkBusy(false)
+    }
   }
 
   const handleSearch = (e: React.FormEvent) => {
@@ -330,11 +464,14 @@ export default function OrdersPage() {
 
             <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1) }} className="input w-full lg:w-auto min-w-[140px]">
               <option value="">Semua Status</option>
-              <option value="PENDING">Pending</option>
-              <option value="PROCESSING">Diproses</option>
+              <option value="UNPAID">Belum Bayar</option>
               <option value="READY_TO_SHIP">Siap Kirim</option>
+              <option value="PROCESSED">Sudah Diatur</option>
+              <option value="RETRY_SHIP">Pickup Gagal</option>
               <option value="SHIPPED">Dikirim</option>
+              <option value="IN_CANCEL">Minta Batal</option>
               <option value="CANCELLED">Dibatalkan</option>
+              <option value="COMPLETED">Selesai</option>
             </select>
 
             <input
@@ -388,19 +525,20 @@ export default function OrdersPage() {
                 <th className="table-header">Kurir</th>
                 <th className="table-header">Status</th>
                 <th className="table-header">Tanggal</th>
+                <th className="table-header w-10">Aksi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-slate-700/60">
               {loading ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-16 text-center">
+                  <td colSpan={9} className="px-4 py-16 text-center">
                     <Loader2 className="w-8 h-8 animate-spin text-primary-600 mx-auto" />
                     <p className="text-sm text-gray-500 dark:text-slate-400 mt-2">Memuat pesanan...</p>
                   </td>
                 </tr>
               ) : orders.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-16 text-center">
+                  <td colSpan={9} className="px-4 py-16 text-center">
                     <Package className="w-12 h-12 text-gray-300 dark:text-slate-600 mx-auto mb-3" />
                     <p className="font-medium text-gray-900 dark:text-slate-200">Tidak ada pesanan</p>
                     <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">
@@ -438,6 +576,11 @@ export default function OrdersPage() {
                       </td>
                       <td className="table-cell font-mono text-sm font-medium text-gray-900 dark:text-slate-100">
                         {order.orderId}
+                        {order.packageNumber && (
+                          <p className="text-xs text-gray-400 dark:text-slate-500" title="Nomor paket">
+                            pkg {order.packageNumber}
+                          </p>
+                        )}
                       </td>
                       <td className="table-cell">{order.storeName}</td>
                       <td className="table-cell">
@@ -458,6 +601,11 @@ export default function OrdersPage() {
                         <span className={statusBadgeClass[order.status] || 'badge'}>
                           {order.status.replace(/_/g, ' ')}
                         </span>
+                        {order.logisticsStatus && (
+                          <p className="text-xs text-gray-400 dark:text-slate-500 mt-1">
+                            {logisticsLabel[order.logisticsStatus] || order.logisticsStatus}
+                          </p>
+                        )}
                       </td>
                       <td className="table-cell text-gray-500 dark:text-slate-400">
                         {new Date(order.createdAt).toLocaleDateString('id-ID', {
@@ -465,6 +613,9 @@ export default function OrdersPage() {
                           month: 'short',
                           year: 'numeric',
                         })}
+                      </td>
+                      <td className="table-cell">
+                        <OrderActions order={order} onDone={fetchOrders} />
                       </td>
                     </tr>
                   )
@@ -517,10 +668,26 @@ export default function OrdersPage() {
         )}
       </div>
 
+      {/* Bulk action result */}
+      {bulkMessage && (
+        <div
+          className={`rounded-lg border px-4 py-3 text-sm flex items-start justify-between gap-4 ${
+            bulkMessage.type === 'success'
+              ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800 text-green-700 dark:text-green-300'
+              : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300'
+          }`}
+        >
+          <span>{bulkMessage.text}</span>
+          <button onClick={() => setBulkMessage(null)} className="shrink-0">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Selection Bar */}
       {selected.size > 0 && (
         <div className="fixed bottom-0 left-64 right-0 bg-white dark:bg-slate-800 border-t border-gray-200 dark:border-slate-700 shadow-lg px-6 py-4 z-20">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-4 flex-wrap">
             <div className="text-sm text-gray-700 dark:text-slate-300">
               <span className="font-semibold">{selected.size} pesanan</span> dipilih
               {selectedPlatforms.size > 0 && (
@@ -529,7 +696,32 @@ export default function OrdersPage() {
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
+              {shippableSelected.length > 0 && (
+                <button
+                  onClick={handleMassShip}
+                  disabled={bulkBusy}
+                  className="btn bg-shopee text-white hover:bg-orange-600"
+                >
+                  {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Truck className="w-4 h-4" />}
+                  Kirim Massal ({shippableSelected.length})
+                </button>
+              )}
+              {awbSelected.length > 0 && (
+                <button
+                  onClick={handleDownloadAwb}
+                  disabled={bulkBusy || awbStoreIds.size > 1}
+                  title={
+                    awbStoreIds.size > 1
+                      ? 'Satu permintaan AWB hanya boleh untuk satu toko'
+                      : 'Unduh AWB resmi dari Shopee'
+                  }
+                  className="btn-secondary"
+                >
+                  {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}
+                  AWB Shopee ({awbSelected.length})
+                </button>
+              )}
               {shopeeCount > 0 && (
                 <button onClick={() => handlePrint('SHOPEE')} className="btn bg-shopee text-white hover:bg-orange-600">
                   <Printer className="w-4 h-4" />

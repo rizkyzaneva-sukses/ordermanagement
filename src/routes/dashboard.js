@@ -8,7 +8,25 @@ const router = express.Router();
 router.use(authenticate);
 
 /**
- * GET /stats - Summary counts of orders
+ * Operational buckets, expressed in the statuses the platforms actually return.
+ *
+ * The previous version counted `PENDING` and `PROCESSING`, which Shopee never
+ * emits (its enum is in KB §2.1), so those tiles always read zero.
+ */
+const STAT_BUCKETS = {
+  toShip:         ['READY_TO_SHIP'],
+  awaitingPickup: ['PROCESSED'],
+  shipped:        ['SHIPPED', 'TO_CONFIRM_RECEIVE'],
+  // Both need a human: a failed pickup must be re-arranged, and an unanswered
+  // buyer cancellation is auto-approved once the window closes (KB §2.2).
+  needsAttention: ['RETRY_SHIP', 'IN_CANCEL'],
+  cancelled:      ['CANCELLED'],
+  unpaid:         ['UNPAID'],
+  completed:      ['COMPLETED'],
+};
+
+/**
+ * GET /stats - Summary counts of packages by operational bucket
  */
 router.get('/stats', async (req, res) => {
   try {
@@ -22,18 +40,27 @@ router.get('/stats', async (req, res) => {
       where.storeId = { in: access.map((a) => a.storeId) };
     }
 
-    const [pending, processing, shipped, cancelled] = await Promise.all([
-      prisma.order.count({ where: { ...where, status: 'PENDING' } }),
-      prisma.order.count({ where: { ...where, status: 'PROCESSING' } }),
-      prisma.order.count({ where: { ...where, status: 'SHIPPED' } }),
-      prisma.order.count({ where: { ...where, status: 'CANCELLED' } }),
-    ]);
-
-    return res.json({
-      success: true,
-      data: { pending, processing, shipped, cancelled },
+    // One grouped query instead of one COUNT per bucket
+    const grouped = await prisma.order.groupBy({
+      by: ['status'],
+      where,
+      _count: { id: true },
     });
+
+    const byStatus = {};
+    for (const row of grouped) byStatus[row.status] = row._count.id;
+
+    const data = {};
+    for (const [bucket, statuses] of Object.entries(STAT_BUCKETS)) {
+      data[bucket] = statuses.reduce((sum, s) => sum + (byStatus[s] || 0), 0);
+    }
+
+    // Raw per-status counts, so a status we have not bucketed is still visible
+    data.byStatus = byStatus;
+
+    return res.json({ success: true, data });
   } catch (err) {
+    console.error('GET /dashboard/stats error:', err);
     return res.status(500).json({ success: false, error: 'Failed to fetch dashboard stats' });
   }
 });
@@ -53,18 +80,31 @@ router.get('/stores', async (req, res) => {
       where.id = { in: access.map((a) => a.storeId) };
     }
 
-    const stores = await prisma.store.findMany({
-      where,
-      include: { _count: { select: { orders: true } } },
-    });
+    const stores = await prisma.store.findMany({ where });
 
-    const data = stores.map((store) => ({
-      id: store.id,
-      name: store.name,
-      platform: store.platform,
-      orderCount: store._count.orders,
-      status: 'ACTIVE',
-    }));
+    // An `orders` row is a package, so the relation count would overstate the
+    // number of orders for any shop with split parcels. Count both.
+    const tallies = await prisma.$queryRaw`
+      SELECT "storeId",
+             COUNT(DISTINCT "orderId")::int AS "orderCount",
+             COUNT(*)::int                  AS "packageCount"
+      FROM "orders"
+      GROUP BY "storeId"
+    `;
+
+    const byStore = new Map(tallies.map((t) => [t.storeId, t]));
+
+    const data = stores.map((store) => {
+      const tally = byStore.get(store.id);
+      return {
+        id: store.id,
+        name: store.name,
+        platform: store.platform,
+        orderCount: tally?.orderCount ?? 0,
+        packageCount: tally?.packageCount ?? 0,
+        status: 'ACTIVE',
+      };
+    });
 
     return res.json({ success: true, data });
   } catch (err) {

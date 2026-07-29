@@ -1,4 +1,31 @@
 const { PDFDocument, rgb, StandardFonts, degrees } = require('pdf-lib');
+const { drawCode128 } = require('./barcode.js');
+
+/**
+ * Fields worth surfacing from `get_shipping_document_data_info` (KB §5 step 7a).
+ *
+ * These are courier routing hints that cannot be derived from order data — the
+ * sort code in particular is what the hub uses to route the parcel, so a
+ * self-printed label without it is materially worse than the official AWB.
+ */
+const AWB_DATA_FIELDS = [
+  { keys: ['sort_code', 'sortCode'], label: 'SORT CODE', prominent: true },
+  { keys: ['routing_code', 'routingCode'], label: 'ROUTE', prominent: true },
+  { keys: ['dropoff_code', 'dropoffCode'], label: 'DROPOFF' },
+  { keys: ['first_mile_tracking_number', 'firstMileTrackingNumber'], label: 'FIRST MILE' },
+];
+
+/** Read the first present key from an AWB data payload. */
+function pickAwbField(awbData, keys) {
+  if (!awbData) return null;
+  for (const key of keys) {
+    const value = awbData[key];
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      return String(value).trim();
+    }
+  }
+  return null;
+}
 
 class PdfService {
   constructor() {
@@ -6,9 +33,16 @@ class PdfService {
     this.pageWidth = 283.46;   // 10cm
     this.pageHeight = 425.20;  // 15cm
     this.margin = 14;          // ~5mm
+    this.barcodeHeight = 32;
   }
 
-  async generateReceipt(order) {
+  /**
+   * Render a single shipping label.
+   *
+   * @param {Object} order
+   * @param {Object} [awbData] - Entry from get_shipping_document_data_info, when available
+   */
+  async generateReceipt(order, awbData) {
     const doc = await PDFDocument.create();
     const page = doc.addPage([this.pageWidth, this.pageHeight]);
     const font = await doc.embedFont(StandardFonts.Helvetica);
@@ -24,23 +58,66 @@ class PdfService {
     page.drawText(order.store?.name || 'Store', { x: leftX, y, font: boldFont, size: 10 });
     y -= 14;
     page.drawText(`[${order.store?.platform || 'SHOPEE'}]`, { x: leftX, y, font, size: 7, color: rgb(0.3, 0.3, 0.3) });
+
+    // Sort code goes top-right where hub staff expect it
+    const sortCode = pickAwbField(awbData, ['sort_code', 'sortCode']);
+    if (sortCode) {
+      const sortWidth = boldFont.widthOfTextAtSize(sortCode, 16);
+      page.drawText(sortCode, { x: rightX - sortWidth, y: y - 2, font: boldFont, size: 16 });
+    }
     y -= 16;
 
     // Separator line
     page.drawLine({ start: { x: leftX, y }, end: { x: rightX, y }, thickness: 0.5 });
-    y -= 20;
+    y -= 14;
 
-    // Tracking number (large, bold, scannable area)
-    page.drawText('NO. RESI:', { x: leftX, y, font, size: 7 });
-    y -= 16;
-    if (order.trackingNumber) {
-      page.drawText(order.trackingNumber, { x: leftX, y, font: boldFont, size: 14 });
+    // Order and package identity — a split order prints several near-identical
+    // labels, and the package number is the only thing telling them apart.
+    page.drawText(`Pesanan: ${order.orderId || '-'}`, { x: leftX, y, font, size: 7 });
+    y -= 10;
+    if (order.packageNumber) {
+      page.drawText(`Paket: ${order.packageNumber}`, { x: leftX, y, font, size: 7 });
+      y -= 10;
     }
-    y -= 24;
+    y -= 4;
+
+    // Tracking number + scannable barcode
+    page.drawText('NO. RESI:', { x: leftX, y, font, size: 7 });
+    y -= 13;
+    if (order.trackingNumber) {
+      page.drawText(order.trackingNumber, { x: leftX, y, font: boldFont, size: 12 });
+      y -= 6;
+
+      y -= this.barcodeHeight;
+      drawCode128(page, {
+        text: order.trackingNumber,
+        x: leftX,
+        y,
+        width: contentWidth,
+        height: this.barcodeHeight,
+        rgb,
+      });
+      y -= 12;
+    } else {
+      y -= 18;
+    }
+
+    // Remaining courier routing hints
+    const extraFields = AWB_DATA_FIELDS
+      .filter((f) => !f.prominent || f.label !== 'SORT CODE')
+      .map((f) => ({ ...f, value: pickAwbField(awbData, f.keys) }))
+      .filter((f) => f.value && f.label !== 'SORT CODE');
+
+    for (const field of extraFields) {
+      page.drawText(`${field.label}: ${field.value}`, {
+        x: leftX, y, font: field.prominent ? boldFont : font, size: field.prominent ? 9 : 7,
+      });
+      y -= field.prominent ? 12 : 10;
+    }
 
     // Separator
     page.drawLine({ start: { x: leftX, y }, end: { x: rightX, y }, thickness: 0.5 });
-    y -= 18;
+    y -= 14;
 
     // Recipient info
     page.drawText('KEPADA:', { x: leftX, y, font, size: 7 });
@@ -114,10 +191,17 @@ class PdfService {
     return doc.save();
   }
 
-  async generateBatchPdf(orders) {
+  /**
+   * Render one label per order into a single document.
+   *
+   * @param {Object[]} orders
+   * @param {Map<string, Object>} [awbDataMap] - Keyed by `${orderId}::${packageNumber}`
+   */
+  async generateBatchPdf(orders, awbDataMap) {
     const doc = await PDFDocument.create();
     for (const order of orders) {
-      const singlePageBytes = await this.generateReceipt(order);
+      const key = `${order.orderId}::${order.packageNumber || ''}`;
+      const singlePageBytes = await this.generateReceipt(order, awbDataMap?.get(key));
       const singleDoc = await PDFDocument.load(singlePageBytes);
       const [copiedPage] = await doc.copyPages(singleDoc, [0]);
       doc.addPage(copiedPage);

@@ -70,6 +70,174 @@ async function ensureFreshToken(store) {
   return newAccessToken;
 }
 
+// ── Shopee helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Build an index of order_sn → package numbers for everything not yet shipped.
+ *
+ * `search_package_list` is the KB-preferred entry point (Rule #4) and the only
+ * one that hands back `package_number`, which is what lets a split order be
+ * fulfilled and printed per package rather than as one lump.
+ *
+ * Failure here is not fatal: the caller still discovers orders through
+ * `get_order_list`, it just cannot address individual packages.
+ *
+ * @returns {Promise<Map<string, Set<string>>>}
+ */
+async function fetchShopeePackageIndex(accessToken, shopId) {
+  const index = new Map();
+
+  try {
+    // package_status 0 = All → NOT_START, READY, PICKUP_RETRY, REQUEST_CREATED (KB §3.1)
+    const packages = await shopeeService.getAllPackages(accessToken, shopId, 0);
+
+    for (const pkg of packages) {
+      if (!pkg.order_sn) continue;
+      if (!index.has(pkg.order_sn)) index.set(pkg.order_sn, new Set());
+      if (pkg.package_number) index.get(pkg.order_sn).add(String(pkg.package_number));
+    }
+
+    console.log(`[sync] search_package_list: ${packages.length} package(s) across ${index.size} order(s)`);
+  } catch (err) {
+    console.warn(`[sync] search_package_list failed, continuing without package numbers: ${err.message}`);
+  }
+
+  return index;
+}
+
+/**
+ * Expand one `get_order_detail` result into one row per package.
+ *
+ * KB §1: the package, not the order, is the shipping unit. When Shopee returns
+ * no package breakdown the order is treated as a single default package whose
+ * `packageNumber` is the empty string.
+ *
+ * @param {Object} order - An entry from get_order_detail's order_list
+ * @param {Set<string>} [knownPackages] - Package numbers seen via search_package_list
+ * @returns {Object[]}
+ */
+function expandShopeeOrderToPackages(order, knownPackages) {
+  const baseItems = (order.item_list || []).map(item => ({
+    name:     item.item_name,
+    quantity: item.model_quantity_purchased || 1,
+    price:    item.model_discounted_price || item.item_price || 0,
+    itemId:   item.item_id,
+    modelId:  item.model_id,
+    // Needed to build a split_order payload and to detect items that may not be
+    // separated: same orderItemId = bundle deal, same addOnDealId = add-on (KB §6.3)
+    orderItemId:      item.order_item_id,
+    promotionGroupId: item.promotion_group_id,
+    addOnDealId:      item.add_on_deal_id,
+  }));
+
+  const common = {
+    orderId:         order.order_sn,
+    buyerName:       order.recipient_address?.name || order.buyer_username || 'Unknown',
+    buyerAddress:    order.recipient_address?.full_address || '',
+    buyerPhone:      order.recipient_address?.phone || '',
+    buyerCity:       order.recipient_address?.city || '',
+    buyerProvince:   order.recipient_address?.state || '',
+    buyerPostalCode: order.recipient_address?.zipcode || '',
+    buyerNote:       order.note || null,
+    paymentMethod:   order.payment_method || null,
+    status:          order.order_status || null,
+    orderDate:       new Date((order.create_time || Math.floor(Date.now() / 1000)) * 1000),
+  };
+
+  const packageList = Array.isArray(order.package_list) ? order.package_list : [];
+
+  if (packageList.length === 0) {
+    // No breakdown from the API — fall back to a package number we may already
+    // know from search_package_list, otherwise the default single package.
+    const fallbackPackage = knownPackages && knownPackages.size === 1
+      ? [...knownPackages][0]
+      : '';
+
+    return [{
+      ...common,
+      packageNumber:   fallbackPackage,
+      logisticsStatus: null,
+      logisticsChannelId: null,
+      shippingCourier: order.shipping_carrier || '',
+      shippingService: order.tracking_number ? 'REG' : '',
+      trackingNumber:  order.tracking_number || null,
+      items:           baseItems,
+    }];
+  }
+
+  return packageList.map((pkg, idx) => {
+    // Each package carries its own item subset; match it back to the richer
+    // order-level item data so names and prices survive.
+    const pkgItems = Array.isArray(pkg.item_list) && pkg.item_list.length > 0
+      ? pkg.item_list.map(pi => {
+        const match = baseItems.find(bi =>
+          bi.itemId === pi.item_id && (bi.modelId === pi.model_id || !pi.model_id));
+        return match || {
+          name:     pi.item_name || 'Product',
+          quantity: pi.model_quantity_purchased || pi.quantity || 1,
+          price:    0,
+          itemId:   pi.item_id,
+          modelId:  pi.model_id,
+        };
+      })
+      : baseItems;
+
+    return {
+      ...common,
+      packageNumber:   String(pkg.package_number || ''),
+      logisticsStatus: pkg.logistics_status || null,
+      logisticsChannelId: pkg.logistics_channel_id ?? null,
+      shippingCourier: pkg.shipping_carrier || order.shipping_carrier || '',
+      // Only a single-package order can safely inherit the order-level tracking
+      // number; for split orders it belongs to one specific package.
+      trackingNumber:  packageList.length === 1 ? (order.tracking_number || null) : null,
+      shippingService: (packageList.length === 1 && order.tracking_number) ? 'REG' : '',
+      items:           pkgItems,
+      _packageIndex:   idx,
+    };
+  });
+}
+
+/**
+ * Fill in tracking numbers that `get_order_detail` could not supply.
+ *
+ * Split orders report tracking per package, and a package can sit in
+ * `PROCESSED` for a while before the 3PL issues one at all (KB §9), so this is
+ * best-effort: rows keep a null tracking number and get picked up next sync.
+ *
+ * Mutates `rows` in place.
+ */
+async function backfillShopeeTracking(accessToken, shopId, rows) {
+  const needsTracking = rows.filter(r =>
+    !r.trackingNumber &&
+    r.packageNumber &&
+    ['PROCESSED', 'RETRY_SHIP', 'SHIPPED'].includes(r.status));
+
+  if (needsTracking.length === 0) return;
+
+  console.log(`[sync] Backfilling tracking numbers for ${needsTracking.length} package(s)`);
+
+  for (let i = 0; i < needsTracking.length; i += 50) {
+    const chunk = needsTracking.slice(i, i + 50);
+
+    try {
+      const resp = await shopeeService.getMassTrackingNumber(accessToken, shopId,
+        chunk.map(r => ({ order_sn: r.orderId, package_number: r.packageNumber })));
+
+      const results = resp.response?.success_list || resp.response?.order_list || [];
+      for (const result of results) {
+        if (!result.tracking_number) continue;
+        const row = chunk.find(r =>
+          r.orderId === result.order_sn &&
+          r.packageNumber === String(result.package_number || ''));
+        if (row) row.trackingNumber = result.tracking_number;
+      }
+    } catch (err) {
+      console.warn(`[sync] Mass tracking lookup failed for ${chunk.length} package(s): ${err.message}`);
+    }
+  }
+}
+
 // ── Core sync function ────────────────────────────────────────────────────────
 
 /**
@@ -92,50 +260,108 @@ async function syncStore(storeId) {
   let orders = [];
 
   if (store.platform === 'SHOPEE') {
-    const now           = Math.floor(Date.now() / 1000);
-    // Shopee API max time range is 15 days
+    const now            = Math.floor(Date.now() / 1000);
+    // Shopee API max time range is 15 days per request
     const fifteenDaysAgo = now - 15 * 24 * 60 * 60;
 
-    const orderListResp = await shopeeService.getOrderList(accessToken, shopId, {
-      orderStatus: 'READY_TO_SHIP',
-      timeFrom:    fifteenDaysAgo,
-      timeTo:      now,
-      pageSize:    100,
-    });
+    // Fetch multiple statuses in parallel — Shopee only supports one status per call
+    // Based on KB: READY_TO_SHIP = no tracking yet, PROCESSED = may have tracking,
+    // SHIPPED = has tracking (courier scanned AWB), RETRY_SHIP = pickup failed
+    const STATUSES_TO_FETCH = [
+      'READY_TO_SHIP',   // Paid, seller belum kirim
+      'PROCESSED',       // Seller sudah ship_order, tracking mungkin belum terbit
+      'SHIPPED',         // Kurir sudah scan AWB → pasti ada tracking number
+      'RETRY_SHIP',      // Pickup gagal, perlu atur ulang
+      'UNPAID',          // Belum bayar (opsional, untuk monitoring)
+    ];
 
-    console.log(`[sync] getOrderList raw response keys: ${Object.keys(orderListResp || {}).join(', ')}`);
-    console.log(`[sync] getOrderList response.order_list count: ${orderListResp?.response?.order_list?.length ?? 'undefined'}`);
+    // Pass 0: package numbers for everything still awaiting fulfillment.
+    // get_order_list is kept alongside it because search_package_list only
+    // covers pre-shipment packages — SHIPPED/UNPAID orders never appear there.
+    const packageIndex = await fetchShopeePackageIndex(accessToken, shopId);
 
-    const orderSns = (orderListResp.response?.order_list || []).map(o => o.order_sn);
-    console.log(`[sync] Found ${orderSns.length} READY_TO_SHIP orders in last 15 days`);
+    const allOrderSns = new Map(); // order_sn → order_status
+    packageIndex.forEach((_pkgs, orderSn) => allOrderSns.set(orderSn, null));
+
+    // Pass 1: fetch by create_time (orders created in last 15 days)
+    await Promise.all(STATUSES_TO_FETCH.map(async (orderStatus) => {
+      try {
+        const resp = await shopeeService.getOrderList(accessToken, shopId, {
+          orderStatus,
+          timeRangeField: 'create_time',
+          timeFrom: fifteenDaysAgo,
+          timeTo:   now,
+          pageSize: 100,
+        });
+        const list = resp.response?.order_list || [];
+        console.log(`[sync] create_time | Status ${orderStatus}: ${list.length} order(s)`);
+        list.forEach(o => allOrderSns.set(o.order_sn, o.order_status || orderStatus));
+      } catch (err) {
+        console.warn(`[sync] create_time | Could not fetch status ${orderStatus}: ${err.message}`);
+      }
+    }));
+
+    // Pass 2: fetch by update_time for PROCESSED & SHIPPED — catches orders created
+    // >15 days ago that just got tracking numbers or status updates
+    const UPDATE_STATUSES = ['PROCESSED', 'SHIPPED'];
+    await Promise.all(UPDATE_STATUSES.map(async (orderStatus) => {
+      try {
+        const resp = await shopeeService.getOrderList(accessToken, shopId, {
+          orderStatus,
+          timeRangeField: 'update_time',
+          timeFrom: fifteenDaysAgo,
+          timeTo:   now,
+          pageSize: 100,
+        });
+        const list = resp.response?.order_list || [];
+        console.log(`[sync] update_time | Status ${orderStatus}: ${list.length} order(s)`);
+        list.forEach(o => {
+          // Seeded-but-statusless entries come from search_package_list, so
+          // check the value rather than mere presence.
+          if (!allOrderSns.get(o.order_sn)) {
+            allOrderSns.set(o.order_sn, o.order_status || orderStatus);
+          }
+        });
+      } catch (err) {
+        console.warn(`[sync] update_time | Could not fetch status ${orderStatus}: ${err.message}`);
+      }
+    }));
+
+    const orderSns = [...allOrderSns.keys()];
+    console.log(`[sync] Total unique orders across all passes: ${orderSns.length}`);
+
 
     if (orderSns.length > 0) {
-      // Get full details — must request optional fields or Shopee returns minimal data
-      const detailResp = await shopeeService.getOrderDetail(accessToken, shopId, orderSns, {
-        response_optional_fields: 'item_list,recipient_address,shipping_carrier'
+      // Batch into groups of 50 (Shopee limit)
+      const chunks = [];
+      for (let i = 0; i < orderSns.length; i += 50) {
+        chunks.push(orderSns.slice(i, i + 50));
+      }
+
+      const allDetails = [];
+      for (const chunk of chunks) {
+        const detailResp = await shopeeService.getOrderDetail(accessToken, shopId, chunk);
+        const list = detailResp.response?.order_list || [];
+        console.log(`[sync] getOrderDetail chunk: ${list.length} orders returned`);
+        allDetails.push(...list);
+      }
+
+      // One row per package, not per order (KB §1)
+      orders = allDetails.flatMap(o => {
+        const rows = expandShopeeOrderToPackages(o, packageIndex.get(o.order_sn));
+        return rows.map(row => ({
+          ...row,
+          // Use actual status from Shopee, fallback to what we tracked in allOrderSns
+          status: row.status || allOrderSns.get(o.order_sn) || 'READY_TO_SHIP',
+        }));
       });
 
-      console.log(`[sync] getOrderDetail response order count: ${detailResp?.response?.order_list?.length ?? 'undefined'}`);
+      await backfillShopeeTracking(accessToken, shopId, orders);
 
-      orders = (detailResp.response?.order_list || []).map(o => ({
-        orderId:         o.order_sn,
-        buyerName:       o.buyer_username || o.recipient_address?.name || 'Unknown',
-        buyerAddress:    o.recipient_address?.full_address || '',
-        buyerPhone:      o.recipient_address?.phone || '',
-        buyerCity:       o.recipient_address?.city || '',
-        buyerProvince:   o.recipient_address?.state || '',
-        buyerPostalCode: o.recipient_address?.zipcode || '',
-        items: (o.item_list || []).map(item => ({
-          name:     item.item_name,
-          quantity: item.model_quantity_purchased || 1,
-          price:    item.model_discounted_price || item.item_price || 0,
-        })),
-        shippingCourier: o.shipping_carrier || '',
-        shippingService: o.tracking_number ? 'REG' : '',
-        trackingNumber:  o.tracking_number || null,
-        status:          'READY_TO_SHIP',
-        orderDate:       new Date((o.create_time || now) * 1000),
-      }));
+      const splitCount = orders.length - allDetails.length;
+      if (splitCount > 0) {
+        console.log(`[sync] ${allDetails.length} order(s) expanded to ${orders.length} package row(s)`);
+      }
     }
   } else if (store.platform === 'TIKTOK') {
     const now           = Math.floor(Date.now() / 1000);
@@ -182,8 +408,12 @@ async function syncStore(storeId) {
   let updated = 0;
 
   for (const orderData of orders) {
-    const existing = await prisma.order.findFirst({
-      where: { orderId: orderData.orderId, storeId },
+    const packageNumber = orderData.packageNumber || '';
+
+    const existing = await prisma.order.findUnique({
+      where: {
+        storeId_orderId_packageNumber: { storeId, orderId: orderData.orderId, packageNumber },
+      },
     });
 
     if (existing) {
@@ -191,9 +421,15 @@ async function syncStore(storeId) {
         where: { id: existing.id },
         data: {
           status:          orderData.status,
+          // Never let a later sync blank out a tracking number or fulfillment
+          // state we already have — Shopee omits them while the 3PL catches up.
+          logisticsStatus: orderData.logisticsStatus ?? existing.logisticsStatus,
+          logisticsChannelId: orderData.logisticsChannelId ?? existing.logisticsChannelId,
           trackingNumber:  orderData.trackingNumber || existing.trackingNumber,
           shippingCourier: orderData.shippingCourier || existing.shippingCourier,
           items:           JSON.stringify(Array.isArray(orderData.items) ? orderData.items : []),
+          buyerNote:       orderData.buyerNote    ?? existing.buyerNote,
+          paymentMethod:   orderData.paymentMethod ?? existing.paymentMethod,
         },
       });
       updated++;
@@ -202,16 +438,21 @@ async function syncStore(storeId) {
         data: {
           orderId:         orderData.orderId,
           storeId,
+          packageNumber,
           buyerName:       orderData.buyerName,
           buyerAddress:    orderData.buyerAddress,
           buyerPhone:      orderData.buyerPhone,
           buyerCity:       orderData.buyerCity,
           buyerProvince:   orderData.buyerProvince,
           buyerPostalCode: orderData.buyerPostalCode,
+          buyerNote:       orderData.buyerNote    || null,
+          paymentMethod:   orderData.paymentMethod || null,
           items:           JSON.stringify(Array.isArray(orderData.items) ? orderData.items : []),
           shippingCourier: orderData.shippingCourier,
           shippingService: orderData.shippingService,
           trackingNumber:  orderData.trackingNumber,
+          logisticsStatus: orderData.logisticsStatus || null,
+          logisticsChannelId: orderData.logisticsChannelId ?? null,
           status:          orderData.status,
           orderDate:       orderData.orderDate,
         },
@@ -219,6 +460,7 @@ async function syncStore(storeId) {
       created++;
     }
   }
+
 
   await prisma.store.update({
     where: { id: storeId },
@@ -237,4 +479,11 @@ async function handleSync(job) {
   return syncStore(job.data.storeId);
 }
 
-module.exports = { syncStore, handleSync, ensureFreshToken };
+module.exports = {
+  syncStore,
+  handleSync,
+  ensureFreshToken,
+  // Exported for testing: the package expansion is the one transformation here
+  // that silently changes row counts, so it is worth exercising directly.
+  expandShopeeOrderToPackages,
+};
