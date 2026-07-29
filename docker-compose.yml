@@ -54,11 +54,11 @@ services:
   worker:
     build: .
     restart: unless-stopped
-    command: node src/worker.js
     env_file:
       - .env
     environment:
       NODE_ENV: production
+      PROCESS_ROLE: worker
       DATABASE_URL: postgresql://orderpro:***@db:5432/orderpro
       REDIS_URL: redis://redis:6379
     depends_on:

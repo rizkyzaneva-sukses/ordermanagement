@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const prisma = require('../prisma/client.js');
 const pdfService = require('../services/pdf.js');
-const { printQueue, isRedisReady } = require('../services/queue.js');
+const { printQueue, hasQueueWorkers } = require('../services/queue.js');
 const { authenticate } = require('../middleware/auth.js');
 const fulfillmentService = require('../services/fulfillment.js');
 
@@ -107,8 +107,12 @@ router.post('/batch', async (req, res) => {
     const platform = [...platforms][0];
     const storeIds = [...new Set(orders.map((o) => o.storeId))];
 
-    // ── Redis available → async via BullMQ ────────────────────────────────────
-    if (isRedisReady()) {
+    // ── A worker is listening → async via BullMQ ──────────────────────────────
+    //
+    // Checking the queue has a consumer, not merely that Redis is up: with no
+    // worker the batch would be accepted, marked PENDING, and never produce a
+    // PDF — the same silent failure that used to affect sync.
+    if (await hasQueueWorkers(printQueue)) {
       const batch = await prisma.printBatch.create({
         data: {
           userId: req.user.id,
@@ -139,8 +143,8 @@ router.post('/batch', async (req, res) => {
       });
     }
 
-    // ── Redis unavailable → generate PDF inline (synchronous fallback) ────────
-    console.warn('[print/batch] Redis not available — generating PDF inline');
+    // ── No worker (or no Redis) → generate the PDF inline ─────────────────────
+    console.warn('[print/batch] No print worker available — generating PDF inline');
 
     const ordersWithItems = orders.map((o) => {
       let items = o.items;

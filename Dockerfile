@@ -45,6 +45,16 @@ COPY --from=frontend-build /app/frontend/out ./frontend/out
 COPY package.json ./
 COPY prisma ./prisma/
 COPY src ./src/
+COPY scripts/docker-entrypoint.sh ./scripts/docker-entrypoint.sh
+RUN chmod +x ./scripts/docker-entrypoint.sh
+
+# Create the storage tree *inside the image*, before ownership is fixed below.
+#
+# This matters when /app/storage is a mounted volume: Docker seeds an empty
+# named volume from whatever the image has at that path, including ownership.
+# Without this the volume would be created root-owned and the non-root process
+# could not write batch PDFs or air waybills into it (EACCES).
+RUN mkdir -p /app/storage/pdfs /app/storage/awb
 
 # Create non-root user
 RUN addgroup -g 1001 -S appgroup && \
@@ -55,6 +65,7 @@ USER appuser
 
 EXPOSE 80
 
-# Run migrations then start the server
+# One image, two roles — selected with PROCESS_ROLE (api | worker).
+# See scripts/docker-entrypoint.sh.
 ENTRYPOINT ["tini", "--"]
-CMD ["sh", "-c", "npx prisma migrate deploy && node src/server.js"]
+CMD ["sh", "./scripts/docker-entrypoint.sh"]
