@@ -29,12 +29,21 @@ interface StoreInfo {
   orderCount: number
   packageCount: number
   status: 'ACTIVE' | 'EXPIRED' | 'ERROR'
+  tokenExpiry: string | null
+  lastSyncAt: string | null
+  lastSyncError: string | null
 }
 
 const statusColors: Record<string, string> = {
   ACTIVE: 'bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-300',
   EXPIRED: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-950/60 dark:text-yellow-300',
   ERROR: 'bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300',
+}
+
+const statusLabels: Record<string, string> = {
+  ACTIVE: 'AKTIF',
+  EXPIRED: 'PERLU HUBUNGKAN ULANG',
+  ERROR: 'SYNC GAGAL',
 }
 
 export default function DashboardPage() {
@@ -179,8 +188,16 @@ export default function DashboardPage() {
                         {store.platform}
                       </span>
                       <span className={`badge ${statusColors[store.status]}`}>
-                        {store.status}
+                        {statusLabels[store.status] || store.status}
                       </span>
+                      {store.status === 'ACTIVE' && store.tokenExpiry && (
+                        <span className="text-xs text-gray-400 dark:text-slate-500">
+                          token s/d {new Date(store.tokenExpiry).toLocaleTimeString('id-ID', {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>

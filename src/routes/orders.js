@@ -82,9 +82,12 @@ router.get('/', async (req, res) => {
 
     // Print filter logic — accept both English ('unprinted'/'printed') and
     // Indonesian ('belum'/'sudah') values sent by the frontend
+    // "Not printed" means exactly that. It used to also require a tracking
+    // number, which hid every order still waiting on one — they appeared
+    // nowhere at all, since they fell outside the printed bucket too. They are
+    // shown now and simply cannot be selected for printing.
     if (printFilter === 'unprinted' || printFilter === 'belum') {
       where.printedAt = null;
-      where.trackingNumber = { not: null };
     } else if (printFilter === 'printed' || printFilter === 'sudah') {
       where.printedAt = { not: null };
     }
@@ -108,9 +111,13 @@ router.get('/', async (req, res) => {
       storeId: { in: (await prisma.storeAccess.findMany({ where: { userId: user.id }, select: { storeId: true } })).map(a => a.storeId) }
     } : {};
 
-    const [unprintedCount, printedCount] = await Promise.all([
-      prisma.order.count({ where: { ...baseFilter, printedAt: null, trackingNumber: { not: null } } }),
+    // `all` is counted, not derived: summing the two buckets silently dropped
+    // any order that fell outside both.
+    const [unprintedCount, printedCount, allCount, awaitingTrackingCount] = await Promise.all([
+      prisma.order.count({ where: { ...baseFilter, printedAt: null } }),
       prisma.order.count({ where: { ...baseFilter, printedAt: { not: null } } }),
+      prisma.order.count({ where: baseFilter }),
+      prisma.order.count({ where: { ...baseFilter, printedAt: null, trackingNumber: null } }),
     ]);
 
     return res.json({
@@ -123,7 +130,10 @@ router.get('/', async (req, res) => {
         counts: {
           unprinted: unprintedCount,
           printed: printedCount,
-          all: unprintedCount + printedCount,
+          all: allCount,
+          // Visible but not printable yet — the 3PL has not issued a tracking
+          // number, so the UI can explain why they cannot be selected.
+          awaitingTracking: awaitingTrackingCount,
         },
       },
     });

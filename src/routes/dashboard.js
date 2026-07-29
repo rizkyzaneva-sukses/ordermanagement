@@ -96,13 +96,26 @@ router.get('/stores', async (req, res) => {
 
     const data = stores.map((store) => {
       const tally = byStore.get(store.id);
+
+      // Was hardcoded to ACTIVE, so a shop whose token had expired still looked
+      // healthy — the one case where the badge actually needs to say something.
+      let status = 'ACTIVE';
+      if (store.needsReconnect) {
+        status = 'EXPIRED';
+      } else if (store.lastSyncStatus === 'ERROR') {
+        status = 'ERROR';
+      }
+
       return {
         id: store.id,
         name: store.name,
         platform: store.platform,
         orderCount: tally?.orderCount ?? 0,
         packageCount: tally?.packageCount ?? 0,
-        status: 'ACTIVE',
+        status,
+        tokenExpiry: store.tokenExpiry,
+        lastSyncAt: store.lastSyncAt,
+        lastSyncError: store.lastSyncError,
       };
     });
 

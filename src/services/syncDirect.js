@@ -12,63 +12,9 @@
  */
 
 const prisma         = require('../prisma/client.js');
-const { encrypt, decrypt } = require('../utils/crypto.js');
 const shopeeService  = require('./shopee.js');
 const tiktokService  = require('./tiktok.js');
-
-// ── Token refresh helper ───────────────────────────────────────────────────────
-
-const TOKEN_BUFFER_MINUTES = 5; // refresh if less than 5 min left
-
-async function ensureFreshToken(store) {
-  const now      = new Date();
-  const expiry   = store.tokenExpiry ? new Date(store.tokenExpiry) : new Date(0);
-  const minutesLeft = (expiry - now) / 60_000;
-
-  if (minutesLeft > TOKEN_BUFFER_MINUTES) {
-    console.log(`[token] Store ${store.id} token valid for ~${Math.floor(minutesLeft)} more minutes`);
-    return decrypt(store.accessToken);
-  }
-
-  console.log(`[token] Store ${store.id} token expiring soon (${minutesLeft.toFixed(1)} min left). Refreshing…`);
-
-  if (!store.refreshToken) {
-    throw new Error(`Store ${store.id}: token expired and no refresh token available. Please reconnect the store.`);
-  }
-
-  const refreshToken = decrypt(store.refreshToken);
-  let newAccessToken;
-  let newRefreshToken;
-
-  if (store.platform === 'SHOPEE') {
-    const result  = await shopeeService.refreshToken(refreshToken, store.shopId);
-    newAccessToken  = result.access_token;
-    newRefreshToken = result.refresh_token;
-  } else if (store.platform === 'TIKTOK') {
-    const result  = await tiktokService.refreshToken(refreshToken);
-    newAccessToken  = result.access_token;
-    newRefreshToken = result.refresh_token;
-  } else {
-    throw new Error(`Store ${store.id}: unsupported platform ${store.platform} for token refresh`);
-  }
-
-  if (!newAccessToken) {
-    throw new Error(`Store ${store.id}: refresh token call returned no access_token`);
-  }
-
-  const expiryHours = store.platform === 'TIKTOK' ? 24 : 4;
-  const updateData  = {
-    accessToken:  encrypt(newAccessToken),
-    tokenExpiry:  new Date(Date.now() + expiryHours * 60 * 60 * 1000),
-  };
-  if (newRefreshToken) {
-    updateData.refreshToken = encrypt(newRefreshToken);
-  }
-
-  await prisma.store.update({ where: { id: store.id }, data: updateData });
-  console.log(`[token] Store ${store.id} token refreshed successfully (new expiry: +${expiryHours}h)`);
-  return newAccessToken;
-}
+const { ensureFreshToken, isReconnectError } = require('./tokens.js');
 
 // ── Shopee helpers ────────────────────────────────────────────────────────────
 
@@ -208,9 +154,10 @@ function expandShopeeOrderToPackages(order, knownPackages) {
  * Mutates `rows` in place.
  */
 async function backfillShopeeTracking(accessToken, shopId, rows) {
+  // Note there is no `packageNumber` requirement here: a single-package order
+  // carries the empty string, and excluding it skipped exactly the common case.
   const needsTracking = rows.filter(r =>
     !r.trackingNumber &&
-    r.packageNumber &&
     ['PROCESSED', 'RETRY_SHIP', 'SHIPPED'].includes(r.status));
 
   if (needsTracking.length === 0) return;
@@ -222,20 +169,87 @@ async function backfillShopeeTracking(accessToken, shopId, rows) {
 
     try {
       const resp = await shopeeService.getMassTrackingNumber(accessToken, shopId,
-        chunk.map(r => ({ order_sn: r.orderId, package_number: r.packageNumber })));
+        chunk.map(r => ({ order_sn: r.orderId, package_number: r.packageNumber || undefined })));
 
-      const results = resp.response?.success_list || resp.response?.order_list || [];
-      for (const result of results) {
-        if (!result.tracking_number) continue;
+      for (const result of extractTrackingResults(resp)) {
         const row = chunk.find(r =>
           r.orderId === result.order_sn &&
-          r.packageNumber === String(result.package_number || ''));
+          (r.packageNumber || '') === String(result.package_number || ''));
         if (row) row.trackingNumber = result.tracking_number;
       }
     } catch (err) {
       console.warn(`[sync] Mass tracking lookup failed for ${chunk.length} package(s): ${err.message}`);
     }
   }
+
+  // Anything the batch call did not resolve is retried one at a time. The
+  // single-package endpoint has a simpler, better-known response shape, so this
+  // also covers the case where the batch response is shaped unexpectedly.
+  const stillMissing = needsTracking.filter(r => !r.trackingNumber);
+
+  if (stillMissing.length > 0) {
+    console.warn(`[sync] Mass lookup resolved ${needsTracking.length - stillMissing.length}/${needsTracking.length} — retrying ${stillMissing.length} individually`);
+
+    for (const row of stillMissing) {
+      try {
+        const resp = await shopeeService.getTrackingNumber(
+          accessToken, shopId, row.orderId, row.packageNumber || undefined);
+        const tracking = resp.response?.tracking_number;
+        if (tracking) row.trackingNumber = tracking;
+      } catch (err) {
+        console.warn(`[sync] Tracking lookup failed for ${row.orderId}: ${err.message}`);
+      }
+    }
+  }
+
+  const resolved = needsTracking.filter(r => r.trackingNumber).length;
+  console.log(`[sync] Tracking backfill: ${resolved}/${needsTracking.length} resolved`);
+
+  // A shipped package always has a tracking number upstream, so leaving one
+  // unresolved means our request or our reading of the response is wrong —
+  // worth saying out loud rather than silently storing null.
+  const shippedWithout = needsTracking.filter(r => !r.trackingNumber && r.status === 'SHIPPED');
+  if (shippedWithout.length > 0) {
+    console.error(`[sync] WARNING: ${shippedWithout.length} SHIPPED package(s) still have no tracking number — e.g. ${shippedWithout[0].orderId}. This usually means the tracking API response was not understood; run scripts/diagnose-shopee.js.`);
+  }
+}
+
+/**
+ * Pull tracking entries out of a `get_mass_tracking_number` response.
+ *
+ * The field holding the list is not documented in the KB, so rather than betting
+ * on one name we take the known candidates and, failing those, any array in the
+ * response whose items carry a tracking number.
+ *
+ * @param {Object} resp
+ * @returns {Array<{ order_sn: string, package_number?: string, tracking_number: string }>}
+ */
+function extractTrackingResults(resp) {
+  const response = resp?.response;
+  if (!response) return [];
+
+  const candidates = [
+    response.success_list,
+    response.order_list,
+    response.result_list,
+    response.tracking_number_list,
+  ];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.some(x => x?.tracking_number)) {
+      return candidate.filter(x => x?.tracking_number);
+    }
+  }
+
+  // Last resort: any array of objects that look like tracking entries
+  for (const value of Object.values(response)) {
+    if (Array.isArray(value) && value.some(x => x?.tracking_number && x?.order_sn)) {
+      console.warn('[sync] Tracking list found under an unexpected response key — please report this');
+      return value.filter(x => x?.tracking_number);
+    }
+  }
+
+  return [];
 }
 
 // ── Core sync function ────────────────────────────────────────────────────────
@@ -492,26 +506,6 @@ async function runStoreSync(storeId) {
 }
 
 /**
- * Error signatures that mean the merchant has to re-authorize.
- *
- * Shopee answers a dead or already-consumed refresh token with
- * `error_not_found`, which is indistinguishable from other 404s by status
- * alone. Retrying these is pointless until the shop is reconnected.
- */
-const RECONNECT_SIGNATURES = [
-  'error_not_found',
-  'invalid_refresh_token',
-  'invalid_access_token',
-  'error_auth',
-  'no refresh token available',
-];
-
-function needsReconnect(message = '') {
-  const lower = message.toLowerCase();
-  return RECONNECT_SIGNATURES.some(sig => lower.includes(sig));
-}
-
-/**
  * Sync a store and record the outcome on the store row.
  *
  * The result has to be persisted: when sync runs on the queue nobody is waiting
@@ -542,7 +536,7 @@ async function syncStore(storeId) {
     return result;
   } catch (err) {
     const message = err.message || String(err);
-    const reconnect = needsReconnect(message);
+    const reconnect = isReconnectError(message);
 
     console.error(`[sync] Store ${storeId} failed: ${message}${reconnect ? ' (needs reconnect)' : ''}`);
 
@@ -577,4 +571,7 @@ module.exports = {
   // Exported for testing: the package expansion is the one transformation here
   // that silently changes row counts, so it is worth exercising directly.
   expandShopeeOrderToPackages,
+  // Exported for testing: reads a response shape the KB does not document, so
+  // its tolerance for variation is worth pinning down.
+  extractTrackingResults,
 };

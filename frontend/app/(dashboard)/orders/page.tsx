@@ -129,6 +129,7 @@ export default function OrdersPage() {
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkMessage, setBulkMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
+  const [awaitingTracking, setAwaitingTracking] = useState(0)
 
   // Filters
   const [printFilter, setPrintFilter] = useState<PrintFilter>(
@@ -171,6 +172,7 @@ export default function OrdersPage() {
         sudahDicetak: rawCounts.printed ?? rawCounts.sudahDicetak ?? 0,
         semua: rawCounts.all ?? rawCounts.semua ?? ((rawCounts.unprinted || 0) + (rawCounts.printed || 0)),
       }
+      setAwaitingTracking(rawCounts.awaitingTracking ?? 0)
 
       const formattedOrders = rawOrders.map((o: any) => ({
         ...o,
@@ -503,6 +505,18 @@ export default function OrdersPage() {
           <p>
             Worker sync tidak berjalan. Sync manual tetap bekerja (dijalankan langsung di server), tapi sync
             otomatis tiap 15 menit tidak akan jalan sampai <code className="font-mono">npm run worker</code> dihidupkan.
+          </p>
+        </div>
+      )}
+
+      {/* Orders that exist but cannot be printed yet */}
+      {awaitingTracking > 0 && (
+        <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 px-4 py-3 text-sm text-slate-700 dark:text-slate-300 flex items-start gap-2">
+          <Package className="w-4 h-4 mt-0.5 shrink-0" />
+          <p>
+            <span className="font-semibold">{awaitingTracking} pesanan belum punya nomor resi</span> — kurir belum
+            menerbitkannya. Pesanan tetap ditampilkan, tapi belum bisa dicentang untuk dicetak. Gunakan
+            &ldquo;Ambil nomor resi&rdquo; di kolom Aksi, atau tunggu sync berikutnya.
           </p>
         </div>
       )}

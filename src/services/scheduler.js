@@ -16,6 +16,7 @@
 const prisma = require('../prisma/client.js');
 const { syncQueue, connection, isRedisReady } = require('./queue.js');
 const fulfillmentService = require('./fulfillment.js');
+const tokenService = require('./tokens.js');
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -105,6 +106,55 @@ async function removeStore(storeId) {
   }
 }
 
+// ── Token upkeep ──────────────────────────────────────────────────────────────
+
+// Shopee access tokens last 4 hours and refresh tokens 30 days, rotating on each
+// refresh. Checking twice as often as strictly needed means a missed tick (a
+// restart, a brief outage) never lets a token lapse.
+const TOKEN_CHECK_EVERY_MS    = (parseInt(process.env.TOKEN_REFRESH_CHECK_MINUTES, 10) || 30) * 60_000;
+const TOKEN_REFRESH_THRESHOLD = parseInt(process.env.TOKEN_REFRESH_THRESHOLD_MINUTES, 10) || 90;
+
+let tokenRefreshTimer = null;
+
+/**
+ * Keep every store's token chain alive.
+ *
+ * Without this, tokens are only refreshed when a sync happens to run — so a
+ * sync that has been broken for a month (say, because no worker was running)
+ * takes the 30-day refresh window down with it and the merchant is forced to
+ * re-authorize by hand. That is a recoverable outage turning into manual work.
+ *
+ * Runs on a plain timer, deliberately independent of Redis and the queue.
+ */
+function startTokenRefresh() {
+  if (tokenRefreshTimer) return;
+
+  const run = async () => {
+    try {
+      await tokenService.refreshExpiringTokens(TOKEN_REFRESH_THRESHOLD);
+    } catch (err) {
+      console.error('[scheduler] Token refresh sweep failed:', err.message);
+    }
+  };
+
+  run();
+  tokenRefreshTimer = setInterval(run, TOKEN_CHECK_EVERY_MS);
+  if (typeof tokenRefreshTimer.unref === 'function') tokenRefreshTimer.unref();
+
+  console.log(
+    `[scheduler] Token refresh scheduled every ${TOKEN_CHECK_EVERY_MS / 60_000} min ` +
+    `(refreshing anything expiring within ${TOKEN_REFRESH_THRESHOLD} min)`
+  );
+}
+
+/** Stop the token timer (used by tests and graceful shutdown). */
+function stopTokenRefresh() {
+  if (tokenRefreshTimer) {
+    clearInterval(tokenRefreshTimer);
+    tokenRefreshTimer = null;
+  }
+}
+
 // ── AWB housekeeping ──────────────────────────────────────────────────────────
 
 const AWB_RETENTION_DAYS  = parseInt(process.env.AWB_RETENTION_DAYS, 10) || 30;
@@ -154,8 +204,10 @@ function stopAwbCleanup() {
 async function start() {
   console.log(`[scheduler] Starting — sync interval: ${SYNC_INTERVAL_MS / 60_000} min`);
 
-  // Housekeeping runs on a plain timer, before the Redis gate below: disk fills
-  // up whether or not the queue is available.
+  // Both of these run on plain timers, before the Redis gate below. Token
+  // upkeep especially must not depend on the queue: a broken queue is exactly
+  // when tokens would otherwise be left to expire.
+  startTokenRefresh();
   startAwbCleanup();
 
   // Wait for Redis to be ready before registering jobs
@@ -225,5 +277,13 @@ function warnIfNoWorker() {
   if (typeof timer.unref === 'function') timer.unref();
 }
 
-module.exports = { start, addStore, removeStore, startAwbCleanup, stopAwbCleanup };
+module.exports = {
+  start,
+  addStore,
+  removeStore,
+  startTokenRefresh,
+  stopTokenRefresh,
+  startAwbCleanup,
+  stopAwbCleanup,
+};
 
