@@ -37,6 +37,14 @@ model Store {
   tokenExpiry   DateTime
   isActive      Boolean  @default(true)
   lastSyncAt    DateTime?
+  // Outcome of the most recent sync attempt. Without this a failed sync is only
+  // visible in worker logs, so the UI cannot tell "no orders" from "sync broke".
+  lastSyncStatus String?  // OK | ERROR
+  lastSyncError  String?
+  lastSyncAttemptAt DateTime?
+  // Set when the platform rejected our refresh token — the only fix is for the
+  // merchant to re-authorize, so retrying is pointless until they do.
+  needsReconnect Boolean @default(false)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 

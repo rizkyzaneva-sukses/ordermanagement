@@ -191,6 +191,38 @@ async function start() {
   }
 
   console.log('[scheduler] All repeatable sync jobs registered');
+
+  warnIfNoWorker();
+}
+
+/**
+ * Warn loudly when repeatable sync jobs are being queued with nothing consuming them.
+ *
+ * This is the failure mode where the API is started on its own (`npm start`)
+ * without `npm run worker`: every scheduled sync is accepted and silently
+ * accumulates in Redis, and the UI just shows no orders.
+ *
+ * Checked after a delay so a worker that is still booting is not misreported.
+ */
+function warnIfNoWorker() {
+  const CHECK_DELAY_MS = 30_000;
+
+  const timer = setTimeout(async () => {
+    try {
+      const workers = await syncQueue.getWorkers();
+      if (!workers || workers.length === 0) {
+        console.warn('[scheduler] ⚠ No sync worker is consuming the "order-sync" queue.');
+        console.warn('[scheduler] ⚠ Scheduled syncs will queue up and never run. Start it with: npm run worker');
+        console.warn('[scheduler] ⚠ (Manual syncs from the UI fall back to running in-process.)');
+      } else {
+        console.log(`[scheduler] ${workers.length} sync worker(s) connected`);
+      }
+    } catch (err) {
+      console.warn(`[scheduler] Could not check for sync workers: ${err.message}`);
+    }
+  }, CHECK_DELAY_MS);
+
+  if (typeof timer.unref === 'function') timer.unref();
 }
 
 module.exports = { start, addStore, removeStore, startAwbCleanup, stopAwbCleanup };

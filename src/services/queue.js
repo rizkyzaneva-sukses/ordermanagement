@@ -60,6 +60,31 @@ function isRedisReady() {
   return connection.status === 'ready';
 }
 
+/**
+ * True if at least one worker is currently consuming the given queue.
+ *
+ * Enqueuing when nothing is listening is indistinguishable from success at the
+ * API level — the job simply sits in Redis forever. Callers use this to decide
+ * whether to fall back to running the work in-process.
+ *
+ * Returns false on any error: assuming "no worker" is the safe direction, since
+ * the fallback path still gets the work done.
+ *
+ * @param {import('bullmq').Queue} queue
+ * @returns {Promise<boolean>}
+ */
+async function hasQueueWorkers(queue) {
+  if (!isRedisReady()) return false;
+
+  try {
+    const workers = await queue.getWorkers();
+    return Array.isArray(workers) && workers.length > 0;
+  } catch (err) {
+    console.warn(`[redis] Could not determine worker count for "${queue?.name}": ${err.message}`);
+    return false;
+  }
+}
+
 /** Attempt to connect (no-op if already connected/connecting). */
 async function connect() {
   if (connection.status === 'wait' || connection.status === 'end') {
@@ -79,4 +104,4 @@ connect();
 const syncQueue  = new Queue('order-sync',  { connection });
 const printQueue = new Queue('print-batch', { connection });
 
-module.exports = { syncQueue, printQueue, connection, isRedisReady, connect };
+module.exports = { syncQueue, printQueue, connection, isRedisReady, hasQueueWorkers, connect };

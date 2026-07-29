@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const prisma = require('../prisma/client.js');
-const { syncQueue, isRedisReady } = require('../services/queue.js');
+const { syncQueue, isRedisReady, hasQueueWorkers } = require('../services/queue.js');
 const { authenticate } = require('../middleware/auth.js');
 const pdfService = require('../services/pdf.js');
 const fulfillmentService = require('../services/fulfillment.js');
@@ -205,39 +205,115 @@ router.post('/sync', async (req, res) => {
       return res.json({ success: true, data: { message: 'No stores to sync', storesQueued: 0 } });
     }
 
-    // ── Redis available → enqueue via BullMQ ──────────────────────────────────
-    if (isRedisReady()) {
+    // ── Queue the work only if something is actually listening ────────────────
+    //
+    // Enqueuing with no worker running looks identical to success from here: the
+    // job sits in Redis untouched and the user sees an empty order list. So the
+    // presence of a consumer is checked, not just the presence of Redis.
+    const workersAvailable = await hasQueueWorkers(syncQueue);
+
+    if (workersAvailable) {
       for (const sid of storeIds) {
         await syncQueue.add('sync-store', { storeId: sid }, { removeOnComplete: true });
       }
+      console.log(`[orders/sync] Queued ${storeIds.length} store(s) to the sync worker`);
       return res.json({
         success: true,
-        data: { message: `Queued sync for ${storeIds.length} store(s)`, storesQueued: storeIds.length },
+        data: {
+          message: `Sync untuk ${storeIds.length} toko dimasukkan ke antrean`,
+          mode: 'queued',
+          storesQueued: storeIds.length,
+        },
       });
     }
 
-    // ── Redis unavailable → run sync directly (in-process fallback) ───────────
-    console.warn('[orders/sync] Redis not available — running sync directly in-process');
+    // ── No worker (or no Redis) → run in-process ──────────────────────────────
+    console.warn(
+      isRedisReady()
+        ? '[orders/sync] Redis is up but no sync worker is running — syncing in-process. Start it with `npm run worker`.'
+        : '[orders/sync] Redis unavailable — syncing in-process.'
+    );
+
     const { syncStore } = require('../services/syncDirect.js');
 
-    // Respond immediately so the HTTP request doesn't hang
+    // Answer before the work finishes so the request cannot time out on a slow
+    // marketplace; the per-store outcome is persisted and read back via
+    // GET /orders/sync-status.
     res.json({
       success: true,
-      data: { message: `Running direct sync for ${storeIds.length} store(s) (Redis unavailable)`, storesQueued: storeIds.length },
+      data: {
+        message: `Sync untuk ${storeIds.length} toko sedang berjalan`,
+        mode: 'inline',
+        workerMissing: isRedisReady(),
+        storesQueued: storeIds.length,
+      },
     });
 
     for (const sid of storeIds) {
       try {
         await syncStore(sid);
       } catch (syncErr) {
-        console.error(`[orders/sync] Direct sync failed for store ${sid}:`, syncErr.message);
+        // Already recorded on the store row by syncStore
+        console.error(`[orders/sync] In-process sync failed for store ${sid}:`, syncErr.message);
       }
     }
-
-
   } catch (err) {
     console.error('POST /orders/sync error:', err);
-    return res.status(500).json({ success: false, error: 'Failed to trigger sync' });
+    if (!res.headersSent) {
+      return res.status(500).json({ success: false, error: 'Failed to trigger sync' });
+    }
+  }
+});
+
+/**
+ * GET /sync-status - Per-store outcome of the most recent sync
+ *
+ * Lets the UI distinguish "this shop has no orders" from "this shop's sync is
+ * broken", and point at the shops that need re-authorizing.
+ */
+router.get('/sync-status', async (req, res) => {
+  try {
+    const user = req.user;
+    const where = { isActive: true };
+
+    if (user.role === 'STAFF') {
+      const access = await prisma.storeAccess.findMany({
+        where: { userId: user.id },
+        select: { storeId: true },
+      });
+      where.id = { in: access.map((a) => a.storeId) };
+    }
+
+    const stores = await prisma.store.findMany({
+      where,
+      select: {
+        id: true,
+        name: true,
+        platform: true,
+        lastSyncAt: true,
+        lastSyncAttemptAt: true,
+        lastSyncStatus: true,
+        lastSyncError: true,
+        needsReconnect: true,
+      },
+      orderBy: { name: 'asc' },
+    });
+
+    const workerRunning = await hasQueueWorkers(syncQueue);
+
+    return res.json({
+      success: true,
+      data: {
+        stores,
+        failing: stores.filter((s) => s.lastSyncStatus === 'ERROR').length,
+        needsReconnect: stores.filter((s) => s.needsReconnect).length,
+        redisReady: isRedisReady(),
+        workerRunning,
+      },
+    });
+  } catch (err) {
+    console.error('GET /orders/sync-status error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to get sync status' });
   }
 });
 

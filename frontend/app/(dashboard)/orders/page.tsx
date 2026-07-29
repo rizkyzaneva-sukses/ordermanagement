@@ -15,6 +15,7 @@ import {
   Filter,
   Truck,
   FileDown,
+  AlertTriangle,
   X,
 } from 'lucide-react'
 
@@ -51,6 +52,25 @@ interface Store {
   id: string
   name: string
   platform: string
+}
+
+interface SyncStoreState {
+  id: string
+  name: string
+  platform: string
+  lastSyncAt: string | null
+  lastSyncAttemptAt: string | null
+  lastSyncStatus: 'OK' | 'ERROR' | null
+  lastSyncError: string | null
+  needsReconnect: boolean
+}
+
+interface SyncStatus {
+  stores: SyncStoreState[]
+  failing: number
+  needsReconnect: number
+  redisReady: boolean
+  workerRunning: boolean
 }
 
 type PrintFilter = 'belum' | 'sudah' | 'semua'
@@ -108,6 +128,7 @@ export default function OrdersPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkMessage, setBulkMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
 
   // Filters
   const [printFilter, setPrintFilter] = useState<PrintFilter>(
@@ -183,9 +204,20 @@ export default function OrdersPage() {
     }
   }
 
+  const fetchSyncStatus = useCallback(async () => {
+    try {
+      const res = await api.get<SyncStatus>('/orders/sync-status')
+      setSyncStatus(res.data)
+      return res.data
+    } catch {
+      return null
+    }
+  }, [])
+
   useEffect(() => {
     fetchStores()
-  }, [])
+    fetchSyncStatus()
+  }, [fetchSyncStatus])
 
   useEffect(() => {
     fetchOrders()
@@ -195,15 +227,62 @@ export default function OrdersPage() {
     setSelected(new Set())
   }, [printFilter, page])
 
+  /**
+   * Trigger a sync, then poll until every store reports back.
+   *
+   * The request returns before the work finishes, so without polling a failed
+   * sync would look exactly like a successful one that found no orders.
+   */
   const handleSync = async () => {
     setSyncing(true)
+    setBulkMessage(null)
     try {
-      await api.post('/orders/sync')
-      await fetchOrders()
-    } catch (err) {
-      console.error('Sync failed', err)
+      const startedAt = Date.now()
+      const res = await api.post<any>('/orders/sync')
+
+      if (res.data?.workerMissing) {
+        setBulkMessage({
+          type: 'error',
+          text: 'Worker sync tidak berjalan — sync dijalankan langsung di server sebagai cadangan. Jalankan "npm run worker" agar sync terjadwal ikut aktif.',
+        })
+      }
+
+      // Poll until each store has an attempt newer than this click, or we give up
+      const MAX_WAIT_MS = 90_000
+      const POLL_EVERY_MS = 3_000
+      let status: SyncStatus | null = null
+
+      while (Date.now() - startedAt < MAX_WAIT_MS) {
+        await new Promise((r) => setTimeout(r, POLL_EVERY_MS))
+        status = await fetchSyncStatus()
+        await fetchOrders()
+
+        const allReported = status?.stores?.every(
+          (s) => s.lastSyncAttemptAt && new Date(s.lastSyncAttemptAt).getTime() >= startedAt - 5_000
+        )
+        if (allReported) break
+      }
+
+      const failing = status?.stores?.filter((s) => s.lastSyncStatus === 'ERROR') ?? []
+      if (failing.length > 0) {
+        const reconnect = failing.filter((s) => s.needsReconnect)
+        setBulkMessage({
+          type: 'error',
+          text:
+            reconnect.length > 0
+              ? `${reconnect.length} toko perlu dihubungkan ulang (token kedaluwarsa): ${reconnect.map((s) => s.name).join(', ')}. Buka Kelola Toko lalu hubungkan ulang.`
+              : `${failing.length} toko gagal sync: ${failing.map((s) => `${s.name} — ${s.lastSyncError}`).join(' | ')}`,
+        })
+      }
+    } catch (err: any) {
+      setBulkMessage({
+        type: 'error',
+        text: err?.response?.data?.error || err?.message || 'Sync gagal dijalankan',
+      })
     } finally {
       setSyncing(false)
+      await fetchOrders()
+      await fetchSyncStatus()
     }
   }
 
@@ -387,6 +466,46 @@ export default function OrdersPage() {
           <span>Sync Pesanan</span>
         </button>
       </div>
+
+      {/* Standing sync health banner — visible without having to press Sync first */}
+      {syncStatus && (syncStatus.needsReconnect > 0 || syncStatus.failing > 0) && (
+        <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-4 py-3">
+          <div className="flex items-start gap-2 text-sm text-amber-800 dark:text-amber-200">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <div className="space-y-1">
+              {syncStatus.needsReconnect > 0 && (
+                <p>
+                  <span className="font-semibold">{syncStatus.needsReconnect} toko perlu dihubungkan ulang.</span>{' '}
+                  Token Shopee-nya sudah kedaluwarsa, jadi pesanan tidak bisa ditarik sampai diotorisasi ulang di{' '}
+                  <button onClick={() => router.push('/admin/stores')} className="underline font-medium">
+                    Kelola Toko
+                  </button>
+                  .
+                </p>
+              )}
+              {syncStatus.stores
+                .filter((s) => s.lastSyncStatus === 'ERROR')
+                .map((s) => (
+                  <p key={s.id} className="text-xs">
+                    <span className="font-medium">{s.name}</span>
+                    {s.needsReconnect ? ' — token kedaluwarsa' : ` — ${s.lastSyncError}`}
+                  </p>
+                ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Sync runs but nothing consumes the queue */}
+      {syncStatus && syncStatus.redisReady && !syncStatus.workerRunning && (
+        <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 px-4 py-3 text-sm text-blue-800 dark:text-blue-200 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <p>
+            Worker sync tidak berjalan. Sync manual tetap bekerja (dijalankan langsung di server), tapi sync
+            otomatis tiap 15 menit tidak akan jalan sampai <code className="font-mono">npm run worker</code> dihidupkan.
+          </p>
+        </div>
+      )}
 
       {/* Print Filter Tabs */}
       <div className="card p-1">

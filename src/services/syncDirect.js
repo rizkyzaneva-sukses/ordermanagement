@@ -243,10 +243,12 @@ async function backfillShopeeTracking(accessToken, shopId, rows) {
 /**
  * Fetch orders from the platform API and upsert them into the DB.
  *
+ * Wrapped by `syncStore`, which records the outcome — call that instead.
+ *
  * @param {string} storeId
  * @returns {Promise<{ storeId, total, created, updated }>}
  */
-async function syncStore(storeId) {
+async function runStoreSync(storeId) {
   console.log(`[sync] Starting sync for store ${storeId}`);
 
   const store = await prisma.store.findUnique({ where: { id: storeId } });
@@ -416,48 +418,66 @@ async function syncStore(storeId) {
       },
     });
 
-    if (existing) {
+    if (!existing) {
+      // Two syncs for the same store can overlap (manual click while the
+      // scheduled run is in flight). Let the unique constraint arbitrate and
+      // fall through to an update rather than failing the whole sync.
+      try {
+        await prisma.order.create({
+          data: {
+            orderId:         orderData.orderId,
+            storeId,
+            packageNumber,
+            buyerName:       orderData.buyerName,
+            buyerAddress:    orderData.buyerAddress,
+            buyerPhone:      orderData.buyerPhone,
+            buyerCity:       orderData.buyerCity,
+            buyerProvince:   orderData.buyerProvince,
+            buyerPostalCode: orderData.buyerPostalCode,
+            buyerNote:       orderData.buyerNote    || null,
+            paymentMethod:   orderData.paymentMethod || null,
+            items:           JSON.stringify(Array.isArray(orderData.items) ? orderData.items : []),
+            shippingCourier: orderData.shippingCourier,
+            shippingService: orderData.shippingService,
+            trackingNumber:  orderData.trackingNumber,
+            logisticsStatus: orderData.logisticsStatus || null,
+            logisticsChannelId: orderData.logisticsChannelId ?? null,
+            status:          orderData.status,
+            orderDate:       orderData.orderDate,
+          },
+        });
+        created++;
+        continue;
+      } catch (err) {
+        if (err.code !== 'P2002') throw err;
+        console.warn(`[sync] Concurrent insert for ${orderData.orderId}/${packageNumber || '(default)'} — updating instead`);
+      }
+    }
+
+    {
+      const row = existing || await prisma.order.findUnique({
+        where: {
+          storeId_orderId_packageNumber: { storeId, orderId: orderData.orderId, packageNumber },
+        },
+      });
+      if (!row) continue;
+
       await prisma.order.update({
-        where: { id: existing.id },
+        where: { id: row.id },
         data: {
           status:          orderData.status,
           // Never let a later sync blank out a tracking number or fulfillment
           // state we already have — Shopee omits them while the 3PL catches up.
-          logisticsStatus: orderData.logisticsStatus ?? existing.logisticsStatus,
-          logisticsChannelId: orderData.logisticsChannelId ?? existing.logisticsChannelId,
-          trackingNumber:  orderData.trackingNumber || existing.trackingNumber,
-          shippingCourier: orderData.shippingCourier || existing.shippingCourier,
+          logisticsStatus: orderData.logisticsStatus ?? row.logisticsStatus,
+          logisticsChannelId: orderData.logisticsChannelId ?? row.logisticsChannelId,
+          trackingNumber:  orderData.trackingNumber || row.trackingNumber,
+          shippingCourier: orderData.shippingCourier || row.shippingCourier,
           items:           JSON.stringify(Array.isArray(orderData.items) ? orderData.items : []),
-          buyerNote:       orderData.buyerNote    ?? existing.buyerNote,
-          paymentMethod:   orderData.paymentMethod ?? existing.paymentMethod,
+          buyerNote:       orderData.buyerNote    ?? row.buyerNote,
+          paymentMethod:   orderData.paymentMethod ?? row.paymentMethod,
         },
       });
       updated++;
-    } else {
-      await prisma.order.create({
-        data: {
-          orderId:         orderData.orderId,
-          storeId,
-          packageNumber,
-          buyerName:       orderData.buyerName,
-          buyerAddress:    orderData.buyerAddress,
-          buyerPhone:      orderData.buyerPhone,
-          buyerCity:       orderData.buyerCity,
-          buyerProvince:   orderData.buyerProvince,
-          buyerPostalCode: orderData.buyerPostalCode,
-          buyerNote:       orderData.buyerNote    || null,
-          paymentMethod:   orderData.paymentMethod || null,
-          items:           JSON.stringify(Array.isArray(orderData.items) ? orderData.items : []),
-          shippingCourier: orderData.shippingCourier,
-          shippingService: orderData.shippingService,
-          trackingNumber:  orderData.trackingNumber,
-          logisticsStatus: orderData.logisticsStatus || null,
-          logisticsChannelId: orderData.logisticsChannelId ?? null,
-          status:          orderData.status,
-          orderDate:       orderData.orderDate,
-        },
-      });
-      created++;
     }
   }
 
@@ -469,6 +489,77 @@ async function syncStore(storeId) {
 
   console.log(`[sync] Completed sync for store ${storeId}: ${created} created, ${updated} updated`);
   return { storeId, total: orders.length, created, updated };
+}
+
+/**
+ * Error signatures that mean the merchant has to re-authorize.
+ *
+ * Shopee answers a dead or already-consumed refresh token with
+ * `error_not_found`, which is indistinguishable from other 404s by status
+ * alone. Retrying these is pointless until the shop is reconnected.
+ */
+const RECONNECT_SIGNATURES = [
+  'error_not_found',
+  'invalid_refresh_token',
+  'invalid_access_token',
+  'error_auth',
+  'no refresh token available',
+];
+
+function needsReconnect(message = '') {
+  const lower = message.toLowerCase();
+  return RECONNECT_SIGNATURES.some(sig => lower.includes(sig));
+}
+
+/**
+ * Sync a store and record the outcome on the store row.
+ *
+ * The result has to be persisted: when sync runs on the queue nobody is waiting
+ * on the HTTP response, so a failure would otherwise exist only in worker logs
+ * and the UI would show an empty order list indistinguishable from success.
+ *
+ * @param {string} storeId
+ * @returns {Promise<{ storeId, total, created, updated }>}
+ */
+async function syncStore(storeId) {
+  await prisma.store.update({
+    where: { id: storeId },
+    data: { lastSyncAttemptAt: new Date() },
+  }).catch(() => { /* store may have been deleted mid-flight */ });
+
+  try {
+    const result = await runStoreSync(storeId);
+
+    await prisma.store.update({
+      where: { id: storeId },
+      data: {
+        lastSyncStatus: 'OK',
+        lastSyncError: null,
+        needsReconnect: false,
+      },
+    });
+
+    return result;
+  } catch (err) {
+    const message = err.message || String(err);
+    const reconnect = needsReconnect(message);
+
+    console.error(`[sync] Store ${storeId} failed: ${message}${reconnect ? ' (needs reconnect)' : ''}`);
+
+    await prisma.store.update({
+      where: { id: storeId },
+      data: {
+        lastSyncStatus: 'ERROR',
+        // Column is plain text; keep it short enough to display in a toast
+        lastSyncError: message.slice(0, 500),
+        needsReconnect: reconnect,
+      },
+    }).catch((updateErr) => {
+      console.error(`[sync] Could not record failure for store ${storeId}: ${updateErr.message}`);
+    });
+
+    throw err;
+  }
 }
 
 /**
