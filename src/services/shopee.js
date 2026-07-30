@@ -106,8 +106,18 @@ class ShopeeService {
    * @throws {Error} On API-level or network errors
    */
   async _request(method, path, params = {}, body = null, accessToken = '', shopId = '') {
-    const MAX_RETRIES = 3;
     const BASE_DELAY_MS = 500;
+
+    // Auth endpoints trade in single-use credentials: /auth/token/get consumes the
+    // authorization code, and /auth/access_token/get consumes the refresh token
+    // and issues a rotated one. If Shopee processed the call but the response was
+    // lost on the way back, a retry replays a credential the platform has already
+    // burned — answered with error_not_found, which we read as "needs
+    // re-authorization". One transient blip would then force the merchant to
+    // reconnect by hand. Failing fast keeps the credential intact for the next
+    // scheduled attempt.
+    const isAuthEndpoint = path.startsWith('/api/v2/auth/');
+    const MAX_RETRIES = isAuthEndpoint ? 1 : 3;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       const url = this._buildUrl(path, params, accessToken, shopId);
@@ -1206,9 +1216,17 @@ class ShopeeService {
   // ──────────────────────────────────────────────
 
   /**
-   * Fetch all order SNs within a time range, automatically handling pagination.
+   * Fetch every order entry in a time range, following the pagination cursor.
    *
-   * ⚠️  Use with caution — for large shops this can produce many API calls.
+   * `getOrderList` returns at most 100 rows and signals the rest with
+   * `response.more` plus `response.next_cursor`. A caller that ignores those
+   * silently drops everything past the first page — no error, just a short list —
+   * so any code that needs a complete picture must use this instead.
+   *
+   * Returns the raw entries rather than just the SNs because each one also
+   * carries `order_status`, which callers need to avoid a second lookup.
+   *
+   * ⚠️  For large shops this can produce many API calls.
    *
    * @param {string}        accessToken
    * @param {string|number} shopId
@@ -1217,14 +1235,16 @@ class ShopeeService {
    * @param {number} options.timeTo          - Unix epoch (seconds)
    * @param {string} [options.orderStatus='READY_TO_SHIP']
    * @param {string} [options.timeRangeField='create_time']
-   * @returns {Promise<string[]>} Complete list of order SNs
+   * @param {number} [options.maxPages=50]   - Safety valve against a cursor that never terminates
+   * @returns {Promise<Array<{ order_sn: string, order_status?: string }>>}
    */
-  async getAllOrderSns(accessToken, shopId, options = {}) {
-    const allOrders = [];
+  async getAllOrders(accessToken, shopId, options = {}) {
+    const maxPages = options.maxPages || 50;
+    const all = [];
     let cursor = '';
     let page = 0;
 
-    console.error(`[ShopeeService.getAllOrderSns] shop=${shopId} status=${options.orderStatus || 'READY_TO_SHIP'} range=${options.timeFrom}→${options.timeTo}`);
+    console.error(`[ShopeeService.getAllOrders] shop=${shopId} status=${options.orderStatus || 'READY_TO_SHIP'} range=${options.timeFrom}→${options.timeTo}`);
 
     // eslint-disable-next-line no-constant-condition
     while (true) {
@@ -1235,19 +1255,38 @@ class ShopeeService {
         pageSize: 100,
       });
 
-      // response.order_list is the correct field (each item has order_sn + order_status)
       const orderList = result.response?.order_list || [];
-      const snList = orderList.map(o => o.order_sn);
-      allOrders.push(...snList);
-      console.error(`[ShopeeService.getAllOrderSns] Page ${page}: got ${snList.length} orders (total so far: ${allOrders.length})`);
+      all.push(...orderList);
+      console.error(`[ShopeeService.getAllOrders] Page ${page}: got ${orderList.length} order(s) (total ${all.length})`);
 
-      if (!result.response?.more || !snList.length) break;
+      if (!result.response?.more || !orderList.length) break;
+
       cursor = result.response?.next_cursor || '';
       if (!cursor) break;
+
+      if (page >= maxPages) {
+        console.error(`[ShopeeService.getAllOrders] WARNING: stopped at the ${maxPages}-page cap with more results pending — some orders were not fetched`);
+        break;
+      }
     }
 
-    console.error(`[ShopeeService.getAllOrderSns] Finished: ${allOrders.length} total orders across ${page} pages`);
-    return allOrders;
+    console.error(`[ShopeeService.getAllOrders] Finished: ${all.length} order(s) across ${page} page(s)`);
+    return all;
+  }
+
+  /**
+   * Fetch all order SNs within a time range, automatically handling pagination.
+   *
+   * Thin wrapper over `getAllOrders` for callers that only need the identifiers.
+   *
+   * @param {string}        accessToken
+   * @param {string|number} shopId
+   * @param {Object} options - Same as `getAllOrders`
+   * @returns {Promise<string[]>} Complete list of order SNs
+   */
+  async getAllOrderSns(accessToken, shopId, options = {}) {
+    const orders = await this.getAllOrders(accessToken, shopId, options);
+    return orders.map(o => o.order_sn);
   }
 
 }

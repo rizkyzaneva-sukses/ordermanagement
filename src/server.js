@@ -17,6 +17,11 @@ app.use(cors({
   origin: process.env.FRONTEND_URL || '*',
   credentials: true
 }));
+// Marketplace push receivers are mounted ahead of the JSON parser: their
+// signatures are computed over the raw request body, which a parser consumes.
+// The router applies its own raw-body parser.
+app.use('/api/webhooks', require('./routes/webhooks'));
+
 app.use(express.json({ limit: '10mb' }));
 
 // Serve generated PDFs

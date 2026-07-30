@@ -300,16 +300,18 @@ async function runStoreSync(storeId) {
     packageIndex.forEach((_pkgs, orderSn) => allOrderSns.set(orderSn, null));
 
     // Pass 1: fetch by create_time (orders created in last 15 days)
+    //
+    // getAllOrders follows the pagination cursor. Calling get_order_list directly
+    // caps each status at its first 100 rows and discards the rest without any
+    // error, which is invisible until you compare totals against Seller Centre.
     await Promise.all(STATUSES_TO_FETCH.map(async (orderStatus) => {
       try {
-        const resp = await shopeeService.getOrderList(accessToken, shopId, {
+        const list = await shopeeService.getAllOrders(accessToken, shopId, {
           orderStatus,
           timeRangeField: 'create_time',
           timeFrom: fifteenDaysAgo,
           timeTo:   now,
-          pageSize: 100,
         });
-        const list = resp.response?.order_list || [];
         console.log(`[sync] create_time | Status ${orderStatus}: ${list.length} order(s)`);
         list.forEach(o => allOrderSns.set(o.order_sn, o.order_status || orderStatus));
       } catch (err) {
@@ -322,14 +324,12 @@ async function runStoreSync(storeId) {
     const UPDATE_STATUSES = ['PROCESSED', 'SHIPPED'];
     await Promise.all(UPDATE_STATUSES.map(async (orderStatus) => {
       try {
-        const resp = await shopeeService.getOrderList(accessToken, shopId, {
+        const list = await shopeeService.getAllOrders(accessToken, shopId, {
           orderStatus,
           timeRangeField: 'update_time',
           timeFrom: fifteenDaysAgo,
           timeTo:   now,
-          pageSize: 100,
         });
-        const list = resp.response?.order_list || [];
         console.log(`[sync] update_time | Status ${orderStatus}: ${list.length} order(s)`);
         list.forEach(o => {
           // Seeded-but-statusless entries come from search_package_list, so
