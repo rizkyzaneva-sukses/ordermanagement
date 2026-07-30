@@ -85,15 +85,19 @@ function pushUrl() {
  * @returns {boolean}
  */
 function verifySignature(rawBody, signature) {
-  const partnerKey = process.env.SHOPEE_PARTNER_KEY;
-  if (!partnerKey) {
-    console.error('[webhook] SHOPEE_PARTNER_KEY is not set — cannot verify push signatures');
+  // The Partner Console generates a Live Push Partner Key that is distinct from
+  // SHOPEE_PARTNER_KEY (the one used to sign outgoing API calls) — pushes are
+  // signed with this dedicated key instead. Using the API key here looks
+  // reasonable but never verifies against a real push.
+  const pushKey = process.env.SHOPEE_PUSH_PARTNER_KEY;
+  if (!pushKey) {
+    console.error('[webhook] SHOPEE_PUSH_PARTNER_KEY is not set — cannot verify push signatures. This is the "Live Push Partner Key" generated in Partner Console → Push Mechanism, not SHOPEE_PARTNER_KEY.');
     return false;
   }
   if (!signature) return false;
 
   const base = `${pushUrl()}|${rawBody.toString('utf8')}`;
-  const expected = crypto.createHmac('sha256', partnerKey).update(base).digest('hex');
+  const expected = crypto.createHmac('sha256', pushKey).update(base).digest('hex');
 
   const received = String(signature).trim();
 
