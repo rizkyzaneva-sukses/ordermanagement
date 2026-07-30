@@ -86,16 +86,17 @@ router.get('/', async (req, res) => {
     // number, which hid every order still waiting on one — they appeared
     // nowhere at all, since they fell outside the printed bucket too. They are
     // shown now and simply cannot be selected for printing.
+    const listWhere = { ...where };
     if (printFilter === 'unprinted' || printFilter === 'belum') {
-      where.printedAt = null;
+      listWhere.printedAt = null;
     } else if (printFilter === 'printed' || printFilter === 'sudah') {
-      where.printedAt = { not: null };
+      listWhere.printedAt = { not: null };
     }
     // 'all' / 'semua' → no printedAt filter
 
     const [orders, total] = await Promise.all([
       prisma.order.findMany({
-        where,
+        where: listWhere,
         include: {
           store: { select: { id: true, name: true, platform: true } },
         },
@@ -103,21 +104,19 @@ router.get('/', async (req, res) => {
         skip,
         take: limitNum,
       }),
-      prisma.order.count({ where }),
+      prisma.order.count({ where: listWhere }),
     ]);
 
-    // Get counts for tabs
-    const baseFilter = user.role === 'STAFF' ? {
-      storeId: { in: (await prisma.storeAccess.findMany({ where: { userId: user.id }, select: { storeId: true } })).map(a => a.storeId) }
-    } : {};
-
-    // `all` is counted, not derived: summing the two buckets silently dropped
-    // any order that fell outside both.
+    // Tab counts share every filter the list uses (store, platform, status,
+    // courier, date range, search) — only printedAt varies per tab. Counting
+    // against a bare role-access filter here used to show the same three
+    // numbers no matter what was selected above, which reads as "the filter
+    // did nothing" even though the list itself was filtering correctly.
     const [unprintedCount, printedCount, allCount, awaitingTrackingCount] = await Promise.all([
-      prisma.order.count({ where: { ...baseFilter, printedAt: null } }),
-      prisma.order.count({ where: { ...baseFilter, printedAt: { not: null } } }),
-      prisma.order.count({ where: baseFilter }),
-      prisma.order.count({ where: { ...baseFilter, printedAt: null, trackingNumber: null } }),
+      prisma.order.count({ where: { ...where, printedAt: null } }),
+      prisma.order.count({ where: { ...where, printedAt: { not: null } } }),
+      prisma.order.count({ where }),
+      prisma.order.count({ where: { ...where, printedAt: null, trackingNumber: null } }),
     ]);
 
     return res.json({
