@@ -10,6 +10,11 @@ const tiktokService = require('../services/tiktok');
 
 const router = express.Router();
 
+// Lazy-load scheduler to avoid circular dependencies
+function getScheduler() {
+  try { return require('../services/scheduler'); } catch { return null; }
+}
+
 router.use(authenticate);
 
 /**
@@ -113,21 +118,33 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ success: false, error: 'name, platform, and shopId are required' });
     }
 
-    const data = {
-      name,
-      platform,
-      shopId,
-      tokenExpiry: new Date(Date.now() + 4 * 60 * 60 * 1000),
-    };
-
-    if (accessToken) {
-      data.accessToken = encrypt(accessToken);
-    }
-    if (refreshToken) {
-      data.refreshToken = encrypt(refreshToken);
+    // Both are NOT NULL in the schema, so omitting them fails inside Prisma and
+    // surfaces as an opaque 500. Reject it here with something actionable.
+    if (!accessToken || !refreshToken) {
+      return res.status(400).json({ success: false, error: 'accessToken and refreshToken are required' });
     }
 
-    const store = await prisma.store.create({ data });
+    const expiryHours = platform === 'TIKTOK' ? 24 : 4;
+    const store = await prisma.store.create({
+      data: {
+        name,
+        platform,
+        shopId,
+        accessToken: encrypt(accessToken),
+        refreshToken: encrypt(refreshToken),
+        tokenExpiry: new Date(Date.now() + expiryHours * 60 * 60 * 1000),
+      },
+    });
+
+    // Stores added this way are active immediately, but only the OAuth callback
+    // used to schedule them — so a manually added store never auto-synced until
+    // the next server restart.
+    const scheduler = getScheduler();
+    if (scheduler) {
+      scheduler.addStore(store.id).catch((err) =>
+        console.warn(`[stores] Could not register scheduled sync for store ${store.id}:`, err.message)
+      );
+    }
 
     return res.status(201).json({
       success: true,
@@ -204,6 +221,16 @@ router.delete('/:id', async (req, res) => {
       data: { isActive: false },
     });
 
+    // Stop the repeatable sync. The job outlives the store otherwise: it keeps
+    // firing every interval and runStoreSync happily syncs a deactivated store,
+    // so a "disconnected" shop would go on pulling orders indefinitely.
+    const scheduler = getScheduler();
+    if (scheduler) {
+      scheduler.removeStore(id).catch((err) =>
+        console.warn(`[stores] Could not remove scheduled sync for store ${id}:`, err.message)
+      );
+    }
+
     return res.json({ success: true, data: { message: 'Store deactivated' } });
   } catch (err) {
     return res.status(500).json({ success: false, error: 'Failed to delete store' });
@@ -255,6 +282,10 @@ router.post('/:id/reconnect', async (req, res) => {
     const expiryHours = store.platform === 'TIKTOK' ? 24 : 4;
     const updateData = {
       tokenExpiry: new Date(Date.now() + expiryHours * 60 * 60 * 1000),
+      // The refresh just succeeded, so the store is healthy again. Without this
+      // refreshExpiringTokens() would keep skipping it (it only considers stores
+      // with needsReconnect = false) and automatic upkeep would never resume.
+      needsReconnect: false,
     };
     if (newAccessToken) updateData.accessToken = encrypt(newAccessToken);
     if (newRefreshToken) updateData.refreshToken = encrypt(newRefreshToken);

@@ -341,13 +341,22 @@ class ShopeeService {
    * Access tokens expire every ~4 hours. Use the refresh_token (valid ~30 days)
    * to obtain a new access + refresh token pair without re-authorization.
    *
+   * The endpoint is `/api/v2/auth/access_token/get` — despite the name, this is
+   * the refresh call. There is no `/auth/refresh_token/get`; using it returns an
+   * error rather than a token pair.
+   *
+   * `partner_id` is required in the *body* here. The initial exchange
+   * (`/auth/token/get`) works without it, so this asymmetry is easy to miss —
+   * Shopee answers the omission with "It should have partner_id in the request
+   * body."
+   *
    * @param {string}        refreshToken - The refresh_token from a previous `getToken` or `refreshToken` call
    * @param {string|number} shopId       - Shop ID
    * @returns {Promise<Object>} New token pair
    */
   async refreshToken(refreshToken, shopId) {
     console.error(`[ShopeeService.refreshToken] Refreshing token for shop_id=${shopId}`);
-    return this._request('POST', '/api/v2/auth/refresh_token/get', {}, {
+    return this._request('POST', '/api/v2/auth/access_token/get', {}, {
       refresh_token: refreshToken,
       shop_id: parseInt(shopId, 10),
       partner_id: this.partnerId,

@@ -66,6 +66,11 @@ router.get('/shopee/callback', async (req, res) => {
           refreshToken: encrypt(refreshToken),
           tokenExpiry: new Date(Date.now() + expiresIn * 1000),
           isActive: true,
+          // Re-authorizing is exactly what clears this flag. Leaving it set would
+          // make refreshExpiringTokens() skip the store forever, so the token
+          // chain would never resume and the merchant would be asked to
+          // reconnect again every time the access token lapsed.
+          needsReconnect: false,
         },
       });
       storeId = existing.id;
@@ -145,6 +150,8 @@ router.get('/tiktok/callback', async (req, res) => {
           refreshToken: encrypt(refreshToken),
           tokenExpiry: new Date(Date.now() + expiresIn * 1000),
           isActive: true,
+          // See the Shopee callback above — re-authorization is what lifts this.
+          needsReconnect: false,
         },
       });
       storeId = existing.id;

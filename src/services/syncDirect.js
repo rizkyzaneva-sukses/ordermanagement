@@ -516,6 +516,27 @@ async function runStoreSync(storeId) {
  * @returns {Promise<{ storeId, total, created, updated }>}
  */
 async function syncStore(storeId) {
+  // A repeatable job can outlive the store it belongs to: BullMQ keeps firing
+  // until the repeat key is removed, and that removal is best-effort (it is
+  // skipped entirely when Redis is unreachable). Without this check a store the
+  // admin disconnected would go on pulling orders every interval. Skipping is
+  // deliberate rather than throwing — a disabled store is not a sync failure,
+  // so its recorded sync state is left untouched.
+  const state = await prisma.store.findUnique({
+    where: { id: storeId },
+    select: { isActive: true },
+  });
+
+  if (!state) {
+    console.warn(`[sync] Store ${storeId} no longer exists — skipping`);
+    return { storeId, total: 0, created: 0, updated: 0, skipped: 'missing' };
+  }
+
+  if (!state.isActive) {
+    console.log(`[sync] Store ${storeId} is deactivated — skipping sync`);
+    return { storeId, total: 0, created: 0, updated: 0, skipped: 'inactive' };
+  }
+
   await prisma.store.update({
     where: { id: storeId },
     data: { lastSyncAttemptAt: new Date() },
