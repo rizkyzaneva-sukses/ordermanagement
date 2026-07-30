@@ -40,6 +40,11 @@ const router = express.Router();
  * before relying on a new one — see the verification note at the bottom.
  */
 const EVENT = {
+  // Sent by the Partner Console's "Verify" button, not by a real integration —
+  // handled separately, above the signature gate, before this map is ever
+  // consulted. Listed here only so the code isn't a mystery number if it shows
+  // up in a log.
+  VERIFY_PROBE:      0,
   SHOP_AUTHORIZED:   1,
   SHOP_DEAUTHORIZED: 2,
   ORDER_STATUS:      3,
@@ -205,6 +210,26 @@ async function queueSync(storeId, reason) {
  */
 router.post('/shopee', express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {
   const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from('');
+
+  // The "Verify" button in Partner Console sends a code=0 probe, not a real
+  // push — its body literally instructs "please respond in the certain
+  // format." It is parsed and answered *before* the signature gate below: this
+  // is Shopee confirming the endpoint is reachable and speaks the right
+  // protocol, prior to (and independent of) whatever normally signs a push, so
+  // gating it on verifySignature() would make the verification step reject the
+  // very probe it exists to answer. Echoing the exact body back is what
+  // satisfies it — there is nothing here to act on either way.
+  let probePayload;
+  try {
+    probePayload = JSON.parse(rawBody.toString('utf8'));
+  } catch {
+    probePayload = null;
+  }
+  if (probePayload && probePayload.code === 0) {
+    console.log('[webhook] Verification probe received — echoing body back');
+    res.setHeader('Content-Type', 'application/json');
+    return res.status(200).send(rawBody);
+  }
 
   if (!verifySignature(rawBody, req.headers.authorization)) {
     console.warn('[webhook] Rejected push with invalid signature');
