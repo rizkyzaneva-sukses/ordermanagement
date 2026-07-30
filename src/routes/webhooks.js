@@ -84,6 +84,26 @@ function pushUrl() {
  * @param {string} signature - Authorization header value
  * @returns {boolean}
  */
+/**
+ * Candidate ways to build the string Shopee signs. The Partner Console's own
+ * "test push" verification is the only oracle for which one is correct — the
+ * public docs describe the pieces (URL, body, key) but are not precise enough
+ * to bet a single formula on, and a wrong guess fails silently (a signature
+ * mismatch looks identical whether it's forged or just computed wrong).
+ *
+ * `|`-joined is listed first because it matches Shopee's OAuth callback
+ * signing convention elsewhere in this codebase — the other three cover the
+ * plausible alternatives.
+ */
+function candidateBases(url, bodyStr) {
+  return [
+    { label: 'url|body',  value: `${url}|${bodyStr}` },
+    { label: 'url+body',  value: `${url}${bodyStr}` },
+    { label: 'body only', value: bodyStr },
+    { label: 'body|url',  value: `${bodyStr}|${url}` },
+  ];
+}
+
 function verifySignature(rawBody, signature) {
   // The Partner Console generates a Live Push Partner Key that is distinct from
   // SHOPEE_PARTNER_KEY (the one used to sign outgoing API calls) — pushes are
@@ -96,22 +116,51 @@ function verifySignature(rawBody, signature) {
   }
   if (!signature) return false;
 
-  const base = `${pushUrl()}|${rawBody.toString('utf8')}`;
-  const expected = crypto.createHmac('sha256', pushKey).update(base).digest('hex');
-
+  const url = pushUrl();
+  const bodyStr = rawBody.toString('utf8');
   const received = String(signature).trim();
 
-  // timingSafeEqual throws on a length mismatch, so compare lengths first
-  if (received.length !== expected.length) {
-    console.warn(`[webhook] Signature length mismatch (got ${received.length}, expected ${expected.length}) — check that SHOPEE_PUSH_URL matches the Partner Console entry exactly`);
-    return false;
+  const candidates = candidateBases(url, bodyStr).map(c => ({
+    ...c,
+    computed: crypto.createHmac('sha256', pushKey).update(c.value).digest('hex'),
+  }));
+
+  const match = candidates.find(c => {
+    if (c.computed.length !== received.length) return false;
+    try {
+      return crypto.timingSafeEqual(Buffer.from(received, 'utf8'), Buffer.from(c.computed, 'utf8'));
+    } catch {
+      return false;
+    }
+  });
+
+  if (match) {
+    if (match.label !== 'url|body') {
+      // Verified, but not with the formula the rest of this function defaults
+      // to — surfaced loudly because it means `candidateBases` should be
+      // reordered to put this formula first, not because anything is wrong.
+      console.warn(`[webhook] Signature matched candidate "${match.label}", not the default "url|body". Update candidateBases() to lead with this one.`);
+    }
+    return true;
   }
 
-  try {
-    return crypto.timingSafeEqual(Buffer.from(received, 'utf8'), Buffer.from(expected, 'utf8'));
-  } catch {
-    return false;
+  // Every candidate missed. In debug mode, log enough to diagnose by hand:
+  // the exact URL and body bytes used (so a stray trailing slash or an
+  // unexpected proxy rewrite is visible) and every computed signature next to
+  // what Shopee actually sent. None of this is secret — HMAC outputs and a
+  // push payload the platform already delivered to us — so it's safe to log
+  // whenever this flag is on.
+  if (process.env.SHOPEE_PUSH_DEBUG === 'true') {
+    console.warn('[webhook] No candidate signature matched. Diagnostic dump follows:');
+    console.warn(`[webhook]   url      = ${url}`);
+    console.warn(`[webhook]   body     = ${bodyStr}`);
+    console.warn(`[webhook]   received = ${received}`);
+    for (const c of candidates) {
+      console.warn(`[webhook]   ${c.label.padEnd(9)} → ${c.computed}`);
+    }
   }
+
+  return false;
 }
 
 /**
