@@ -6,6 +6,13 @@ const api = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
+  // Axios has no timeout by default. A backend call that hangs (a marketplace
+  // API that never answers, a stuck DB query) used to spin the calling button
+  // forever with no way out but a page reload. This is a safety net sized well
+  // above the backend's own worst case for a single Shopee call (~30s per
+  // attempt, up to 3 attempts) — it exists to eventually surface a hung request
+  // as an error, not to enforce a snappy UX.
+  timeout: 90_000,
 })
 
 // ── Request interceptor: attach JWT access token ──────────────────────────────

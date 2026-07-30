@@ -107,6 +107,11 @@ class ShopeeService {
    */
   async _request(method, path, params = {}, body = null, accessToken = '', shopId = '') {
     const BASE_DELAY_MS = 500;
+    // Node's fetch has no default timeout — a Shopee response that never arrives
+    // (as opposed to one that errors) would otherwise hang this call, the route
+    // handler awaiting it, and the browser spinner on the other end, forever.
+    // There is nothing in this codebase upstream that imposes a limit either.
+    const REQUEST_TIMEOUT_MS = 30_000;
 
     // Auth endpoints trade in single-use credentials: /auth/token/get consumes the
     // authorization code, and /auth/access_token/get consumes the refresh token
@@ -122,9 +127,13 @@ class ShopeeService {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       const url = this._buildUrl(path, params, accessToken, shopId);
 
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
       const options = {
         method,
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
       };
       if (body) {
         options.body = JSON.stringify(body);
@@ -137,12 +146,18 @@ class ShopeeService {
       try {
         response = await fetch(url, options);
       } catch (networkErr) {
-        console.error(`[ShopeeService._request] Network error on attempt ${attempt}: ${networkErr.message}`);
-        if (attempt === MAX_RETRIES) throw networkErr;
+        const isTimeout = networkErr.name === 'AbortError';
+        const label = isTimeout ? `no response within ${REQUEST_TIMEOUT_MS}ms` : networkErr.message;
+        console.error(`[ShopeeService._request] Network error on attempt ${attempt}: ${label}`);
+        if (attempt === MAX_RETRIES) {
+          throw isTimeout ? new Error(`Shopee API: ${path} timed out after ${REQUEST_TIMEOUT_MS}ms`) : networkErr;
+        }
         const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
         console.error(`[ShopeeService._request] Retrying in ${delay}ms…`);
         await new Promise(r => setTimeout(r, delay));
         continue;
+      } finally {
+        clearTimeout(timer);
       }
 
       const elapsed = Date.now() - t0;
@@ -198,12 +213,29 @@ class ShopeeService {
   async _requestBinary(method, path, params = {}, body = null, accessToken = '', shopId = '') {
     const url = this._buildUrl(path, params, accessToken, shopId);
 
-    const options = { method, headers: { 'Content-Type': 'application/json' } };
+    // Same rationale as _request(): fetch does not time out on its own, and a
+    // document endpoint that never answers would otherwise hang the caller
+    // (label printing) indefinitely rather than surfacing an error.
+    const REQUEST_TIMEOUT_MS = 30_000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    const options = { method, headers: { 'Content-Type': 'application/json' }, signal: controller.signal };
     if (body) options.body = JSON.stringify(body);
 
     console.error(`[ShopeeService._requestBinary] ${method} ${path}`);
 
-    const response = await fetch(url, options);
+    let response;
+    try {
+      response = await fetch(url, options);
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw new Error(`Shopee API: ${path} timed out after ${REQUEST_TIMEOUT_MS}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
     const contentType = response.headers.get('content-type') || '';
     const buffer = Buffer.from(await response.arrayBuffer());
 
