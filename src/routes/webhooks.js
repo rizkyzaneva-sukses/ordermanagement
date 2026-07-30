@@ -39,16 +39,27 @@ const router = express.Router();
  * The numbering is Shopee's and is worth re-checking against the Partner Console
  * before relying on a new one — see the verification note at the bottom.
  */
+// Codes confirmed against this app's own "Order Push" / "Shopee Push" tables in
+// Partner Console → Push Mechanism (Push Code column) — not assumed from
+// general docs, since Shopee does not guarantee these numbers are identical
+// across every app or region.
 const EVENT = {
   // Sent by the Partner Console's "Verify" button, not by a real integration —
   // handled separately, above the signature gate, before this map is ever
   // consulted. Listed here only so the code isn't a mystery number if it shows
   // up in a log.
-  VERIFY_PROBE:      0,
-  SHOP_AUTHORIZED:   1,
-  SHOP_DEAUTHORIZED: 2,
-  ORDER_STATUS:      3,
-  TRACKING_NUMBER:   4,
+  VERIFY_PROBE:             0,
+  SHOP_AUTHORIZED:          1,
+  SHOP_DEAUTHORIZED:        2,
+  ORDER_STATUS:             3,
+  TRACKING_NUMBER:          4,
+  // Fires when a package's logistics_status changes — the field this app
+  // stores as Order.logisticsStatus and uses to gate AWB printing (KB §7.3).
+  PACKAGE_FULFILLMENT_STATUS: 30,
+  // Fires when Shopee finishes generating a requested AWB/shipping label —
+  // the async step `createShippingDocument` in shopee.js currently has to be
+  // polled for.
+  SHIPPING_DOCUMENT_STATUS:  15,
 };
 
 /**
@@ -272,6 +283,8 @@ router.post('/shopee', express.raw({ type: '*/*', limit: '1mb' }), async (req, r
     switch (code) {
       case EVENT.ORDER_STATUS:
       case EVENT.TRACKING_NUMBER:
+      case EVENT.PACKAGE_FULFILLMENT_STATUS:
+      case EVENT.SHIPPING_DOCUMENT_STATUS:
         if (!store.isActive) {
           console.log(`[webhook] Store ${store.id} is deactivated — ignoring push code=${code}`);
           return;
