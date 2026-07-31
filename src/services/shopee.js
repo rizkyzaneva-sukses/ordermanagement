@@ -1119,14 +1119,15 @@ class ShopeeService {
 
     console.error(`[ShopeeService.getShippingDocumentResult] shop=${shopId} orders=${normalized.length}`);
 
-    // Shopee's docs spell this endpoint "shippping" (three p's). Whether the
-    // live API actually honours that spelling has proven unreliable — and an
-    // unknown path answers `error_not_found`, which is indistinguishable from
-    // "this package does not exist" and sends you hunting in the wrong place.
-    // Try the documented spelling, fall back to the conventional one.
+    // Shopee's docs spell this endpoint "shippping" (three p's), but the live
+    // API only answers the conventional spelling — the typo'd path returns
+    // `error_not_found`, verified against production on 2026-07-31. The docs'
+    // spelling is kept as a fallback in case the endpoint is ever fixed to match
+    // them; an unknown path is indistinguishable from "package not found", so
+    // trying both keeps a rename from looking like a data problem.
     const PATHS = [
-      '/api/v2/logistics/get_shippping_document_result',
       '/api/v2/logistics/get_shipping_document_result',
+      '/api/v2/logistics/get_shippping_document_result',
     ];
 
     let lastErr;

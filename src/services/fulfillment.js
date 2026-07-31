@@ -169,6 +169,19 @@ async function getShippingOptions(orderRowId) {
   const live = await fetchLiveState(ctx);
   await syncRowFromLiveState(orderRowId, live);
 
+  // The live state was already read above but went unchecked, so a package Shopee
+  // considers unshippable produced its raw rejection ("Shipping parameters can
+  // only be obtained when package is ready to be shipped") with no indication of
+  // which state was actually the problem. arrangeShipment guards on the same
+  // conditions; this is the read-only step that precedes it.
+  if (live.orderStatus && !['READY_TO_SHIP', 'RETRY_SHIP'].includes(live.orderStatus)) {
+    throw fail(409, `Pesanan berstatus ${live.orderStatus} di Shopee — pengiriman hanya bisa diatur saat READY_TO_SHIP atau RETRY_SHIP`);
+  }
+
+  if (live.logisticsStatus && !AWB_TOO_EARLY.has(live.logisticsStatus)) {
+    throw fail(409, `Pengiriman paket ini sudah diatur sebelumnya (${live.logisticsStatus}) — tidak perlu diatur ulang`);
+  }
+
   const resp = await shopeeService.getShippingParameter(
     ctx.accessToken, ctx.store.shopId, ctx.order.orderId, ctx.order.packageNumber || undefined);
 
