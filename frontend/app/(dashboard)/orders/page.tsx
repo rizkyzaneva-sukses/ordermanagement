@@ -860,8 +860,14 @@ export default function OrdersPage() {
         )}
       </div>
 
-      {/* Bulk action result */}
-      {bulkMessage && (
+      {/* Bulk action result — only when no selection bar is showing.
+          The bulk actions live in a bar fixed to the bottom of the viewport, but
+          this message renders in normal page flow below a long table. Pressing a
+          button there produced a result the operator never saw: it landed
+          off-screen, behind or above the bar. While a selection exists the
+          message is rendered inside that bar instead (see below), so it appears
+          where the click happened. */}
+      {bulkMessage && selected.size === 0 && (
         <div
           className={`rounded-lg border px-4 py-3 text-sm flex items-start justify-between gap-4 ${
             bulkMessage.type === 'success'
@@ -879,6 +885,20 @@ export default function OrdersPage() {
       {/* Selection Bar */}
       {selected.size > 0 && (
         <div className="fixed bottom-0 left-64 right-0 bg-white dark:bg-slate-800 border-t border-gray-200 dark:border-slate-700 shadow-lg px-6 py-4 z-20">
+          {bulkMessage && (
+            <div
+              className={`rounded-lg border px-4 py-3 text-sm flex items-start justify-between gap-4 mb-3 ${
+                bulkMessage.type === 'success'
+                  ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800 text-green-700 dark:text-green-300'
+                  : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300'
+              }`}
+            >
+              <span>{bulkMessage.text}</span>
+              <button onClick={() => setBulkMessage(null)} className="shrink-0">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
           <div className="flex items-center justify-between gap-4 flex-wrap">
             <div className="text-sm text-gray-700 dark:text-slate-300">
               <span className="font-semibold">{selected.size} pesanan</span> dipilih
