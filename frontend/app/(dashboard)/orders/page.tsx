@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import api from '@/lib/api'
 import OrderActions from '@/components/OrderActions'
@@ -20,6 +20,13 @@ import {
   Clock,
 } from 'lucide-react'
 
+interface OrderItem {
+  name: string
+  quantity: number
+  price?: number
+  variant?: string | null
+}
+
 interface Order {
   id: string
   orderId: string
@@ -34,6 +41,7 @@ interface Order {
   logisticsStatus?: string | null
   awbFetchedAt?: string | null
   printed: boolean
+  items: OrderItem[]
   createdAt: string
 }
 
@@ -91,6 +99,22 @@ function relativeTime(iso: string): string {
   if (hours < 24) return `${hours} jam lalu`
   const days = Math.floor(hours / 24)
   return `${days} hari lalu`
+}
+
+/**
+ * Order.items is a JSON string column, but not every producer has written it
+ * that way. Anything unparseable degrades to an empty list: a missing product
+ * name is a cosmetic gap, whereas throwing here would take down the whole table.
+ */
+function parseItems(raw: unknown): OrderItem[] {
+  if (Array.isArray(raw)) return raw as OrderItem[]
+  if (typeof raw !== 'string' || raw.trim() === '') return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
 }
 
 function absoluteTime(iso: string): string {
@@ -222,6 +246,10 @@ export default function OrdersPage() {
         packageNumber: o.packageNumber || '',
         logisticsStatus: o.logisticsStatus ?? null,
         awbFetchedAt: o.awbFetchedAt ?? null,
+        // Stored as a JSON string in Postgres, but older rows and the TikTok
+        // path have been seen holding an array already — accept both rather
+        // than letting one bad row blank the column for the whole page.
+        items: parseItems(o.items),
         printed: o.printed !== undefined ? o.printed : Boolean(o.printedAt),
       }))
 
@@ -275,6 +303,16 @@ export default function OrdersPage() {
     fetchOrders()
   }, [fetchOrders])
 
+  // handleSync polls for up to 90 seconds, re-fetching as it goes. It captures
+  // fetchOrders from the render it was invoked in, so a filter changed mid-sync
+  // left that loop still querying with the old values — and its stale, unfiltered
+  // results overwrote the list the user was looking at. Reading through a ref
+  // keeps the loop pointed at the current filters.
+  const fetchOrdersRef = useRef(fetchOrders)
+  useEffect(() => {
+    fetchOrdersRef.current = fetchOrders
+  }, [fetchOrders])
+
   useEffect(() => {
     setSelected(new Set())
   }, [printFilter, page])
@@ -307,7 +345,7 @@ export default function OrdersPage() {
       while (Date.now() - startedAt < MAX_WAIT_MS) {
         await new Promise((r) => setTimeout(r, POLL_EVERY_MS))
         status = await fetchSyncStatus()
-        await fetchOrders()
+        await fetchOrdersRef.current()
 
         const allReported = status?.stores?.every(
           (s) => s.lastSyncAttemptAt && new Date(s.lastSyncAttemptAt).getTime() >= startedAt - 5_000
@@ -333,7 +371,9 @@ export default function OrdersPage() {
       })
     } finally {
       setSyncing(false)
-      await fetchOrders()
+      // Same stale-closure hazard as the poll loop above: this runs after a sync
+      // that may have lasted 90 seconds.
+      await fetchOrdersRef.current()
       await fetchSyncStatus()
     }
   }
@@ -714,6 +754,7 @@ export default function OrdersPage() {
                 <th className="table-header">Toko</th>
                 <th className="table-header">Platform</th>
                 <th className="table-header">Pembeli</th>
+                <th className="table-header">Produk</th>
                 <th className="table-header">Kurir</th>
                 <th className="table-header">Status</th>
                 <th className="table-header">Tanggal</th>
@@ -723,14 +764,14 @@ export default function OrdersPage() {
             <tbody className="divide-y divide-gray-100 dark:divide-slate-700/60">
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-16 text-center">
+                  <td colSpan={10} className="px-4 py-16 text-center">
                     <Loader2 className="w-8 h-8 animate-spin text-primary-600 mx-auto" />
                     <p className="text-sm text-gray-500 dark:text-slate-400 mt-2">Memuat pesanan...</p>
                   </td>
                 </tr>
               ) : orders.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-16 text-center">
+                  <td colSpan={10} className="px-4 py-16 text-center">
                     <Package className="w-12 h-12 text-gray-300 dark:text-slate-600 mx-auto mb-3" />
                     <p className="font-medium text-gray-900 dark:text-slate-200">Tidak ada pesanan</p>
                     <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">
@@ -781,6 +822,34 @@ export default function OrdersPage() {
                         </span>
                       </td>
                       <td className="table-cell">{order.buyerName}</td>
+                      <td className="table-cell max-w-[260px]">
+                        {order.items.length === 0 ? (
+                          <span className="text-xs text-gray-400 dark:text-slate-500">—</span>
+                        ) : (
+                          <div
+                            className="space-y-0.5"
+                            // Names run long enough that showing them in full would
+                            // dominate the row; the full list stays reachable on hover.
+                            title={order.items
+                              .map((it) => `${it.quantity}x ${it.name}${it.variant ? ` (${it.variant})` : ''}`)
+                              .join('\n')}
+                          >
+                            {order.items.slice(0, 2).map((it, idx) => (
+                              <p key={idx} className="text-sm text-gray-700 dark:text-slate-300 truncate">
+                                <span className="text-gray-400 dark:text-slate-500 font-mono text-xs">
+                                  {it.quantity}x
+                                </span>{' '}
+                                {it.name}
+                              </p>
+                            ))}
+                            {order.items.length > 2 && (
+                              <p className="text-xs text-gray-400 dark:text-slate-500">
+                                +{order.items.length - 2} produk lain
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </td>
                       <td className="table-cell">
                         <div>
                           <p>{order.courier}</p>
