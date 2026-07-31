@@ -1119,9 +1119,37 @@ class ShopeeService {
 
     console.error(`[ShopeeService.getShippingDocumentResult] shop=${shopId} orders=${normalized.length}`);
 
-    return this._request('POST', '/api/v2/logistics/get_shippping_document_result', {}, {
-      order_list: normalized,
-    }, accessToken, String(shopId));
+    // Shopee's docs spell this endpoint "shippping" (three p's). Whether the
+    // live API actually honours that spelling has proven unreliable — and an
+    // unknown path answers `error_not_found`, which is indistinguishable from
+    // "this package does not exist" and sends you hunting in the wrong place.
+    // Try the documented spelling, fall back to the conventional one.
+    const PATHS = [
+      '/api/v2/logistics/get_shippping_document_result',
+      '/api/v2/logistics/get_shipping_document_result',
+    ];
+
+    let lastErr;
+    for (const path of PATHS) {
+      try {
+        const resp = await this._request('POST', path, {}, {
+          order_list: normalized,
+        }, accessToken, String(shopId));
+
+        if (path !== PATHS[0]) {
+          console.error(`[ShopeeService.getShippingDocumentResult] NOTE: "${PATHS[0]}" failed but "${path}" worked — reorder PATHS to put this first.`);
+        }
+        return resp;
+      } catch (err) {
+        // Only a missing endpoint justifies trying the other spelling; a genuine
+        // rejection (package not ready, wrong shop) must surface as-is.
+        if (!/error_not_found/i.test(err.message)) throw err;
+        console.error(`[ShopeeService.getShippingDocumentResult] "${path}" returned error_not_found — trying next spelling`);
+        lastErr = err;
+      }
+    }
+
+    throw lastErr;
   }
 
   /**
