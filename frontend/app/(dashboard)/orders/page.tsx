@@ -822,7 +822,7 @@ export default function OrdersPage() {
                         </span>
                       </td>
                       <td className="table-cell">{order.buyerName}</td>
-                      <td className="table-cell max-w-[260px]">
+                      <td className="table-cell w-[200px] max-w-[200px]">
                         {order.items.length === 0 ? (
                           <span className="text-xs text-gray-400 dark:text-slate-500">—</span>
                         ) : (
@@ -868,7 +868,7 @@ export default function OrdersPage() {
                           </p>
                         )}
                       </td>
-                      <td className="table-cell text-gray-500 dark:text-slate-400">
+                      <td className="table-cell text-gray-500 dark:text-slate-400 whitespace-nowrap">
                         {new Date(order.createdAt).toLocaleDateString('id-ID', {
                           day: '2-digit',
                           month: 'short',
