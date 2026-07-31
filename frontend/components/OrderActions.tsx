@@ -372,9 +372,14 @@ export default function OrderActions({
     setError('')
     try {
       const res = await api.post<{ trackingNumber: string | null }>(`/orders/${order.id}/refresh-tracking`)
-      if (!res.data?.trackingNumber) {
-        setNotice('Resi belum terbit dari kurir. Coba lagi nanti.')
-      }
+      // The success path used to be silent — the request completes, the row
+      // re-fetches, and if the tracking number happened to be unchanged
+      // nothing on screen moves, so the click looked like it did nothing.
+      setNotice(
+        res.data?.trackingNumber
+          ? `Nomor resi: ${res.data.trackingNumber}`
+          : 'Resi belum terbit dari kurir. Coba lagi nanti.'
+      )
       onDone()
     } catch (err) {
       setError(errorMessage(err))
