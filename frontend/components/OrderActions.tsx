@@ -1,6 +1,7 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import api from '@/lib/api'
 import {
   MoreHorizontal,
@@ -118,6 +119,54 @@ export default function OrderActions({
   // itemKey -> package index (0-based)
   const [assignment, setAssignment] = useState<Record<string, number>>({})
 
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
+
+  // The orders table scrolls inside `overflow-hidden`/`overflow-x-auto`
+  // wrappers, which clip an absolutely positioned menu — the last rows and the
+  // rightmost column lost most of it. The menu is portalled to <body> and
+  // positioned against the button instead, flipping above it near the bottom
+  // edge and pulling back in when it would run past the right edge.
+  useEffect(() => {
+    if (!menuOpen) {
+      setMenuPos(null)
+      return
+    }
+
+    const place = () => {
+      const anchor = buttonRef.current?.getBoundingClientRect()
+      if (!anchor) return
+
+      const menu = menuRef.current?.getBoundingClientRect()
+      const width = menu?.width || 224
+      const height = menu?.height || 0
+      const gap = 4
+      const margin = 8
+
+      let top = anchor.bottom + gap
+      if (height && top + height > window.innerHeight - margin) {
+        top = Math.max(margin, anchor.top - height - gap)
+      }
+
+      const left = Math.min(
+        Math.max(margin, anchor.right - width),
+        Math.max(margin, window.innerWidth - width - margin),
+      )
+
+      setMenuPos({ top, left })
+    }
+
+    place()
+    // `true` so the table's own scroll container is heard, not just the window
+    window.addEventListener('scroll', place, true)
+    window.addEventListener('resize', place)
+    return () => {
+      window.removeEventListener('scroll', place, true)
+      window.removeEventListener('resize', place)
+    }
+  }, [menuOpen])
+
   const isShopee = order.platform === 'SHOPEE'
   const canShip = isShopee && ['READY_TO_SHIP', 'RETRY_SHIP'].includes(order.status)
   const canRetry = isShopee && (order.status === 'RETRY_SHIP' || order.logisticsStatus === 'LOGISTICS_PICKUP_RETRY')
@@ -133,6 +182,18 @@ export default function OrderActions({
 
   const errorMessage = (err: any) =>
     err?.response?.data?.error || err?.message || 'Terjadi kesalahan'
+
+  /**
+   * Show a failure and re-read the list.
+   *
+   * The fulfillment endpoints re-sync the row from Shopee before rejecting, so a
+   * refusal like "status is PROCESSED" means the badge still on screen is stale.
+   * Leaving it there is what makes the error look like it contradicts the table.
+   */
+  const failWith = (err: any) => {
+    setError(errorMessage(err))
+    onDone()
+  }
 
   const closeAll = () => {
     setModal(null)
@@ -165,7 +226,7 @@ export default function OrderActions({
       res.data.items.forEach((i) => { initial[itemKey(i)] = 0 })
       setAssignment(initial)
     } catch (err) {
-      setError(errorMessage(err))
+      failWith(err)
     } finally {
       setBusy(false)
     }
@@ -200,7 +261,7 @@ export default function OrderActions({
       setNotice(`Pesanan dipecah menjadi ${res.data?.packages ?? packageCount} paket.`)
       onDone()
     } catch (err) {
-      setError(errorMessage(err))
+      failWith(err)
     } finally {
       setBusy(false)
     }
@@ -215,7 +276,7 @@ export default function OrderActions({
       setNotice('Paket digabungkan kembali menjadi satu.')
       onDone()
     } catch (err) {
-      setError(errorMessage(err))
+      failWith(err)
       setModal('split')
     } finally {
       setBusy(false)
@@ -271,7 +332,7 @@ export default function OrderActions({
         setPickupTimeId(firstAddress.time_slot_list?.[0]?.pickup_time_id || '')
       }
     } catch (err) {
-      setError(errorMessage(err))
+      failWith(err)
     } finally {
       setBusy(false)
     }
@@ -313,7 +374,7 @@ export default function OrderActions({
       )
       onDone()
     } catch (err) {
-      setError(errorMessage(err))
+      failWith(err)
     } finally {
       setBusy(false)
     }
@@ -332,7 +393,7 @@ export default function OrderActions({
       setNotice('Penjemputan berhasil dijadwalkan ulang.')
       onDone()
     } catch (err) {
-      setError(errorMessage(err))
+      failWith(err)
     } finally {
       setBusy(false)
     }
@@ -346,7 +407,7 @@ export default function OrderActions({
       setNotice('Pesanan dibatalkan.')
       onDone()
     } catch (err) {
-      setError(errorMessage(err))
+      failWith(err)
     } finally {
       setBusy(false)
     }
@@ -360,7 +421,7 @@ export default function OrderActions({
       await api.post(`/orders/${order.id}/handle-cancellation`, { operation })
       onDone()
     } catch (err) {
-      setError(errorMessage(err))
+      failWith(err)
     } finally {
       setBusy(false)
     }
@@ -413,6 +474,7 @@ export default function OrderActions({
   return (
     <div className="relative">
       <button
+        ref={buttonRef}
         onClick={() => setMenuOpen((v) => !v)}
         disabled={busy}
         className="btn-ghost p-1.5"
@@ -421,10 +483,19 @@ export default function OrderActions({
         {busy && !modal ? <Loader2 className="w-4 h-4 animate-spin" /> : <MoreHorizontal className="w-4 h-4" />}
       </button>
 
-      {menuOpen && (
+      {menuOpen && typeof document !== 'undefined' && createPortal(
         <>
-          <div className="fixed inset-0 z-30" onClick={() => setMenuOpen(false)} />
-          <div className="absolute right-0 mt-1 w-56 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg z-40 py-1 text-sm">
+          <div className="fixed inset-0 z-[60]" onClick={() => setMenuOpen(false)} />
+          <div
+            ref={menuRef}
+            style={{
+              top: menuPos?.top ?? 0,
+              left: menuPos?.left ?? 0,
+              // Hidden for the frame before it is measured, so it never flashes
+              // in the top-left corner.
+              visibility: menuPos ? 'visible' : 'hidden',
+            }}
+            className="fixed w-56 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg z-[61] py-1 text-sm">
             {canShip && (
               <button onClick={() => openShippingModal('ship')} className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2">
                 <Truck className="w-4 h-4" /> Atur pengiriman
@@ -486,11 +557,12 @@ export default function OrderActions({
               </>
             )}
           </div>
-        </>
+        </>,
+        document.body,
       )}
 
-      {(modal || notice) && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={closeAll}>
+      {(modal || notice) && typeof document !== 'undefined' && createPortal(
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={closeAll}>
           <div
             className="card w-full max-w-lg p-5 space-y-4 max-h-[85vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
@@ -512,14 +584,16 @@ export default function OrderActions({
               </button>
             </div>
 
+            {/* Shopee errors carry an unbroken request_id that overflows the box
+                and gets clipped without an explicit break. */}
             {error && (
-              <div className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+              <div className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 text-sm text-red-700 dark:text-red-300 break-words [overflow-wrap:anywhere]">
                 {error}
               </div>
             )}
 
             {notice && (
-              <div className="rounded-lg bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 px-3 py-2 text-sm text-green-700 dark:text-green-300">
+              <div className="rounded-lg bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 px-3 py-2 text-sm text-green-700 dark:text-green-300 break-words [overflow-wrap:anywhere]">
                 {notice}
               </div>
             )}
@@ -811,7 +885,8 @@ export default function OrderActions({
               </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )

@@ -221,7 +221,10 @@ async function getShippingOptions(orderRowId) {
   // which state was actually the problem. arrangeShipment guards on the same
   // conditions; this is the read-only step that precedes it.
   if (live.orderStatus && !['READY_TO_SHIP', 'RETRY_SHIP'].includes(live.orderStatus)) {
-    throw fail(409, `Pesanan berstatus ${live.orderStatus} di Shopee — pengiriman hanya bisa diatur saat READY_TO_SHIP atau RETRY_SHIP`);
+    const hint = live.orderStatus === 'PROCESSED'
+      ? ' — pengirimannya sudah diatur sebelumnya'
+      : ' — pengiriman hanya bisa diatur saat READY_TO_SHIP atau RETRY_SHIP';
+    throw fail(409, `Pesanan berstatus ${live.orderStatus} di Shopee${hint}. Status di daftar sudah diperbarui.`);
   }
 
   if (live.logisticsStatus && !AWB_TOO_EARLY.has(live.logisticsStatus)) {
