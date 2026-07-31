@@ -105,6 +105,8 @@ export default function OrderActions({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  // A failed action left the list out of date; refreshed on close (see failWith)
+  const [stale, setStale] = useState(false)
 
   const [options, setOptions] = useState<ShippingOptions | null>(null)
   const [mode, setMode] = useState('')
@@ -184,18 +186,26 @@ export default function OrderActions({
     err?.response?.data?.error || err?.message || 'Terjadi kesalahan'
 
   /**
-   * Show a failure and re-read the list.
+   * Show a failure and queue a refresh of the list.
    *
    * The fulfillment endpoints re-sync the row from Shopee before rejecting, so a
    * refusal like "status is PROCESSED" means the badge still on screen is stale.
    * Leaving it there is what makes the error look like it contradicts the table.
+   *
+   * The refresh waits for the dialog to close: a re-read can drop this row from
+   * the current filter, which unmounts this component and takes the message the
+   * operator still has to read with it.
    */
   const failWith = (err: any) => {
     setError(errorMessage(err))
-    onDone()
+    setStale(true)
   }
 
   const closeAll = () => {
+    if (stale) {
+      setStale(false)
+      onDone()
+    }
     setModal(null)
     setMenuOpen(false)
     setError('')

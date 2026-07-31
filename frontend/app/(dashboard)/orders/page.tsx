@@ -210,8 +210,17 @@ export default function OrdersPage() {
     return times.reduce((oldest, t) => (new Date(t) < new Date(oldest) ? t : oldest))
   })()
 
-  const fetchOrders = useCallback(async () => {
-    setLoading(true)
+  /**
+   * @param opts.background - Refresh without the full-table skeleton.
+   *
+   * While `loading` is true the tbody renders a placeholder row instead of the
+   * orders, which unmounts every row — and with them any per-order dialog that
+   * is open, along with its error or success message. A refresh triggered by an
+   * action (a fulfillment call, a sync poll) must therefore leave the rows in
+   * place; only a first load or a filter change blocks.
+   */
+  const fetchOrders = useCallback(async (opts?: { background?: boolean }) => {
+    if (!opts?.background) setLoading(true)
     try {
       const params: any = {
         page,
@@ -345,7 +354,7 @@ export default function OrdersPage() {
       while (Date.now() - startedAt < MAX_WAIT_MS) {
         await new Promise((r) => setTimeout(r, POLL_EVERY_MS))
         status = await fetchSyncStatus()
-        await fetchOrdersRef.current()
+        await fetchOrdersRef.current({ background: true })
 
         const allReported = status?.stores?.every(
           (s) => s.lastSyncAttemptAt && new Date(s.lastSyncAttemptAt).getTime() >= startedAt - 5_000
@@ -876,7 +885,7 @@ export default function OrdersPage() {
                         })}
                       </td>
                       <td className="table-cell">
-                        <OrderActions order={order} onDone={fetchOrders} />
+                        <OrderActions order={order} onDone={() => fetchOrders({ background: true })} />
                       </td>
                     </tr>
                   )
