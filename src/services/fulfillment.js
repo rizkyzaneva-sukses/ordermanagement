@@ -135,8 +135,54 @@ async function fetchLiveState(ctx) {
     logisticsStatus,
     trackingNumber:  detail.tracking_number || null,
     itemList:        detail.item_list || [],
+    packageCount:    packages.length,
     raw:             detail,
   };
+}
+
+// ── package_number gating ─────────────────────────────────────────────────────
+
+/**
+ * Count how many local package rows exist per order_sn.
+ *
+ * @param {string} storeId
+ * @param {string[]} orderSns
+ * @returns {Promise<Map<string, number>>}
+ */
+async function countPackageRows(storeId, orderSns) {
+  const rows = await prisma.order.findMany({
+    where: { storeId, orderId: { in: [...new Set(orderSns)] } },
+    select: { orderId: true },
+  });
+
+  const counts = new Map();
+  for (const row of rows) counts.set(row.orderId, (counts.get(row.orderId) || 0) + 1);
+  return counts;
+}
+
+/**
+ * The `package_number` to send on a logistics call, or `undefined`.
+ *
+ * get_order_detail returns a package_number even for an order that was never
+ * split, and the sync stores it — but Shopee rejects that number on ship_order
+ * ("Please don't request with package_number for this unsplit order"). Since an
+ * unsplit order has exactly one package, omitting the number targets the same
+ * package and is accepted everywhere, so it is only ever sent for a genuine
+ * split.
+ *
+ * @param {Object} order - Local order row
+ * @param {Object} [live] - fetchLiveState result; authoritative when present
+ * @returns {Promise<string|undefined>}
+ */
+async function packageNumberForLogistics(order, live) {
+  if (!order.packageNumber) return undefined;
+
+  if (live && typeof live.packageCount === 'number' && live.packageCount > 0) {
+    return live.packageCount > 1 ? order.packageNumber : undefined;
+  }
+
+  const counts = await countPackageRows(order.storeId, [order.orderId]);
+  return (counts.get(order.orderId) || 1) > 1 ? order.packageNumber : undefined;
 }
 
 /**
@@ -182,8 +228,10 @@ async function getShippingOptions(orderRowId) {
     throw fail(409, `Pengiriman paket ini sudah diatur sebelumnya (${live.logisticsStatus}) — tidak perlu diatur ulang`);
   }
 
+  const pkgNumber = await packageNumberForLogistics(ctx.order, live);
+
   const resp = await shopeeService.getShippingParameter(
-    ctx.accessToken, ctx.store.shopId, ctx.order.orderId, ctx.order.packageNumber || undefined);
+    ctx.accessToken, ctx.store.shopId, ctx.order.orderId, pkgNumber);
 
   const infoNeeded = resp.response?.info_needed || {};
   const available = ['pickup', 'dropoff', 'non_integrated']
@@ -220,6 +268,8 @@ async function arrangeShipment(orderRowId, options = {}) {
   const live = await fetchLiveState(ctx);
   await syncRowFromLiveState(orderRowId, live);
 
+  const pkgNumber = await packageNumberForLogistics(ctx.order, live);
+
   // KB Rule #6: already arranged → do not send a second ship_order
   if (live.logisticsStatus && !AWB_TOO_EARLY.has(live.logisticsStatus)) {
     if (AWB_TOO_LATE.has(live.logisticsStatus) && live.logisticsStatus !== 'LOGISTICS_PICKUP_RETRY') {
@@ -228,7 +278,7 @@ async function arrangeShipment(orderRowId, options = {}) {
 
     console.log(`[fulfillment] ${ctx.order.orderId} already arranged (${live.logisticsStatus}) — refreshing tracking only`);
     const tracking = await shopeeService.pollTrackingNumber(
-      ctx.accessToken, ctx.store.shopId, ctx.order.orderId, ctx.order.packageNumber || undefined);
+      ctx.accessToken, ctx.store.shopId, ctx.order.orderId, pkgNumber);
 
     const updated = await syncRowFromLiveState(orderRowId, live, tracking ? { trackingNumber: tracking } : {});
     return { alreadyArranged: true, logisticsStatus: live.logisticsStatus, trackingNumber: tracking, order: updated };
@@ -239,7 +289,7 @@ async function arrangeShipment(orderRowId, options = {}) {
   }
 
   const paramResp = await shopeeService.getShippingParameter(
-    ctx.accessToken, ctx.store.shopId, ctx.order.orderId, ctx.order.packageNumber || undefined);
+    ctx.accessToken, ctx.store.shopId, ctx.order.orderId, pkgNumber);
 
   const infoNeeded = paramResp.response?.info_needed || {};
   const mode = options.mode || shopeeService.pickShippingMode(infoNeeded);
@@ -250,7 +300,7 @@ async function arrangeShipment(orderRowId, options = {}) {
 
   await shopeeService.shipOrder(ctx.accessToken, ctx.store.shopId, {
     orderSn:       ctx.order.orderId,
-    packageNumber: ctx.order.packageNumber || undefined,
+    packageNumber: pkgNumber,
     mode,
     modeData:      options.modeData || {},
     slug:          paramResp.response?.slug || undefined,
@@ -258,7 +308,7 @@ async function arrangeShipment(orderRowId, options = {}) {
 
   // The tracking number often lags the ship_order call (KB §9)
   const trackingNumber = await shopeeService.pollTrackingNumber(
-    ctx.accessToken, ctx.store.shopId, ctx.order.orderId, ctx.order.packageNumber || undefined);
+    ctx.accessToken, ctx.store.shopId, ctx.order.orderId, pkgNumber);
 
   const updated = await prisma.order.update({
     where: { id: orderRowId },
@@ -369,15 +419,21 @@ async function massArrangeShipment(orderRowIds, options = {}) {
  * @returns {Promise<{ mode: string, shipped: Object[], failed: Object[] }>}
  */
 async function shipOneBatch(accessToken, store, rows, options = {}) {
+  // Same unsplit rule as the single-order path: only a genuinely split order may
+  // carry a package_number (see packageNumberForLogistics).
+  const counts = await countPackageRows(store.id, rows.map(r => r.orderId));
+  const pkgOf = (row) =>
+    (row.packageNumber && (counts.get(row.orderId) || 1) > 1) ? row.packageNumber : undefined;
+
   let mode = options.mode;
   if (!mode) {
     const paramResp = await shopeeService.getMassShippingParameter(accessToken, store.shopId,
-      rows.map(r => ({ order_sn: r.orderId, package_number: r.packageNumber || undefined })));
+      rows.map(r => ({ order_sn: r.orderId, package_number: pkgOf(r) })));
     mode = shopeeService.pickShippingMode(paramResp.response?.info_needed || {});
   }
 
   const resp = await shopeeService.massShipOrder(accessToken, store.shopId, {
-    orders: rows.map(r => ({ orderSn: r.orderId, packageNumber: r.packageNumber || undefined })),
+    orders: rows.map(r => ({ orderSn: r.orderId, packageNumber: pkgOf(r) })),
     mode,
     modeData: options.modeData || {},
   });
@@ -402,14 +458,17 @@ async function shipOneBatch(accessToken, store, rows, options = {}) {
     // let the next sync pick up the rest (KB §9).
     try {
       const trackingResp = await shopeeService.getMassTrackingNumber(accessToken, store.shopId,
-        shippedRows.map(r => ({ order_sn: r.orderId, package_number: r.packageNumber || undefined })));
+        shippedRows.map(r => ({ order_sn: r.orderId, package_number: pkgOf(r) })));
 
       const results = trackingResp.response?.success_list || trackingResp.response?.order_list || [];
       for (const result of results) {
         if (!result.tracking_number) continue;
+        // An unsplit order has one row, and the response may or may not echo a
+        // package_number for it — match on order_sn alone in that case.
         const row = shippedRows.find(r =>
           r.orderId === result.order_sn &&
-          (r.packageNumber || '') === String(result.package_number || ''));
+          ((counts.get(r.orderId) || 1) <= 1 ||
+            (r.packageNumber || '') === String(result.package_number || '')));
         if (row) {
           await prisma.order.update({
             where: { id: row.id },
@@ -452,7 +511,7 @@ async function retryShipment(orderRowId, { addressId, pickupTimeId } = {}) {
 
   await shopeeService.updateShippingOrder(ctx.accessToken, ctx.store.shopId, {
     orderSn:       ctx.order.orderId,
-    packageNumber: ctx.order.packageNumber || undefined,
+    packageNumber: await packageNumberForLogistics(ctx.order, live),
     addressId,
     pickupTimeId,
   });
@@ -819,7 +878,8 @@ async function refreshTracking(orderRowId) {
   const ctx = await loadContext(orderRowId);
 
   const resp = await shopeeService.getTrackingNumber(
-    ctx.accessToken, ctx.store.shopId, ctx.order.orderId, ctx.order.packageNumber || undefined);
+    ctx.accessToken, ctx.store.shopId, ctx.order.orderId,
+    await packageNumberForLogistics(ctx.order));
 
   const trackingNumber = resp.response?.tracking_number || null;
 
@@ -843,7 +903,8 @@ async function getTrackingEvents(orderRowId) {
   const ctx = await loadContext(orderRowId);
 
   const resp = await shopeeService.getTrackingInfo(
-    ctx.accessToken, ctx.store.shopId, ctx.order.orderId, ctx.order.packageNumber || undefined);
+    ctx.accessToken, ctx.store.shopId, ctx.order.orderId,
+    await packageNumberForLogistics(ctx.order));
 
   return {
     currentStatus: resp.response?.logistics_status || null,
