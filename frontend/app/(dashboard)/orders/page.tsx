@@ -17,6 +17,7 @@ import {
   FileDown,
   AlertTriangle,
   X,
+  Clock,
 } from 'lucide-react'
 
 interface Order {
@@ -74,6 +75,32 @@ interface SyncStatus {
 }
 
 type PrintFilter = 'belum' | 'sudah' | 'semua'
+
+/**
+ * "3 menit lalu" — the form that actually answers "is what I'm looking at
+ * current?". An absolute timestamp alone forces the reader to do that
+ * subtraction themselves.
+ */
+function relativeTime(iso: string): string {
+  const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
+
+  if (seconds < 60) return 'baru saja'
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} menit lalu`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} jam lalu`
+  const days = Math.floor(hours / 24)
+  return `${days} hari lalu`
+}
+
+function absoluteTime(iso: string): string {
+  return new Date(iso).toLocaleString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
 
 const statusBadgeClass: Record<string, string> = {
   PENDING: 'badge-pending',
@@ -145,6 +172,19 @@ export default function OrdersPage() {
   const [dateTo, setDateTo] = useState('')
 
   const limit = 20
+
+  // The oldest successful sync across all stores, not the newest: with several
+  // shops the page is only as fresh as whichever one lagged furthest behind, and
+  // showing the newest would overstate how current the list is. Stores that have
+  // never synced are skipped rather than treated as infinitely stale — they have
+  // no data here to be stale about.
+  const lastSyncedAt = (() => {
+    const times = (syncStatus?.stores ?? [])
+      .map((s) => s.lastSyncAt)
+      .filter((t): t is string => Boolean(t))
+    if (times.length === 0) return null
+    return times.reduce((oldest, t) => (new Date(t) < new Date(oldest) ? t : oldest))
+  })()
 
   const fetchOrders = useCallback(async () => {
     setLoading(true)
@@ -219,6 +259,16 @@ export default function OrdersPage() {
   useEffect(() => {
     fetchStores()
     fetchSyncStatus()
+  }, [fetchSyncStatus])
+
+  // Keep the freshness line honest on a page left open. Two things go stale:
+  // the elapsed-time text (recomputed each render, so it needs a re-render) and
+  // lastSyncAt itself (the 15-minute scheduled sync moves it server-side with
+  // nothing here to notice). Re-fetching covers both, and a minute is frequent
+  // enough for a label that reads in whole minutes.
+  useEffect(() => {
+    const id = setInterval(() => { fetchSyncStatus() }, 60_000)
+    return () => clearInterval(id)
   }, [fetchSyncStatus])
 
   useEffect(() => {
@@ -458,6 +508,15 @@ export default function OrdersPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">Pesanan</h1>
           <p className="text-sm text-gray-500 dark:text-slate-400 mt-0.5">Kelola semua pesanan dari berbagai marketplace</p>
+          {lastSyncedAt && (
+            <p className="text-xs text-gray-500 dark:text-slate-400 mt-1 flex items-center gap-1.5">
+              <Clock className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                Data terakhir disinkronkan <span className="font-medium">{relativeTime(lastSyncedAt)}</span>
+                <span className="text-gray-400 dark:text-slate-500"> · {absoluteTime(lastSyncedAt)}</span>
+              </span>
+            </p>
+          )}
         </div>
         <button onClick={handleSync} disabled={syncing} className="btn-primary self-start sm:self-auto flex items-center gap-2">
           {syncing ? (
