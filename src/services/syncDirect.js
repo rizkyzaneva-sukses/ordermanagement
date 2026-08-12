@@ -282,12 +282,19 @@ async function runStoreSync(storeId) {
 
     // Fetch multiple statuses in parallel — Shopee only supports one status per call
     // Based on KB: READY_TO_SHIP = no tracking yet, PROCESSED = may have tracking,
-    // SHIPPED = has tracking (courier scanned AWB), RETRY_SHIP = pickup failed
+    // SHIPPED = has tracking (courier scanned AWB)
+    //
+    // RETRY_SHIP is deliberately absent. It is a real order_status in a
+    // get_order_detail response, but get_order_list rejects it as a filter
+    // ("order_status is invalid"), so asking for it only ever produced a failed
+    // request and an alarming log line every sync. Nothing is lost: a failed
+    // pickup leaves the package in LOGISTICS_PICKUP_RETRY, which Pass 0 below
+    // picks up via search_package_list(package_status=0), and the authoritative
+    // status comes from get_order_detail regardless.
     const STATUSES_TO_FETCH = [
       'READY_TO_SHIP',   // Paid, seller belum kirim
       'PROCESSED',       // Seller sudah ship_order, tracking mungkin belum terbit
       'SHIPPED',         // Kurir sudah scan AWB → pasti ada tracking number
-      'RETRY_SHIP',      // Pickup gagal, perlu atur ulang
       'UNPAID',          // Belum bayar (opsional, untuk monitoring)
     ];
 
