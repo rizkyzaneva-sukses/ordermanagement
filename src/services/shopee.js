@@ -723,6 +723,12 @@ class ShopeeService {
    * Shopee only accepts a batch whose orders share the same logistics channel
    * and warehouse (KB §4.2).
    *
+   * ⚠️ Currently unused, and the payload below is known to be rejected: Shopee
+   * answers "package_list is a required field", so each order entry wants a
+   * nested package_list rather than a flat package_number. The exact shape has
+   * not been confirmed, so `massArrangeShipment` loops the single-order
+   * endpoints instead. Do not wire this back in without verifying it first.
+   *
    * @param {string} accessToken
    * @param {string|number} shopId
    * @param {Array<{order_sn:string, package_number?:string}>} orderList
@@ -813,6 +819,9 @@ class ShopeeService {
    *
    * Shopee requires every order in the batch to share the same logistics
    * channel and warehouse (KB §4.2); mixed batches must be split by the caller.
+   *
+   * ⚠️ Unused — same unverified `package_list` requirement as
+   * `getMassShippingParameter` above. See `massArrangeShipment`.
    *
    * @param {string}        accessToken
    * @param {string|number} shopId

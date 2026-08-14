@@ -264,9 +264,13 @@ async function getShippingOptions(orderRowId) {
  * @param {'pickup'|'dropoff'|'non_integrated'} [options.mode] - Auto-selected when omitted
  * @param {Object} [options.modeData={}]
  * @param {string} [options.userId] - Recorded as the operator who processed it
+ * @param {boolean} [options.pollTracking=true] - Wait for the tracking number.
+ *   Turned off for bulk runs, where five polls per order would dominate the
+ *   whole operation; the next sync fills the numbers in instead.
  * @returns {Promise<Object>}
  */
 async function arrangeShipment(orderRowId, options = {}) {
+  const pollTracking = options.pollTracking !== false;
   const ctx = await loadContext(orderRowId);
   const live = await fetchLiveState(ctx);
   await syncRowFromLiveState(orderRowId, live);
@@ -280,8 +284,9 @@ async function arrangeShipment(orderRowId, options = {}) {
     }
 
     console.log(`[fulfillment] ${ctx.order.orderId} already arranged (${live.logisticsStatus}) — refreshing tracking only`);
-    const tracking = await shopeeService.pollTrackingNumber(
-      ctx.accessToken, ctx.store.shopId, ctx.order.orderId, pkgNumber);
+    const tracking = pollTracking
+      ? await shopeeService.pollTrackingNumber(ctx.accessToken, ctx.store.shopId, ctx.order.orderId, pkgNumber)
+      : live.trackingNumber;
 
     const updated = await syncRowFromLiveState(orderRowId, live, tracking ? { trackingNumber: tracking } : {});
     return { alreadyArranged: true, logisticsStatus: live.logisticsStatus, trackingNumber: tracking, order: updated };
@@ -310,8 +315,9 @@ async function arrangeShipment(orderRowId, options = {}) {
   });
 
   // The tracking number often lags the ship_order call (KB §9)
-  const trackingNumber = await shopeeService.pollTrackingNumber(
-    ctx.accessToken, ctx.store.shopId, ctx.order.orderId, pkgNumber);
+  const trackingNumber = pollTracking
+    ? await shopeeService.pollTrackingNumber(ctx.accessToken, ctx.store.shopId, ctx.order.orderId, pkgNumber)
+    : null;
 
   const updated = await prisma.order.update({
     where: { id: orderRowId },
@@ -331,17 +337,61 @@ async function arrangeShipment(orderRowId, options = {}) {
 }
 
 /**
- * Arrange shipment for many packages in one Shopee call.
+ * Pickup addresses and time slots to offer for a bulk shipment.
  *
- * Shopee only accepts a batch whose packages share a logistics channel and
- * warehouse (KB §4.2). Rather than guess at that, we send the batch and report
- * back Shopee's own per-order verdict, so a rejected subset is visible instead
- * of silently dropped.
+ * `get_shipping_parameter` is per-order, but a seller's pickup addresses are a
+ * shop-level setting, so one order's answer serves the whole batch. Which order
+ * it comes from still matters: a selection easily contains one Shopee has moved
+ * on since the list was loaded, and failing the dialog because that order
+ * happened to be first would be needless. So try a few before giving up, and
+ * report the last refusal if none of them can answer.
+ *
+ * @param {string[]} orderRowIds
+ * @returns {Promise<Object>} getShippingOptions result, plus the order it came from
+ */
+async function getMassShippingOptions(orderRowIds) {
+  if (!Array.isArray(orderRowIds) || orderRowIds.length === 0) {
+    throw fail(400, 'orderRowIds must be a non-empty array');
+  }
+
+  const MAX_ATTEMPTS = 3;
+  let lastError = null;
+
+  for (const orderRowId of orderRowIds.slice(0, MAX_ATTEMPTS)) {
+    try {
+      const options = await getShippingOptions(orderRowId);
+      return { ...options, sourceOrderRowId: orderRowId };
+    } catch (err) {
+      console.warn(`[fulfillment] Mass shipping options: ${orderRowId} could not answer (${err.message})`);
+      lastError = err;
+    }
+  }
+
+  throw lastError || fail(409, 'Tidak ada pesanan terpilih yang bisa memberikan opsi pengiriman');
+}
+
+/**
+ * Arrange shipment for many packages.
+ *
+ * Runs the single-package flow once per order instead of calling
+ * `mass_ship_order`. Shopee rejects our batch payload with "package_list is a
+ * required field": its batch endpoints want a per-order `package_list` whose
+ * exact shape we have not been able to confirm, and guessing at it on a live
+ * shop costs a whole selection per attempt. The single-order endpoints are the
+ * ones the KB documents and the ones already working here.
+ *
+ * The loop also removes the all-or-nothing failure mode that made this visible:
+ * one malformed field used to take down every order in the batch, which is
+ * exactly what happened. Now each order reports its own verdict.
+ *
+ * Sequential on purpose — fifty parallel ship_order calls against one shop is a
+ * good way to meet Shopee's rate limiter.
  *
  * @param {string[]} orderRowIds
  * @param {Object} [options={}]
  * @param {'pickup'|'dropoff'|'non_integrated'} [options.mode]
- * @param {Object} [options.modeData={}]
+ * @param {Object} [options.modeData={}] - Required for pickup (address_id,
+ *   pickup_time_id) and non_integrated (tracking_number)
  * @param {string} [options.userId]
  * @returns {Promise<{ shipped: Object[], failed: Object[] }>}
  */
@@ -350,7 +400,7 @@ async function massArrangeShipment(orderRowIds, options = {}) {
     throw fail(400, 'orderRowIds must be a non-empty array');
   }
   if (orderRowIds.length > 50) {
-    throw fail(400, 'Shopee accepts at most 50 packages per mass_ship_order call');
+    throw fail(400, 'At most 50 packages can be shipped in one request');
   }
 
   const rows = await prisma.order.findMany({
@@ -370,126 +420,30 @@ async function massArrangeShipment(orderRowIds, options = {}) {
     throw fail(400, `Mass ship is only supported for Shopee stores (this one is ${store.platform})`);
   }
 
-  const accessToken = await ensureFreshToken(store);
-
-  // Shopee rejects a batch that mixes logistics channels (KB §4.2), so split the
-  // selection into per-channel batches rather than sending one doomed request.
-  // Rows synced before the channel was recorded fall back to the carrier name,
-  // which is a coarser but still useful grouping.
-  const batches = new Map();
-  for (const row of rows) {
-    const key = row.logisticsChannelId != null
-      ? `channel:${row.logisticsChannelId}`
-      : `carrier:${row.shippingCourier || 'unknown'}`;
-    if (!batches.has(key)) batches.set(key, []);
-    batches.get(key).push(row);
-  }
-
-  console.log(`[fulfillment] Mass ship split into ${batches.size} channel batch(es)`);
-
-  const allShipped = [];
-  const allFailed = [];
+  const shipped = [];
+  const failed = [];
   const modesUsed = new Set();
 
-  for (const [key, batchRows] of batches) {
+  for (const row of rows) {
     try {
-      const result = await shipOneBatch(accessToken, store, batchRows, options);
-      allShipped.push(...result.shipped);
-      allFailed.push(...result.failed);
-      modesUsed.add(result.mode);
+      const result = await arrangeShipment(row.id, { ...options, pollTracking: false });
+      if (result.mode) modesUsed.add(result.mode);
+      shipped.push({
+        id: row.id,
+        orderId: row.orderId,
+        alreadyArranged: Boolean(result.alreadyArranged),
+      });
     } catch (err) {
-      console.warn(`[fulfillment] Mass ship batch ${key} failed entirely: ${err.message}`);
-      allFailed.push(...batchRows.map(r => ({ orderId: r.orderId, message: err.message })));
+      failed.push({ orderId: row.orderId, message: err.message });
     }
   }
 
-  console.log(`[fulfillment] Mass ship overall: ${allShipped.length} shipped, ${allFailed.length} rejected`);
+  console.log(`[fulfillment] Mass ship: ${shipped.length} shipped, ${failed.length} rejected`);
 
   return {
-    mode: modesUsed.size === 1 ? [...modesUsed][0] : [...modesUsed].join('+'),
-    batches: batches.size,
-    shipped: allShipped,
-    failed: allFailed,
-  };
-}
-
-/**
- * Ship one single-channel batch and persist the outcome.
- *
- * Split out of `massArrangeShipment` so each channel batch succeeds or fails on
- * its own rather than taking the whole selection down with it.
- *
- * @returns {Promise<{ mode: string, shipped: Object[], failed: Object[] }>}
- */
-async function shipOneBatch(accessToken, store, rows, options = {}) {
-  // Same unsplit rule as the single-order path: only a genuinely split order may
-  // carry a package_number (see packageNumberForLogistics).
-  const counts = await countPackageRows(store.id, rows.map(r => r.orderId));
-  const pkgOf = (row) =>
-    (row.packageNumber && (counts.get(row.orderId) || 1) > 1) ? row.packageNumber : undefined;
-
-  let mode = options.mode;
-  if (!mode) {
-    const paramResp = await shopeeService.getMassShippingParameter(accessToken, store.shopId,
-      rows.map(r => ({ order_sn: r.orderId, package_number: pkgOf(r) })));
-    mode = shopeeService.pickShippingMode(paramResp.response?.info_needed || {});
-  }
-
-  const resp = await shopeeService.massShipOrder(accessToken, store.shopId, {
-    orders: rows.map(r => ({ orderSn: r.orderId, packageNumber: pkgOf(r) })),
-    mode,
-    modeData: options.modeData || {},
-  });
-
-  const failures = resp.response?.result_list?.filter(r => r.fail_error || r.fail_message) || [];
-  const failedSns = new Set(failures.map(f => f.order_sn));
-
-  const shippedRows = rows.filter(r => !failedSns.has(r.orderId));
-
-  if (shippedRows.length > 0) {
-    await prisma.order.updateMany({
-      where: { id: { in: shippedRows.map(r => r.id) } },
-      data: {
-        status:          'PROCESSED',
-        logisticsStatus: mode === 'non_integrated' ? 'LOGISTICS_PICKUP_DONE' : 'LOGISTICS_REQUEST_CREATED',
-        processedAt:     new Date(),
-        ...(options.userId ? { processedById: options.userId } : {}),
-      },
-    });
-
-    // Tracking numbers lag the ship call, so gather what is available now and
-    // let the next sync pick up the rest (KB §9).
-    try {
-      const trackingResp = await shopeeService.getMassTrackingNumber(accessToken, store.shopId,
-        shippedRows.map(r => ({ order_sn: r.orderId, package_number: pkgOf(r) })));
-
-      const results = trackingResp.response?.success_list || trackingResp.response?.order_list || [];
-      for (const result of results) {
-        if (!result.tracking_number) continue;
-        // An unsplit order has one row, and the response may or may not echo a
-        // package_number for it — match on order_sn alone in that case.
-        const row = shippedRows.find(r =>
-          r.orderId === result.order_sn &&
-          ((counts.get(r.orderId) || 1) <= 1 ||
-            (r.packageNumber || '') === String(result.package_number || '')));
-        if (row) {
-          await prisma.order.update({
-            where: { id: row.id },
-            data: { trackingNumber: result.tracking_number },
-          });
-        }
-      }
-    } catch (err) {
-      console.warn(`[fulfillment] Mass tracking lookup after ship failed: ${err.message}`);
-    }
-  }
-
-  console.log(`[fulfillment] Batch of ${rows.length} mode=${mode}: ${shippedRows.length} shipped, ${failures.length} rejected`);
-
-  return {
-    mode,
-    shipped: shippedRows.map(r => ({ id: r.id, orderId: r.orderId })),
-    failed: failures.map(f => ({ orderId: f.order_sn, error: f.fail_error, message: f.fail_message })),
+    mode: [...modesUsed].join('+') || null,
+    shipped,
+    failed,
   };
 }
 
@@ -1224,6 +1178,7 @@ async function fetchAwbDataForRows(rows) {
 module.exports = {
   fetchAwbDataForRows,
   getShippingOptions,
+  getMassShippingOptions,
   arrangeShipment,
   massArrangeShipment,
   retryShipment,

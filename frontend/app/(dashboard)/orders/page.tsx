@@ -82,6 +82,24 @@ interface SyncStatus {
   workerRunning: boolean
 }
 
+/** Pickup addresses offered for a bulk shipment (POST /orders/ship-mass/options) */
+interface MassShipOptions {
+  availableModes: string[]
+  pickup?: {
+    address_list?: Array<{
+      address_id: number
+      address?: string
+      city?: string
+      state?: string
+      time_slot_list?: Array<{
+        pickup_time_id: string
+        date?: number
+        time_text?: string
+      }>
+    }>
+  } | null
+}
+
 type PrintFilter = 'belum' | 'sudah' | 'semua'
 
 /**
@@ -179,6 +197,10 @@ export default function OrdersPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkMessage, setBulkMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [massShipOpen, setMassShipOpen] = useState(false)
+  const [massShipOptions, setMassShipOptions] = useState<MassShipOptions | null>(null)
+  const [massAddressId, setMassAddressId] = useState<number | null>(null)
+  const [massPickupTimeId, setMassPickupTimeId] = useState('')
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
   const [awaitingTracking, setAwaitingTracking] = useState(0)
 
@@ -444,6 +466,9 @@ export default function OrdersPage() {
   const tiktokCount = selectedOrders.filter((o) => o.platform === 'TIKTOK' && isPrintable(o)).length
 
   const shippableSelected = selectedOrders.filter(isShippable)
+  const selectedMassAddress = massShipOptions?.pickup?.address_list?.find(
+    (a) => a.address_id === massAddressId
+  )
   const awbSelected = selectedOrders.filter((o) => o.platform === 'SHOPEE' && isPrintable(o))
   // One AWB request covers a single shop, so the button is only meaningful when
   // the selection has not spread across stores.
@@ -469,14 +494,54 @@ export default function OrdersPage() {
     return body?.error || err?.message || 'Gagal memproses permintaan'
   }
 
+  /**
+   * Open the bulk-ship dialog and load the pickup addresses to offer.
+   *
+   * Shopee needs an address and a time slot before it will accept a pickup, and
+   * those are a shop-level setting, so one order's answer covers the selection.
+   */
+  const openMassShip = async () => {
+    if (shippableSelected.length === 0) return
+    setMassShipOpen(true)
+    setMassShipOptions(null)
+    setMassAddressId(null)
+    setMassPickupTimeId('')
+    setBulkMessage(null)
+    setBulkBusy(true)
+    try {
+      const res = await api.post<MassShipOptions>('/orders/ship-mass/options', {
+        ids: shippableSelected.map((o) => o.id),
+      })
+      setMassShipOptions(res.data)
+
+      const firstAddress = res.data.pickup?.address_list?.[0]
+      if (firstAddress) {
+        setMassAddressId(firstAddress.address_id)
+        setMassPickupTimeId(firstAddress.time_slot_list?.[0]?.pickup_time_id || '')
+      }
+    } catch (err) {
+      setBulkMessage({ type: 'error', text: await readError(err) })
+      setMassShipOpen(false)
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
   const handleMassShip = async () => {
     if (shippableSelected.length === 0) return
+    if (!massAddressId || !massPickupTimeId) {
+      setBulkMessage({ type: 'error', text: 'Pilih alamat dan slot waktu penjemputan terlebih dahulu' })
+      return
+    }
     setBulkBusy(true)
     setBulkMessage(null)
     try {
       const res = await api.post<any>('/orders/ship-mass', {
         ids: shippableSelected.map((o) => o.id),
+        mode: 'pickup',
+        modeData: { address_id: massAddressId, pickup_time_id: massPickupTimeId },
       })
+      setMassShipOpen(false)
       const shipped = res.data?.shipped?.length ?? 0
       const failed = res.data?.failed ?? []
 
@@ -960,6 +1025,120 @@ export default function OrdersPage() {
         </div>
       )}
 
+      {/* Bulk ship dialog. Shopee will not accept a pickup without an address
+          and a time slot, and those are a shop-level setting — so the operator
+          chooses once here and the whole selection is shipped with it. */}
+      {massShipOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => { if (!bulkBusy) setMassShipOpen(false) }}
+        >
+          <div
+            className="card w-full max-w-lg p-5 space-y-4 max-h-[85vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="font-semibold text-gray-900 dark:text-slate-100">Kirim Massal</h3>
+                <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
+                  {shippableSelected.length} pesanan · dijemput kurir (pickup)
+                </p>
+              </div>
+              <button onClick={() => setMassShipOpen(false)} disabled={bulkBusy} className="btn-ghost p-1">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {bulkMessage?.type === 'error' && (
+              <div className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 text-sm text-red-700 dark:text-red-300 break-words [overflow-wrap:anywhere]">
+                {bulkMessage.text}
+              </div>
+            )}
+
+            {bulkBusy && !massShipOptions && (
+              <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-slate-400">
+                <Loader2 className="w-4 h-4 animate-spin" /> Menghubungi Shopee…
+              </div>
+            )}
+
+            {massShipOptions && (
+              <>
+                {!massShipOptions.availableModes?.includes('pickup') && (
+                  <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+                    Channel ini tidak menawarkan mode pickup (tersedia:{' '}
+                    {massShipOptions.availableModes?.join(', ') || 'tidak ada'}). Pengiriman kemungkinan akan ditolak.
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
+                    Alamat penjemputan
+                  </label>
+                  <select
+                    className="input"
+                    value={massAddressId ?? ''}
+                    onChange={(e) => {
+                      const id = Number(e.target.value)
+                      setMassAddressId(id)
+                      const addr = massShipOptions.pickup?.address_list?.find((a) => a.address_id === id)
+                      setMassPickupTimeId(addr?.time_slot_list?.[0]?.pickup_time_id || '')
+                    }}
+                  >
+                    {(massShipOptions.pickup?.address_list || []).map((a) => (
+                      <option key={a.address_id} value={a.address_id}>
+                        {[a.address, a.city, a.state].filter(Boolean).join(', ') || `Alamat #${a.address_id}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
+                    Slot waktu
+                  </label>
+                  <select
+                    className="input"
+                    value={massPickupTimeId}
+                    onChange={(e) => setMassPickupTimeId(e.target.value)}
+                  >
+                    {(selectedMassAddress?.time_slot_list || []).map((slot) => (
+                      <option key={slot.pickup_time_id} value={slot.pickup_time_id}>
+                        {slot.time_text ||
+                          (slot.date ? new Date(slot.date * 1000).toLocaleString('id-ID') : slot.pickup_time_id)}
+                      </option>
+                    ))}
+                  </select>
+                  {(selectedMassAddress?.time_slot_list || []).length === 0 && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                      Tidak ada slot tersedia untuk alamat ini.
+                    </p>
+                  )}
+                </div>
+
+                <p className="text-xs text-gray-500 dark:text-slate-400">
+                  Alamat dan slot ini dipakai untuk seluruh {shippableSelected.length} pesanan, dikirim satu per satu
+                  ke Shopee. Nomor resi tidak ditunggu di sini — akan terisi pada sync berikutnya.
+                </p>
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <button onClick={() => setMassShipOpen(false)} disabled={bulkBusy} className="btn-ghost">
+                    Batal
+                  </button>
+                  <button
+                    onClick={handleMassShip}
+                    disabled={bulkBusy || !massAddressId || !massPickupTimeId}
+                    className="btn-primary"
+                  >
+                    {bulkBusy && <Loader2 className="w-4 h-4 animate-spin" />}
+                    Kirim {shippableSelected.length} pesanan
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Selection Bar */}
       {selected.size > 0 && (
         <div className="fixed bottom-0 left-64 right-0 bg-white dark:bg-slate-800 border-t border-gray-200 dark:border-slate-700 shadow-lg px-6 py-4 z-20">
@@ -989,7 +1168,7 @@ export default function OrdersPage() {
             <div className="flex items-center gap-3 flex-wrap">
               {shippableSelected.length > 0 && (
                 <button
-                  onClick={handleMassShip}
+                  onClick={openMassShip}
                   disabled={bulkBusy}
                   className="btn bg-shopee text-white hover:bg-orange-600"
                 >

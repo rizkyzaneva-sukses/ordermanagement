@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import api from '@/lib/api'
 import {
   Package,
@@ -10,6 +10,9 @@ import {
   RefreshCw,
   Store,
   Loader2,
+  ShoppingBag,
+  Ban,
+  Info,
 } from 'lucide-react'
 
 interface DashboardStats {
@@ -34,6 +37,31 @@ interface StoreInfo {
   lastSyncError: string | null
 }
 
+interface Statistics {
+  orderCount: number
+  packageCount: number
+  readyToShipCount: number
+  shippedCount: number
+  cancelledCount: number
+  completedCount: number
+  totalValue: number
+  completedValue: number
+  cancelledValue: number
+  averageOrderValue: number
+  valueBasis: string
+}
+
+const rupiah = (value: number) =>
+  new Intl.NumberFormat('id-ID', {
+    style: 'currency',
+    currency: 'IDR',
+    maximumFractionDigits: 0,
+  }).format(value || 0)
+
+/** YYYY-MM-DD in local time — `toISOString` would shift a WIB date back a day. */
+const isoDate = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+
 const statusColors: Record<string, string> = {
   ACTIVE: 'bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-300',
   EXPIRED: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-950/60 dark:text-yellow-300',
@@ -52,6 +80,16 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
 
+  // Statistics panel — filtered independently of the operational tiles above,
+  // which always describe the whole backlog rather than a period.
+  const today = isoDate(new Date())
+  const [statsFrom, setStatsFrom] = useState(today)
+  const [statsTo, setStatsTo] = useState(today)
+  const [statsPlatform, setStatsPlatform] = useState('')
+  const [statsStoreId, setStatsStoreId] = useState('')
+  const [statistics, setStatistics] = useState<Statistics | null>(null)
+  const [statsLoading, setStatsLoading] = useState(false)
+
   const fetchDashboard = async () => {
     try {
       const [statsRes, storesRes] = await Promise.all([
@@ -67,15 +105,38 @@ export default function DashboardPage() {
     }
   }
 
+  const fetchStatistics = useCallback(async () => {
+    setStatsLoading(true)
+    try {
+      const params: Record<string, string> = {}
+      if (statsFrom) params.dateFrom = statsFrom
+      if (statsTo) params.dateTo = statsTo
+      if (statsPlatform) params.platform = statsPlatform
+      if (statsStoreId) params.storeId = statsStoreId
+
+      const res = await api.get<Statistics>('/dashboard/statistics', { params })
+      setStatistics(res.data)
+    } catch (err) {
+      console.error('Failed to load statistics', err)
+      setStatistics(null)
+    } finally {
+      setStatsLoading(false)
+    }
+  }, [statsFrom, statsTo, statsPlatform, statsStoreId])
+
   useEffect(() => {
     fetchDashboard()
   }, [])
+
+  useEffect(() => {
+    fetchStatistics()
+  }, [fetchStatistics])
 
   const handleSync = async () => {
     setSyncing(true)
     try {
       await api.post('/orders/sync')
-      await fetchDashboard()
+      await Promise.all([fetchDashboard(), fetchStatistics()])
     } catch (err) {
       console.error('Sync failed', err)
     } finally {
@@ -160,6 +221,152 @@ export default function DashboardPage() {
             </div>
           )
         })}
+      </div>
+
+      {/* Statistics. Filtered by period, unlike the tiles above which always
+          describe the whole backlog. */}
+      <div className="card">
+        <div className="px-4 sm:px-6 py-4 border-b border-gray-200 dark:border-slate-700 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">Statistik</h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="date"
+              className="input w-auto"
+              value={statsFrom}
+              max={statsTo || undefined}
+              onChange={(e) => setStatsFrom(e.target.value)}
+              aria-label="Tanggal mulai"
+            />
+            <span className="text-gray-400 dark:text-slate-500 text-sm">–</span>
+            <input
+              type="date"
+              className="input w-auto"
+              value={statsTo}
+              min={statsFrom || undefined}
+              onChange={(e) => setStatsTo(e.target.value)}
+              aria-label="Tanggal akhir"
+            />
+            <select
+              className="input w-auto"
+              value={statsPlatform}
+              onChange={(e) => {
+                setStatsPlatform(e.target.value)
+                setStatsStoreId('') // the chosen store may belong to the other platform
+              }}
+              aria-label="Platform"
+            >
+              <option value="">Semua Platform</option>
+              <option value="SHOPEE">Shopee</option>
+              <option value="TIKTOK">TikTok</option>
+            </select>
+            <select
+              className="input w-auto"
+              value={statsStoreId}
+              onChange={(e) => setStatsStoreId(e.target.value)}
+              aria-label="Toko"
+            >
+              <option value="">Semua Toko</option>
+              {stores
+                .filter((s) => !statsPlatform || s.platform === statsPlatform)
+                .map((s) => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="p-4 sm:p-6 space-y-4">
+          {statsLoading && !statistics ? (
+            <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-slate-400 py-6">
+              <Loader2 className="w-4 h-4 animate-spin" /> Menghitung…
+            </div>
+          ) : (
+            <>
+              <div className={`grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 ${statsLoading ? 'opacity-60' : ''}`}>
+                {[
+                  { label: 'Nilai Total Pesanan', value: statistics?.totalValue ?? 0 },
+                  { label: 'Nilai Pesanan Selesai', value: statistics?.completedValue ?? 0 },
+                  { label: 'Nilai Pesanan Dibatalkan', value: statistics?.cancelledValue ?? 0 },
+                  { label: 'Rata-rata per Pesanan', value: statistics?.averageOrderValue ?? 0 },
+                ].map((card) => (
+                  <div key={card.label} className="rounded-xl border border-gray-200 dark:border-slate-700 p-4">
+                    <p className="text-xs text-gray-500 dark:text-slate-400">{card.label}</p>
+                    <p className="text-lg sm:text-xl font-bold text-gray-900 dark:text-slate-100 mt-1 break-words">
+                      {rupiah(card.value)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+
+              <div className={`grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 ${statsLoading ? 'opacity-60' : ''}`}>
+                {[
+                  {
+                    label: 'Jumlah Pesanan',
+                    value: statistics?.orderCount ?? 0,
+                    icon: ShoppingBag,
+                    // The primary scale stops at 900 (tailwind.config.ts), so
+                    // no 950 here — it would silently generate nothing.
+                    color: 'text-primary-600 dark:text-primary-400',
+                    iconBg: 'bg-primary-100 dark:bg-primary-900/50',
+                  },
+                  {
+                    label: 'Pesanan Siap Dikirim',
+                    value: statistics?.readyToShipCount ?? 0,
+                    icon: Package,
+                    color: 'text-amber-600 dark:text-amber-400',
+                    iconBg: 'bg-amber-100 dark:bg-amber-950/70',
+                  },
+                  {
+                    label: 'Pesanan Dikirim',
+                    value: statistics?.shippedCount ?? 0,
+                    icon: Truck,
+                    color: 'text-emerald-600 dark:text-emerald-400',
+                    iconBg: 'bg-emerald-100 dark:bg-emerald-950/70',
+                  },
+                  {
+                    label: 'Pesanan Dibatalkan',
+                    value: statistics?.cancelledCount ?? 0,
+                    icon: Ban,
+                    color: 'text-rose-600 dark:text-rose-400',
+                    iconBg: 'bg-rose-100 dark:bg-rose-950/70',
+                  },
+                ].map((card) => {
+                  const Icon = card.icon
+                  return (
+                    <div
+                      key={card.label}
+                      className="rounded-xl border border-gray-200 dark:border-slate-700 p-4 flex items-center justify-between gap-3"
+                    >
+                      <div>
+                        <p className="text-xl sm:text-2xl font-bold text-gray-900 dark:text-slate-100">
+                          {card.value.toLocaleString('id-ID')}
+                        </p>
+                        <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">{card.label}</p>
+                      </div>
+                      <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${card.iconBg}`}>
+                        <Icon className={`w-4 h-4 ${card.color}`} />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+
+              {/* The schema has no order-total column, so these are item
+                  subtotals. Saying so beats letting them be read as payouts. */}
+              <p className="text-xs text-gray-500 dark:text-slate-400 flex items-start gap-1.5">
+                <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                <span>
+                  Nilai dihitung dari subtotal item (harga × jumlah), belum termasuk ongkir, voucher, atau potongan
+                  platform. Angka bersih setelah biaya Shopee perlu API escrow yang belum terhubung. Jumlah pesanan
+                  dihitung per pesanan, bukan per paket
+                  {statistics && statistics.packageCount > statistics.orderCount
+                    ? ` (${statistics.packageCount.toLocaleString('id-ID')} paket di periode ini).`
+                    : '.'}
+                </span>
+              </p>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Active Stores */}

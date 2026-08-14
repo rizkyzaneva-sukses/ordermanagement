@@ -649,6 +649,21 @@ function fulfillmentRoute(label, handler) {
 }
 
 /**
+ * POST /ship-mass/options - Pickup addresses and slots to offer for a bulk ship
+ * Body: { ids: string[] }
+ */
+router.post('/ship-mass/options', fulfillmentRoute('Mass shipping options', async (req) => {
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) {
+    const err = new Error('ids must be a non-empty array');
+    err.statusCode = 400;
+    throw err;
+  }
+  await assertAccessibleOrders(req.user, ids);
+  return fulfillmentService.getMassShippingOptions(ids);
+}));
+
+/**
  * POST /ship-mass - Arrange shipment for many packages at once
  * Body: { ids: string[], mode?, modeData? }
  */
