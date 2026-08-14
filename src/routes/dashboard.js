@@ -3,6 +3,7 @@
 const express = require('express');
 const prisma = require('../prisma/client');
 const { authenticate } = require('../middleware/auth');
+const { orderMerchandiseValue } = require('../services/orderValue');
 
 const router = express.Router();
 router.use(authenticate);
@@ -64,52 +65,6 @@ router.get('/stats', async (req, res) => {
     return res.status(500).json({ success: false, error: 'Failed to fetch dashboard stats' });
   }
 });
-
-/**
- * Merchandise value of one order, from the item lines stored on its rows.
- *
- * There is no order-total column — the only money in the schema is `price` and
- * `quantity` inside the `items` JSON — so this is the item subtotal: shipping
- * fees, vouchers and platform discounts are not in it.
- *
- * Items are de-duplicated across the order's package rows. When Shopee returns
- * a package without its own `item_list`, the sync falls back to writing the
- * whole order's items onto every package (see expandShopeeOrderToPackages), so
- * summing rows blindly would count a split order two or three times over.
- * De-duplicating by item+model is safe in both cases: KB §6 rule 4 forbids
- * splitting identical item+model across packages, so a genuine split never
- * repeats a pair either.
- *
- * @param {Array<{items: string}>} rows - Every package row of one order
- * @returns {number}
- */
-function orderMerchandiseValue(rows) {
-  const seen = new Set();
-  let total = 0;
-
-  for (const row of rows) {
-    let items;
-    try {
-      items = JSON.parse(row.items || '[]');
-    } catch {
-      continue; // a malformed row must not take the whole panel down
-    }
-    if (!Array.isArray(items)) continue;
-
-    for (const item of items) {
-      // TikTok rows carry no itemId, so fall back to something stable-ish
-      const key = item.itemId != null
-        ? `${item.itemId}::${item.modelId ?? 0}`
-        : `${item.name || ''}::${item.price ?? 0}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      total += (Number(item.price) || 0) * (Number(item.quantity) || 1);
-    }
-  }
-
-  return total;
-}
 
 /**
  * GET /statistics - Order value and counts over a date range
