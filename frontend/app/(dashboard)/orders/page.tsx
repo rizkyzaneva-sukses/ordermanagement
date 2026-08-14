@@ -69,7 +69,7 @@ interface SyncStoreState {
   platform: string
   lastSyncAt: string | null
   lastSyncAttemptAt: string | null
-  lastSyncStatus: 'OK' | 'ERROR' | null
+  lastSyncStatus: 'OK' | 'PARTIAL' | 'ERROR' | null
   lastSyncError: string | null
   needsReconnect: boolean
 }
@@ -77,6 +77,8 @@ interface SyncStoreState {
 interface SyncStatus {
   stores: SyncStoreState[]
   failing: number
+  /** Runs that finished but lost a status pass, so some rows went unrefreshed */
+  partial: number
   needsReconnect: number
   redisReady: boolean
   workerRunning: boolean
@@ -643,7 +645,7 @@ export default function OrdersPage() {
       </div>
 
       {/* Standing sync health banner — visible without having to press Sync first */}
-      {syncStatus && (syncStatus.needsReconnect > 0 || syncStatus.failing > 0) && (
+      {syncStatus && (syncStatus.needsReconnect > 0 || syncStatus.failing > 0 || syncStatus.partial > 0) && (
         <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-4 py-3">
           <div className="flex items-start gap-2 text-sm text-amber-800 dark:text-amber-200">
             <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
@@ -658,11 +660,24 @@ export default function OrdersPage() {
                   .
                 </p>
               )}
+              {/* A partial run is the dangerous one: it looks like it worked,
+                  but the statuses it lost were never refreshed, so those rows
+                  keep showing whatever they said before. */}
+              {syncStatus.partial > 0 && (
+                <p>
+                  <span className="font-semibold">
+                    {syncStatus.partial} toko tersinkron sebagian.
+                  </span>{' '}
+                  Sebagian status gagal diambil dari Shopee, jadi pesanan pada status itu belum tentu terbarui.
+                  Sync berikutnya akan mencoba lagi.
+                </p>
+              )}
               {syncStatus.stores
-                .filter((s) => s.lastSyncStatus === 'ERROR')
+                .filter((s) => s.lastSyncStatus === 'ERROR' || s.lastSyncStatus === 'PARTIAL')
                 .map((s) => (
-                  <p key={s.id} className="text-xs">
+                  <p key={s.id} className="text-xs break-words [overflow-wrap:anywhere]">
                     <span className="font-medium">{s.name}</span>
+                    {s.lastSyncStatus === 'PARTIAL' && <span className="ml-1">(sebagian)</span>}
                     {s.needsReconnect ? ' — token kedaluwarsa' : ` — ${s.lastSyncError}`}
                   </p>
                 ))}

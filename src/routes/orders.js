@@ -315,6 +315,9 @@ router.get('/sync-status', async (req, res) => {
       data: {
         stores,
         failing: stores.filter((s) => s.lastSyncStatus === 'ERROR').length,
+        // A pass that fell over means the orders in that status were never
+        // refreshed — the run finished, but its result is incomplete.
+        partial: stores.filter((s) => s.lastSyncStatus === 'PARTIAL').length,
         needsReconnect: stores.filter((s) => s.needsReconnect).length,
         redisReady: isRedisReady(),
         workerRunning,

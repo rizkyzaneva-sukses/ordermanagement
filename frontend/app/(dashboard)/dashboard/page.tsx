@@ -31,7 +31,7 @@ interface StoreInfo {
   platform: 'SHOPEE' | 'TIKTOK'
   orderCount: number
   packageCount: number
-  status: 'ACTIVE' | 'EXPIRED' | 'ERROR'
+  status: 'ACTIVE' | 'PARTIAL' | 'EXPIRED' | 'ERROR'
   tokenExpiry: string | null
   lastSyncAt: string | null
   lastSyncError: string | null
@@ -64,12 +64,15 @@ const isoDate = (d: Date) =>
 
 const statusColors: Record<string, string> = {
   ACTIVE: 'bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-300',
+  PARTIAL: 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300',
   EXPIRED: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-950/60 dark:text-yellow-300',
   ERROR: 'bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300',
 }
 
 const statusLabels: Record<string, string> = {
   ACTIVE: 'AKTIF',
+  // The run finished; some statuses simply were not refreshed
+  PARTIAL: 'SYNC SEBAGIAN',
   EXPIRED: 'PERLU HUBUNGKAN ULANG',
   ERROR: 'SYNC GAGAL',
 }

@@ -206,6 +206,9 @@ router.get('/stores', async (req, res) => {
         status = 'EXPIRED';
       } else if (store.lastSyncStatus === 'ERROR') {
         status = 'ERROR';
+      } else if (store.lastSyncStatus === 'PARTIAL') {
+        // Finished, but a status pass was lost — its orders went unrefreshed
+        status = 'PARTIAL';
       }
 
       return {

@@ -30,7 +30,7 @@ const { ensureFreshToken, isReconnectError } = require('./tokens.js');
  *
  * @returns {Promise<Map<string, Set<string>>>}
  */
-async function fetchShopeePackageIndex(accessToken, shopId) {
+async function fetchShopeePackageIndex(accessToken, shopId, warnings) {
   const index = new Map();
 
   try {
@@ -46,6 +46,7 @@ async function fetchShopeePackageIndex(accessToken, shopId) {
     console.log(`[sync] search_package_list: ${packages.length} package(s) across ${index.size} order(s)`);
   } catch (err) {
     console.warn(`[sync] search_package_list failed, continuing without package numbers: ${err.message}`);
+    if (warnings) warnings.push(`search_package_list: ${err.message}`);
   }
 
   return index;
@@ -274,6 +275,11 @@ async function runStoreSync(storeId) {
   const shopId      = store.shopId;
 
   let orders = [];
+  // A status pass that fails takes every order in that status out of the run,
+  // which used to be a console.warn and nothing else — the sync still reported
+  // success while rows quietly went stale. Collected here and surfaced by
+  // syncStore instead.
+  const warnings = [];
 
   if (store.platform === 'SHOPEE') {
     const now            = Math.floor(Date.now() / 1000);
@@ -301,7 +307,7 @@ async function runStoreSync(storeId) {
     // Pass 0: package numbers for everything still awaiting fulfillment.
     // get_order_list is kept alongside it because search_package_list only
     // covers pre-shipment packages — SHIPPED/UNPAID orders never appear there.
-    const packageIndex = await fetchShopeePackageIndex(accessToken, shopId);
+    const packageIndex = await fetchShopeePackageIndex(accessToken, shopId, warnings);
 
     const allOrderSns = new Map(); // order_sn → order_status
     packageIndex.forEach((_pkgs, orderSn) => allOrderSns.set(orderSn, null));
@@ -323,6 +329,7 @@ async function runStoreSync(storeId) {
         list.forEach(o => allOrderSns.set(o.order_sn, o.order_status || orderStatus));
       } catch (err) {
         console.warn(`[sync] create_time | Could not fetch status ${orderStatus}: ${err.message}`);
+        warnings.push(`create_time/${orderStatus}: ${err.message}`);
       }
     }));
 
@@ -347,6 +354,7 @@ async function runStoreSync(storeId) {
         });
       } catch (err) {
         console.warn(`[sync] update_time | Could not fetch status ${orderStatus}: ${err.message}`);
+        warnings.push(`update_time/${orderStatus}: ${err.message}`);
       }
     }));
 
@@ -427,6 +435,36 @@ async function runStoreSync(storeId) {
 
   console.log(`[sync] Fetched ${orders.length} orders from ${store.platform} for store ${storeId}`);
 
+  const { created, updated } = await upsertOrderRows(storeId, orders);
+
+  // Anything Shopee did not hand back this run is still sitting in the database
+  // with whatever status it had last time — see reconcileUnseenShopeeOrders.
+  let reconciled = 0;
+  if (store.platform === 'SHOPEE') {
+    const seenOrderSns = new Set(orders.map(o => o.orderId));
+    reconciled = await reconcileUnseenShopeeOrders(store, accessToken, seenOrderSns);
+  }
+
+  await prisma.store.update({
+    where: { id: storeId },
+    data:  { lastSyncAt: new Date() },
+  });
+
+  console.log(`[sync] Completed sync for store ${storeId}: ${created} created, ${updated} updated, ${reconciled} reconciled`);
+  return { storeId, total: orders.length, created, updated, reconciled, warnings };
+}
+
+/**
+ * Write a batch of fetched rows into the database.
+ *
+ * Extracted so the reconciliation pass writes through exactly the same rules as
+ * the main sync — a second, near-identical loop is how the two drift apart.
+ *
+ * @param {string} storeId
+ * @param {Object[]} orders - Rows from expandShopeeOrderToPackages (or TikTok)
+ * @returns {Promise<{created: number, updated: number}>}
+ */
+async function upsertOrderRows(storeId, orders) {
   let created = 0;
   let updated = 0;
 
@@ -502,14 +540,84 @@ async function runStoreSync(storeId) {
     }
   }
 
+  return { created, updated };
+}
 
-  await prisma.store.update({
-    where: { id: storeId },
-    data:  { lastSyncAt: new Date() },
+/** Local statuses that still expect an operator to act, so drift is expensive. */
+const ACTIONABLE_STATUSES = ['READY_TO_SHIP', 'RETRY_SHIP', 'PROCESSED'];
+
+/** Ceiling on re-reads per sync, so reconciliation cannot dominate the run. */
+const RECONCILE_LIMIT = 200;
+
+/**
+ * Re-read orders that are still actionable locally but did not come back in
+ * this sync run.
+ *
+ * The main loop only ever writes what Shopee returned, so a row Shopee stopped
+ * handing back keeps its old status forever. That happens for two reasons, and
+ * both have been seen here:
+ *
+ *   - A whole status pass fails. `get_order_list` is fetched one status at a
+ *     time and a rejection is only warned about, so if the PROCESSED pass falls
+ *     over, every order that just moved to PROCESSED is simply missing from the
+ *     run — and its row goes on claiming READY_TO_SHIP.
+ *   - The order moved to a status nothing fetches, or aged out of the 15-day
+ *     create_time window without landing in the update_time passes.
+ *
+ * Oldest-untouched first, so a backlog is worked through across runs rather
+ * than the same head of the list being re-read every time.
+ *
+ * @param {Object} store
+ * @param {string} accessToken
+ * @param {Set<string>} seenOrderSns - order_sn values this run already wrote
+ * @returns {Promise<number>} How many order_sns were re-read
+ */
+async function reconcileUnseenShopeeOrders(store, accessToken, seenOrderSns) {
+  const rows = await prisma.order.findMany({
+    where: { storeId: store.id, status: { in: ACTIONABLE_STATUSES } },
+    select: { orderId: true },
+    distinct: ['orderId'],
+    orderBy: { updatedAt: 'asc' },
   });
 
-  console.log(`[sync] Completed sync for store ${storeId}: ${created} created, ${updated} updated`);
-  return { storeId, total: orders.length, created, updated };
+  // Filtered here rather than with a `notIn`: the seen set runs to thousands of
+  // order_sns on a busy shop, and that becomes an enormous SQL statement.
+  const allUnseen = rows.map(r => r.orderId).filter(sn => !seenOrderSns.has(sn));
+  const unseen = allUnseen.slice(0, RECONCILE_LIMIT);
+
+  if (unseen.length === 0) return 0;
+
+  const deferred = allUnseen.length - unseen.length;
+  console.log(`[sync] Reconciling ${unseen.length} order(s) Shopee did not return this run${
+    deferred > 0 ? ` (${deferred} more next run)` : ''}`);
+
+  let reconciled = 0;
+
+  for (let i = 0; i < unseen.length; i += 50) {
+    const chunk = unseen.slice(i, i + 50);
+
+    try {
+      const resp = await shopeeService.getOrderDetail(accessToken, store.shopId, chunk);
+      const details = resp.response?.order_list || [];
+
+      const refreshed = details.flatMap(o => expandShopeeOrderToPackages(o).map(row => ({
+        ...row,
+        status: row.status || 'READY_TO_SHIP',
+      })));
+
+      await backfillShopeeTracking(accessToken, store.shopId, refreshed);
+      await upsertOrderRows(store.id, refreshed);
+
+      reconciled += details.length;
+    } catch (err) {
+      // Best effort by design: the main sync already succeeded, and failing it
+      // now would throw away the orders it did write.
+      console.warn(`[sync] Reconciliation chunk of ${chunk.length} failed: ${err.message}`);
+    }
+  }
+
+  console.log(`[sync] Reconciled ${reconciled}/${unseen.length} order(s)`);
+  return reconciled;
 }
 
 /**
@@ -552,11 +660,21 @@ async function syncStore(storeId) {
   try {
     const result = await runStoreSync(storeId);
 
+    // A run that lost a status pass finished, but not completely: the orders in
+    // that status were never refreshed. Recording it as a plain OK is what let
+    // stale rows accumulate unnoticed, so it gets its own state.
+    const partial = Array.isArray(result.warnings) && result.warnings.length > 0;
+
+    if (partial) {
+      console.warn(`[sync] Store ${storeId} finished with ${result.warnings.length} incomplete pass(es)`);
+    }
+
     await prisma.store.update({
       where: { id: storeId },
       data: {
-        lastSyncStatus: 'OK',
-        lastSyncError: null,
+        lastSyncStatus: partial ? 'PARTIAL' : 'OK',
+        // Column is plain text; keep it short enough to display in a banner
+        lastSyncError: partial ? result.warnings.join(' | ').slice(0, 500) : null,
         needsReconnect: false,
       },
     });
