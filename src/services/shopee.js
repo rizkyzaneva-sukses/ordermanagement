@@ -528,7 +528,21 @@ class ShopeeService {
       body.filter.logistics_channel_id = options.logisticsChannelId;
     }
 
-    return this._request('POST', '/api/v2/order/search_package_list', {}, body, accessToken, String(shopId));
+    // Sent on the query string as well as in the body. With it in the body
+    // alone Shopee rejected every call with "page_size must be 1 or greater" —
+    // it evidently reads pagination off the query even though this is a POST,
+    // and no other POST here paginates, so nothing else exposed it. Duplicating
+    // is safe in both directions: the signature covers only
+    // path+timestamp+access_token+shop_id (see _buildUrl), so extra query
+    // params do not invalidate it, and the body keeps working if Shopee ever
+    // reads it from there.
+    const paginationParams = {
+      page_size: pageSize,
+      cursor: options.cursor || '',
+    };
+
+    return this._request('POST', '/api/v2/order/search_package_list',
+      paginationParams, body, accessToken, String(shopId));
   }
 
   /**
