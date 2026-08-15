@@ -15,6 +15,7 @@ const prisma         = require('../prisma/client.js');
 const shopeeService  = require('./shopee.js');
 const tiktokService  = require('./tiktok.js');
 const { ensureFreshToken, isReconnectError } = require('./tokens.js');
+const { orderNeedsDetail } = require('./orderRefresh.js');
 
 // ── Shopee helpers ────────────────────────────────────────────────────────────
 
@@ -253,6 +254,35 @@ function extractTrackingResults(resp) {
   return [];
 }
 
+/**
+ * Narrow a run's discovered order_sns down to those worth a get_order_detail.
+ *
+ * The per-order decision lives in orderRefresh.js so it can be tested without a
+ * database; this only supplies it with the local rows to compare against.
+ *
+ * @param {string} storeId
+ * @param {string[]} discovered - order_sns seen in this run
+ * @param {Map<string, string|null>} listStatuses - order_sn → status from the list passes
+ * @returns {Promise<string[]>}
+ */
+async function filterOrdersNeedingDetail(storeId, discovered, listStatuses) {
+  if (discovered.length === 0) return [];
+
+  const localRows = await prisma.order.findMany({
+    where: { storeId },
+    select: { orderId: true, status: true, trackingNumber: true },
+  });
+
+  const byOrderSn = new Map();
+  for (const row of localRows) {
+    if (!byOrderSn.has(row.orderId)) byOrderSn.set(row.orderId, []);
+    byOrderSn.get(row.orderId).push(row);
+  }
+
+  return discovered.filter(orderSn =>
+    orderNeedsDetail(listStatuses.get(orderSn), byOrderSn.get(orderSn)));
+}
+
 // ── Core sync function ────────────────────────────────────────────────────────
 
 /**
@@ -275,6 +305,9 @@ async function runStoreSync(storeId) {
   const shopId      = store.shopId;
 
   let orders = [];
+  // Shopee only: every order_sn the platform mentioned this run, whether or not
+  // we went on to fetch its detail.
+  let shopeeSeenSns = null;
   // A status pass that fails takes every order in that status out of the run,
   // which used to be a console.warn and nothing else — the sync still reported
   // success while rows quietly went stale. Collected here and surfaced by
@@ -358,9 +391,22 @@ async function runStoreSync(storeId) {
       }
     }));
 
-    const orderSns = [...allOrderSns.keys()];
-    console.log(`[sync] Total unique orders across all passes: ${orderSns.length}`);
+    const discovered = [...allOrderSns.keys()];
+    console.log(`[sync] Total unique orders across all passes: ${discovered.length}`);
 
+    // Everything Shopee reported this run, settled ones included — used by the
+    // reconciliation pass to tell "not refreshed" from "not mentioned".
+    shopeeSeenSns = new Set(discovered);
+
+    // Only orders that can still tell us something get a detail call. On a shop
+    // with thousands of orders the old behaviour re-read every one of them
+    // every 15 minutes, which is what Shopee's security team flagged as a
+    // "substantial surge in Open API calls related to orders".
+    const orderSns = await filterOrdersNeedingDetail(storeId, discovered, allOrderSns);
+    const skipped = discovered.length - orderSns.length;
+    if (skipped > 0) {
+      console.log(`[sync] Skipping get_order_detail for ${skipped} settled order(s) already matching Shopee`);
+    }
 
     if (orderSns.length > 0) {
       // Batch into groups of 50 (Shopee limit)
@@ -440,9 +486,8 @@ async function runStoreSync(storeId) {
   // Anything Shopee did not hand back this run is still sitting in the database
   // with whatever status it had last time — see reconcileUnseenShopeeOrders.
   let reconciled = 0;
-  if (store.platform === 'SHOPEE') {
-    const seenOrderSns = new Set(orders.map(o => o.orderId));
-    reconciled = await reconcileUnseenShopeeOrders(store, accessToken, seenOrderSns);
+  if (store.platform === 'SHOPEE' && shopeeSeenSns) {
+    reconciled = await reconcileUnseenShopeeOrders(store, accessToken, shopeeSeenSns);
   }
 
   await prisma.store.update({

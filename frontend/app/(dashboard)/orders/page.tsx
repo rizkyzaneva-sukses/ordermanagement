@@ -432,9 +432,24 @@ export default function OrdersPage() {
     return true
   }
 
-  /** Shippable means Shopee still accepts a ship_order for this package. */
-  const isShippable = (order: Order) =>
-    order.platform === 'SHOPEE' && ['READY_TO_SHIP', 'RETRY_SHIP'].includes(order.status)
+  /**
+   * Shippable means Shopee still accepts a ship_order for this package.
+   *
+   * The order status alone is not enough. Shopee only takes a ship_order while
+   * the package itself is LOGISTICS_READY ("Siap diatur") — one still allocating
+   * or at LOGISTICS_NOT_START is refused, and every such refusal counts against
+   * the ship_order success rate the platform holds this app to. Excluding them
+   * here keeps the count on the button honest rather than promising a bulk run
+   * that is half rejections.
+   */
+  const isShippable = (order: Order) => {
+    if (order.platform !== 'SHOPEE') return false
+    if (!['READY_TO_SHIP', 'RETRY_SHIP'].includes(order.status)) return false
+    // Unknown fulfillment state: let the server make the call, it re-reads live
+    if (!order.logisticsStatus) return true
+    return order.logisticsStatus === 'LOGISTICS_READY' ||
+      order.logisticsStatus === 'LOGISTICS_PICKUP_RETRY'
+  }
 
   const isCheckboxEnabled = (order: Order) => {
     if (printFilter === 'sudah') return false

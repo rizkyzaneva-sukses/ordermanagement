@@ -111,19 +111,38 @@ async function fetchLiveState(ctx) {
     : packages[0];
 
   let logisticsStatus = pkg?.logistics_status || null;
+  let isShipmentArranged = null;
 
-  // For a split order, get_package_detail is the authoritative per-package read
-  // (KB Rule #1 sanctions either endpoint). Treat it as a refinement only: if it
-  // is unavailable or shaped unexpectedly, the order-detail value still stands.
+  // get_package_detail is the authoritative per-package read (KB Rule #1
+  // sanctions either endpoint), and the only source of `is_shipment_arranged`.
+  //
+  // That flag matters more than it looks. Shopee's own ship_order FAQ warns that
+  // fulfillment_status lags: a package whose shipment was just arranged can
+  // still report LOGISTICS_READY for a while, and shipping it again on the
+  // strength of that is a guaranteed rejection. Their stated rule is to ship
+  // only when fulfillment_status is LOGISTICS_READY *and* is_shipment_arranged
+  // is false. Those wasted calls count against the ship_order success rate
+  // Shopee holds us to, so the read is worth an extra request on a write path.
+  //
+  // Called for every order with a package number, not just split ones — the
+  // number itself is valid either way, it is only ship_order that refuses it
+  // for an unsplit order (see packageNumberForLogistics).
   if (order.packageNumber) {
     try {
       const pkgResp = await shopeeService.getPackageDetail(accessToken, store.shopId, [order.packageNumber]);
       const pkgDetail = pkgResp.response?.package_list?.[0] || pkgResp.response?.[0];
-      if (pkgDetail?.logistics_status) {
-        if (pkgDetail.logistics_status !== logisticsStatus) {
-          console.log(`[fulfillment] ${order.orderId}/${order.packageNumber}: package detail reports ${pkgDetail.logistics_status} (order detail said ${logisticsStatus || 'nothing'})`);
+
+      // Shopee names it fulfillment_status here and logistics_status elsewhere
+      const pkgStatus = pkgDetail?.fulfillment_status || pkgDetail?.logistics_status;
+      if (pkgStatus) {
+        if (pkgStatus !== logisticsStatus) {
+          console.log(`[fulfillment] ${order.orderId}/${order.packageNumber}: package detail reports ${pkgStatus} (order detail said ${logisticsStatus || 'nothing'})`);
         }
-        logisticsStatus = pkgDetail.logistics_status;
+        logisticsStatus = pkgStatus;
+      }
+
+      if (typeof pkgDetail?.is_shipment_arranged === 'boolean') {
+        isShipmentArranged = pkgDetail.is_shipment_arranged;
       }
     } catch (err) {
       console.warn(`[fulfillment] get_package_detail unavailable for ${order.packageNumber}, using order detail: ${err.message}`);
@@ -133,11 +152,29 @@ async function fetchLiveState(ctx) {
   return {
     orderStatus:     detail.order_status || null,
     logisticsStatus,
+    // null when Shopee did not tell us — treated as "unknown", never as "false"
+    isShipmentArranged,
     trackingNumber:  detail.tracking_number || null,
     itemList:        detail.item_list || [],
     packageCount:    packages.length,
     raw:             detail,
   };
+}
+
+/**
+ * Whether a package has already had its shipment arranged.
+ *
+ * `is_shipment_arranged` is authoritative when Shopee supplies it; the
+ * fulfillment status is the fallback for when it does not.
+ *
+ * @param {Object} live - fetchLiveState result
+ * @returns {boolean}
+ */
+function shipmentAlreadyArranged(live) {
+  // Either signal saying "arranged" is enough. A false flag is not allowed to
+  // override a status that is plainly past the shipping stage.
+  const byStatus = Boolean(live.logisticsStatus) && !AWB_TOO_EARLY.has(live.logisticsStatus);
+  return live.isShipmentArranged === true || byStatus;
 }
 
 // ── package_number gating ─────────────────────────────────────────────────────
@@ -227,8 +264,14 @@ async function getShippingOptions(orderRowId) {
     throw fail(409, `Pesanan berstatus ${live.orderStatus} di Shopee${hint}. Status di daftar sudah diperbarui.`);
   }
 
-  if (live.logisticsStatus && !AWB_TOO_EARLY.has(live.logisticsStatus)) {
-    throw fail(409, `Pengiriman paket ini sudah diatur sebelumnya (${live.logisticsStatus}) — tidak perlu diatur ulang`);
+  if (shipmentAlreadyArranged(live)) {
+    throw fail(409, `Pengiriman paket ini sudah diatur sebelumnya (${live.logisticsStatus || 'is_shipment_arranged'}) — tidak perlu diatur ulang`);
+  }
+
+  // Same LOGISTICS_READY rule as arrangeShipment, checked here so the dialog
+  // explains itself instead of opening a form Shopee will reject.
+  if (live.logisticsStatus && live.logisticsStatus !== 'LOGISTICS_READY') {
+    throw fail(409, `Paket belum siap dikirim (${live.logisticsStatus}) — tunggu sampai Shopee menandainya siap diatur`);
   }
 
   const pkgNumber = await packageNumberForLogistics(ctx.order, live);
@@ -277,13 +320,14 @@ async function arrangeShipment(orderRowId, options = {}) {
 
   const pkgNumber = await packageNumberForLogistics(ctx.order, live);
 
-  // KB Rule #6: already arranged → do not send a second ship_order
-  if (live.logisticsStatus && !AWB_TOO_EARLY.has(live.logisticsStatus)) {
+  // KB Rule #6 plus Shopee's own guidance: a second ship_order on an arranged
+  // package is a guaranteed rejection, and rejections count against us.
+  if (shipmentAlreadyArranged(live)) {
     if (AWB_TOO_LATE.has(live.logisticsStatus) && live.logisticsStatus !== 'LOGISTICS_PICKUP_RETRY') {
       throw fail(409, `Package is already past the shipping stage (${live.logisticsStatus})`);
     }
 
-    console.log(`[fulfillment] ${ctx.order.orderId} already arranged (${live.logisticsStatus}) — refreshing tracking only`);
+    console.log(`[fulfillment] ${ctx.order.orderId} already arranged (status=${live.logisticsStatus || 'unknown'} is_shipment_arranged=${live.isShipmentArranged}) — refreshing tracking only`);
     const tracking = pollTracking
       ? await shopeeService.pollTrackingNumber(ctx.accessToken, ctx.store.shopId, ctx.order.orderId, pkgNumber)
       : live.trackingNumber;
@@ -294,6 +338,14 @@ async function arrangeShipment(orderRowId, options = {}) {
 
   if (live.orderStatus && !['READY_TO_SHIP', 'RETRY_SHIP'].includes(live.orderStatus)) {
     throw fail(409, `Order status is ${live.orderStatus}; only READY_TO_SHIP or RETRY_SHIP can be shipped`);
+  }
+
+  // Shopee only accepts ship_order at LOGISTICS_READY. Sending it while the
+  // package is still LOGISTICS_NOT_START or being allocated comes back as
+  // "Package is not ready to ship" / "The order is being allocated" — avoidable
+  // rejections that drag down the ship_order success rate Shopee measures us on.
+  if (live.logisticsStatus && live.logisticsStatus !== 'LOGISTICS_READY') {
+    throw fail(409, `Paket belum siap dikirim (${live.logisticsStatus}) — Shopee baru menerima pengaturan pengiriman saat status paket LOGISTICS_READY`);
   }
 
   const paramResp = await shopeeService.getShippingParameter(
