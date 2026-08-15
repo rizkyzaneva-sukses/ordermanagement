@@ -528,21 +528,29 @@ class ShopeeService {
       body.filter.logistics_channel_id = options.logisticsChannelId;
     }
 
-    // Sent on the query string as well as in the body. With it in the body
-    // alone Shopee rejected every call with "page_size must be 1 or greater" —
-    // it evidently reads pagination off the query even though this is a POST,
-    // and no other POST here paginates, so nothing else exposed it. Duplicating
-    // is safe in both directions: the signature covers only
-    // path+timestamp+access_token+shop_id (see _buildUrl), so extra query
-    // params do not invalidate it, and the body keeps working if Shopee ever
-    // reads it from there.
+    // Pagination goes on the query string as well as in the body. Shopee has
+    // been rejecting every call here with "page_size must be 1 or greater"
+    // despite the body carrying page_size, so it evidently does not read it
+    // from there. Duplicating is safe in both directions: the signature covers
+    // only path+timestamp+access_token+shop_id (see _buildUrl), so extra query
+    // params do not invalidate it.
     const paginationParams = {
       page_size: pageSize,
       cursor: options.cursor || '',
     };
 
-    return this._request('POST', '/api/v2/order/search_package_list',
-      paginationParams, body, accessToken, String(shopId));
+    try {
+      return await this._request('POST', '/api/v2/order/search_package_list',
+        paginationParams, body, accessToken, String(shopId));
+    } catch (err) {
+      // The rejection names a field we demonstrably send, which means the guess
+      // about where Shopee reads it from is still wrong. Log exactly what left
+      // this process so the next failure identifies the shape instead of
+      // prompting another guess. Read-only call, so this costs nothing.
+      console.error(`[ShopeeService.searchPackageList] REQUEST SHAPE query=${
+        JSON.stringify(paginationParams)} body=${JSON.stringify(body)}`);
+      throw err;
+    }
   }
 
   /**
