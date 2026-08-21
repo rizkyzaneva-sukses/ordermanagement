@@ -512,15 +512,57 @@ async function runStoreSync(storeId) {
 async function upsertOrderRows(storeId, orders) {
   let created = 0;
   let updated = 0;
+  let adopted = 0;
+
+  // How many package rows this batch carries per order. A single-package order
+  // is the only case where a placeholder row can be matched to a package
+  // without guessing — see the adoption step below.
+  const rowsPerOrder = new Map();
+  for (const o of orders) {
+    rowsPerOrder.set(o.orderId, (rowsPerOrder.get(o.orderId) || 0) + 1);
+  }
 
   for (const orderData of orders) {
     const packageNumber = orderData.packageNumber || '';
 
-    const existing = await prisma.order.findUnique({
+    let existing = await prisma.order.findUnique({
       where: {
         storeId_orderId_packageNumber: { storeId, orderId: orderData.orderId, packageNumber },
       },
     });
+
+    // Rows are keyed by package number, so an order whose reported number
+    // changes does not update its row — it creates a second one and strands the
+    // first, which then keeps its stale status forever because nothing writes
+    // to it again.
+    //
+    // This is not hypothetical, and it moves in both directions. Pass 0 was
+    // failing on every sync, so orders whose get_order_detail carries no
+    // package_list were all stored under the empty placeholder; now that the
+    // package index works they arrive with a real number. The reconciliation
+    // pass has no index at all, so the same order can come back with the
+    // placeholder again.
+    //
+    // When both sides describe exactly one package, they are describing the
+    // same package — so re-key the existing row rather than duplicating it.
+    // Split orders are left alone: with several packages on each side there is
+    // no way to pair them without guessing.
+    if (!existing && rowsPerOrder.get(orderData.orderId) === 1) {
+      const siblings = await prisma.order.findMany({
+        where: { storeId, orderId: orderData.orderId },
+      });
+
+      if (siblings.length === 1) {
+        // Re-keying makes it the exact-key match, so the update branch below
+        // fills in the rest of the fields as it would for any other row.
+        existing = await prisma.order.update({
+          where: { id: siblings[0].id },
+          data: { packageNumber },
+        });
+        adopted++;
+        console.log(`[sync] Re-keyed ${orderData.orderId}: package "${siblings[0].packageNumber}" → "${packageNumber}"`);
+      }
+    }
 
     if (!existing) {
       // Two syncs for the same store can overlap (manual click while the
@@ -585,7 +627,11 @@ async function upsertOrderRows(storeId, orders) {
     }
   }
 
-  return { created, updated };
+  if (adopted > 0) {
+    console.log(`[sync] Re-keyed ${adopted} row(s) rather than duplicating them`);
+  }
+
+  return { created, updated, adopted };
 }
 
 /** Local statuses that still expect an operator to act, so drift is expensive. */

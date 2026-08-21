@@ -20,6 +20,9 @@ router.get('/', async (req, res) => {
       platform,
       status,
       shippingCourier,
+      // The UI has always sent this under the shorter name, so the courier box
+      // silently filtered nothing: the value arrived and was never read.
+      courier,
       dateFrom,
       dateTo,
       search,
@@ -63,7 +66,11 @@ router.get('/', async (req, res) => {
       where.status = status;
     }
 
-    if (shippingCourier) {
+    // Exact match when the dropdown supplies a courier from the real list;
+    // `contains` stays for the legacy free-text parameter.
+    if (courier) {
+      where.shippingCourier = courier;
+    } else if (shippingCourier) {
       where.shippingCourier = { contains: shippingCourier, mode: 'insensitive' };
     }
 
@@ -271,6 +278,48 @@ router.post('/sync', async (req, res) => {
     if (!res.headersSent) {
       return res.status(500).json({ success: false, error: 'Failed to trigger sync' });
     }
+  }
+});
+
+/**
+ * GET /couriers - Distinct courier names present in the visible orders
+ *
+ * Feeds the courier dropdown. Derived from the rows themselves rather than a
+ * fixed list, because the set of couriers differs per shop and changes whenever
+ * a marketplace adds a channel — a hardcoded list would quietly omit one and
+ * make its orders unfilterable.
+ */
+router.get('/couriers', async (req, res) => {
+  try {
+    const user = req.user;
+    const where = { shippingCourier: { not: '' } };
+
+    if (user.role === 'STAFF') {
+      const access = await prisma.storeAccess.findMany({
+        where: { userId: user.id },
+        select: { storeId: true },
+      });
+      where.storeId = { in: access.map((a) => a.storeId) };
+    }
+
+    if (req.query.storeId) where.storeId = req.query.storeId;
+    if (req.query.platform) where.store = { platform: req.query.platform };
+
+    const rows = await prisma.order.findMany({
+      where,
+      select: { shippingCourier: true },
+      distinct: ['shippingCourier'],
+      orderBy: { shippingCourier: 'asc' },
+    });
+
+    const couriers = rows
+      .map((r) => r.shippingCourier)
+      .filter((c) => c && c.trim() !== '' && c !== '-');
+
+    return res.json({ success: true, data: couriers });
+  } catch (err) {
+    console.error('GET /orders/couriers error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch couriers' });
   }
 });
 

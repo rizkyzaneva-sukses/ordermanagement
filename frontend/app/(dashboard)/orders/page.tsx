@@ -84,9 +84,14 @@ interface SyncStatus {
   workerRunning: boolean
 }
 
-/** Pickup addresses offered for a bulk shipment (POST /orders/ship-mass/options) */
+/** Shipping modes offered for a bulk shipment (POST /orders/ship-mass/options) */
 interface MassShipOptions {
   availableModes: string[]
+  suggestedMode?: string | null
+  /** Per-mode list of fields Shopee still wants; an empty dropoff array means
+      an empty object is all it needs (KB §5.1). */
+  infoNeeded?: Record<string, string[] | undefined>
+  dropoff?: { branch_list?: Array<{ branch_id: number; address?: string }> } | null
   pickup?: {
     address_list?: Array<{
       address_id: number
@@ -203,8 +208,10 @@ export default function OrdersPage() {
   const [massShipOptions, setMassShipOptions] = useState<MassShipOptions | null>(null)
   const [massAddressId, setMassAddressId] = useState<number | null>(null)
   const [massPickupTimeId, setMassPickupTimeId] = useState('')
+  const [massMode, setMassMode] = useState<'pickup' | 'dropoff'>('pickup')
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
   const [awaitingTracking, setAwaitingTracking] = useState(0)
+  const [couriers, setCouriers] = useState<string[]>([])
 
   // Filters
   const [printFilter, setPrintFilter] = useState<PrintFilter>(
@@ -219,7 +226,7 @@ export default function OrdersPage() {
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
 
-  const limit = 20
+  const [limit, setLimit] = useState(20)
 
   // The oldest successful sync across all stores, not the newest: with several
   // shops the page is only as fresh as whichever one lagged furthest behind, and
@@ -295,7 +302,7 @@ export default function OrdersPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, printFilter, search, platform, storeId, status, courier, dateFrom, dateTo])
+  }, [page, limit, printFilter, search, platform, storeId, status, courier, dateFrom, dateTo])
 
   const fetchStores = async () => {
     try {
@@ -306,6 +313,24 @@ export default function OrdersPage() {
       setStores([])
     }
   }
+
+  /**
+   * The courier list follows the store and platform filters: showing couriers
+   * that no visible order uses would offer the operator a selection that can
+   * only ever come back empty.
+   */
+  const fetchCouriers = useCallback(async () => {
+    try {
+      const params: any = {}
+      if (storeId) params.storeId = storeId
+      if (platform) params.platform = platform
+      const res = await api.get<any>('/orders/couriers', { params })
+      const list = Array.isArray(res.data) ? res.data : (res.data?.data || [])
+      setCouriers(Array.isArray(list) ? list : [])
+    } catch {
+      setCouriers([])
+    }
+  }, [storeId, platform])
 
   const fetchSyncStatus = useCallback(async () => {
     try {
@@ -321,6 +346,10 @@ export default function OrdersPage() {
     fetchStores()
     fetchSyncStatus()
   }, [fetchSyncStatus])
+
+  useEffect(() => {
+    fetchCouriers()
+  }, [fetchCouriers])
 
   // Keep the freshness line honest on a page left open. Two things go stale:
   // the elapsed-time text (recomputed each render, so it needs a re-render) and
@@ -531,6 +560,15 @@ export default function OrdersPage() {
       })
       setMassShipOptions(res.data)
 
+      // Default to what this channel actually offers rather than always pickup:
+      // picking a mode the channel does not support is a guaranteed rejection,
+      // and Shopee's own preference order already lands in suggestedMode.
+      const modes = res.data.availableModes || []
+      const preferred = (res.data.suggestedMode === 'dropoff' || res.data.suggestedMode === 'pickup')
+        ? res.data.suggestedMode
+        : null
+      setMassMode(preferred ?? (modes.includes('pickup') ? 'pickup' : modes.includes('dropoff') ? 'dropoff' : 'pickup'))
+
       const firstAddress = res.data.pickup?.address_list?.[0]
       if (firstAddress) {
         setMassAddressId(firstAddress.address_id)
@@ -546,7 +584,9 @@ export default function OrdersPage() {
 
   const handleMassShip = async () => {
     if (shippableSelected.length === 0) return
-    if (!massAddressId || !massPickupTimeId) {
+    // Only pickup needs an address and a slot; demanding them for a drop-off is
+    // what made "antar ke counter" impossible to choose here at all.
+    if (massMode === 'pickup' && (!massAddressId || !massPickupTimeId)) {
       setBulkMessage({ type: 'error', text: 'Pilih alamat dan slot waktu penjemputan terlebih dahulu' })
       return
     }
@@ -555,8 +595,11 @@ export default function OrdersPage() {
     try {
       const res = await api.post<any>('/orders/ship-mass', {
         ids: shippableSelected.map((o) => o.id),
-        mode: 'pickup',
-        modeData: { address_id: massAddressId, pickup_time_id: massPickupTimeId },
+        mode: massMode,
+        // Drop-off takes an empty object unless the channel asks for more (KB §5.1)
+        modeData: massMode === 'pickup'
+          ? { address_id: massAddressId, pickup_time_id: massPickupTimeId }
+          : {},
       })
       setMassShipOpen(false)
       const shipped = res.data?.shipped?.length ?? 0
@@ -810,13 +853,19 @@ export default function OrdersPage() {
               <option value="COMPLETED">Selesai</option>
             </select>
 
-            <input
-              type="text"
+            <select
               value={courier}
               onChange={(e) => { setCourier(e.target.value); setPage(1) }}
-              placeholder="Kurir"
-              className="input w-full lg:w-auto min-w-[110px]"
-            />
+              className="input w-full lg:w-auto min-w-[150px]"
+            >
+              <option value="">Semua Kurir</option>
+              {/* Keep the active value selectable even when the current store
+                  filter no longer lists it — otherwise the box reads "Semua
+                  Kurir" while a courier filter is still narrowing the table. */}
+              {(couriers.includes(courier) || !courier ? couriers : [courier, ...couriers]).map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
 
             <input
               type="date"
@@ -990,12 +1039,27 @@ export default function OrdersPage() {
           </table>
         </div>
 
-        {/* Pagination */}
-        {totalPages > 1 && (
-          <div className="px-4 py-3 border-t border-gray-200 dark:border-slate-700 flex items-center justify-between bg-gray-50 dark:bg-slate-800/80">
-            <p className="text-sm text-gray-500 dark:text-slate-400">
-              Menampilkan {(page - 1) * limit + 1}–{Math.min(page * limit, total)} dari {total} pesanan
-            </p>
+        {/* Pagination. Rendered whenever there are rows, not only when the list
+            spills past one page: the page-size control lives here, and hiding it
+            at 500-per-page would strand the operator with no way back to 20. */}
+        {total > 0 && (
+          <div className="px-4 py-3 border-t border-gray-200 dark:border-slate-700 flex flex-col sm:flex-row items-center justify-between gap-3 bg-gray-50 dark:bg-slate-800/80">
+            <div className="flex items-center gap-3">
+              <p className="text-sm text-gray-500 dark:text-slate-400">
+                Menampilkan {(page - 1) * limit + 1}–{Math.min(page * limit, total)} dari {total} pesanan
+              </p>
+              <select
+                value={limit}
+                onChange={(e) => { setLimit(Number(e.target.value)); setPage(1) }}
+                className="input py-1 text-sm w-auto min-w-[110px]"
+                aria-label="Jumlah per halaman"
+              >
+                {[20, 50, 100, 200, 500].map((n) => (
+                  <option key={n} value={n}>{n} / halaman</option>
+                ))}
+              </select>
+            </div>
+            {totalPages > 1 && (
             <div className="flex items-center gap-1">
               <button
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
@@ -1029,6 +1093,7 @@ export default function OrdersPage() {
                 <ChevronRight className="w-4 h-4" />
               </button>
             </div>
+            )}
           </div>
         )}
       </div>
@@ -1071,7 +1136,7 @@ export default function OrdersPage() {
               <div>
                 <h3 className="font-semibold text-gray-900 dark:text-slate-100">Kirim Massal</h3>
                 <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
-                  {shippableSelected.length} pesanan · dijemput kurir (pickup)
+                  {shippableSelected.length} pesanan · {massMode === 'pickup' ? 'dijemput kurir' : 'diantar ke counter'}
                 </p>
               </div>
               <button onClick={() => setMassShipOpen(false)} disabled={bulkBusy} className="btn-ghost p-1">
@@ -1093,61 +1158,110 @@ export default function OrdersPage() {
 
             {massShipOptions && (
               <>
-                {!massShipOptions.availableModes?.includes('pickup') && (
+                {/* KB Rule #2: exactly one mode per shipment. A mode the channel
+                    does not list is disabled rather than hidden, so the operator
+                    can see the choice exists and why it is unavailable. */}
+                <div>
+                  <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
+                    Cara pengiriman
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {([
+                      { key: 'pickup' as const,  label: 'Dijemput kurir', hint: 'Pickup di alamat toko' },
+                      { key: 'dropoff' as const, label: 'Antar ke counter', hint: 'Drop-off mandiri' },
+                    ]).map((m) => {
+                      const offered = massShipOptions.availableModes?.includes(m.key)
+                      const active = massMode === m.key
+                      return (
+                        <button
+                          key={m.key}
+                          type="button"
+                          onClick={() => setMassMode(m.key)}
+                          disabled={!offered || bulkBusy}
+                          title={offered ? undefined : 'Channel ini tidak menawarkan mode tersebut'}
+                          className={`rounded-lg border px-3 py-2 text-left transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                            active
+                              ? 'border-primary-600 bg-primary-50 dark:bg-primary-900/30'
+                              : 'border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800'
+                          }`}
+                        >
+                          <span className="block text-sm font-medium text-gray-900 dark:text-slate-100">{m.label}</span>
+                          <span className="block text-xs text-gray-500 dark:text-slate-400">{m.hint}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {!massShipOptions.availableModes?.includes(massMode) && (
                   <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
-                    Channel ini tidak menawarkan mode pickup (tersedia:{' '}
+                    Channel ini tidak menawarkan mode {massMode} (tersedia:{' '}
                     {massShipOptions.availableModes?.join(', ') || 'tidak ada'}). Pengiriman kemungkinan akan ditolak.
                   </div>
                 )}
 
-                <div>
-                  <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
-                    Alamat penjemputan
-                  </label>
-                  <select
-                    className="input"
-                    value={massAddressId ?? ''}
-                    onChange={(e) => {
-                      const id = Number(e.target.value)
-                      setMassAddressId(id)
-                      const addr = massShipOptions.pickup?.address_list?.find((a) => a.address_id === id)
-                      setMassPickupTimeId(addr?.time_slot_list?.[0]?.pickup_time_id || '')
-                    }}
-                  >
-                    {(massShipOptions.pickup?.address_list || []).map((a) => (
-                      <option key={a.address_id} value={a.address_id}>
-                        {[a.address, a.city, a.state].filter(Boolean).join(', ') || `Alamat #${a.address_id}`}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                {massMode === 'dropoff' && (massShipOptions.infoNeeded?.dropoff?.length ?? 0) > 0 && (
+                  <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+                    Channel ini meminta data tambahan untuk drop-off ({massShipOptions.infoNeeded?.dropoff?.join(', ')}),
+                    yang belum bisa diisi dari sini. Pesanan yang ditolak akan dilaporkan satu per satu.
+                  </div>
+                )}
 
-                <div>
-                  <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
-                    Slot waktu
-                  </label>
-                  <select
-                    className="input"
-                    value={massPickupTimeId}
-                    onChange={(e) => setMassPickupTimeId(e.target.value)}
-                  >
-                    {(selectedMassAddress?.time_slot_list || []).map((slot) => (
-                      <option key={slot.pickup_time_id} value={slot.pickup_time_id}>
-                        {slot.time_text ||
-                          (slot.date ? new Date(slot.date * 1000).toLocaleString('id-ID') : slot.pickup_time_id)}
-                      </option>
-                    ))}
-                  </select>
-                  {(selectedMassAddress?.time_slot_list || []).length === 0 && (
-                    <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
-                      Tidak ada slot tersedia untuk alamat ini.
-                    </p>
-                  )}
-                </div>
+                {/* Pickup-only: a drop-off has no address to collect from */}
+                {massMode === 'pickup' && (
+                  <>
+                  <div>
+                    <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
+                      Alamat penjemputan
+                    </label>
+                    <select
+                      className="input"
+                      value={massAddressId ?? ''}
+                      onChange={(e) => {
+                        const id = Number(e.target.value)
+                        setMassAddressId(id)
+                        const addr = massShipOptions.pickup?.address_list?.find((a) => a.address_id === id)
+                        setMassPickupTimeId(addr?.time_slot_list?.[0]?.pickup_time_id || '')
+                      }}
+                    >
+                      {(massShipOptions.pickup?.address_list || []).map((a) => (
+                        <option key={a.address_id} value={a.address_id}>
+                          {[a.address, a.city, a.state].filter(Boolean).join(', ') || `Alamat #${a.address_id}`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
+                      Slot waktu
+                    </label>
+                    <select
+                      className="input"
+                      value={massPickupTimeId}
+                      onChange={(e) => setMassPickupTimeId(e.target.value)}
+                    >
+                      {(selectedMassAddress?.time_slot_list || []).map((slot) => (
+                        <option key={slot.pickup_time_id} value={slot.pickup_time_id}>
+                          {slot.time_text ||
+                            (slot.date ? new Date(slot.date * 1000).toLocaleString('id-ID') : slot.pickup_time_id)}
+                        </option>
+                      ))}
+                    </select>
+                    {(selectedMassAddress?.time_slot_list || []).length === 0 && (
+                      <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                        Tidak ada slot tersedia untuk alamat ini.
+                      </p>
+                    )}
+                  </div>
+                  </>
+                )}
 
                 <p className="text-xs text-gray-500 dark:text-slate-400">
-                  Alamat dan slot ini dipakai untuk seluruh {shippableSelected.length} pesanan, dikirim satu per satu
-                  ke Shopee. Nomor resi tidak ditunggu di sini — akan terisi pada sync berikutnya.
+                  {massMode === 'pickup'
+                    ? `Alamat dan slot ini dipakai untuk seluruh ${shippableSelected.length} pesanan`
+                    : `Seluruh ${shippableSelected.length} pesanan diatur sebagai antar ke counter`}
+                  , dikirim satu per satu ke Shopee. Nomor resi tidak ditunggu di sini — akan terisi pada sync berikutnya.
                 </p>
 
                 <div className="flex justify-end gap-2 pt-2">

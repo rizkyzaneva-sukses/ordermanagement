@@ -15,6 +15,7 @@
 
 const fs   = require('fs');
 const path = require('path');
+const { PDFDocument } = require('pdf-lib');
 
 const prisma        = require('../prisma/client.js');
 const shopeeService = require('./shopee.js');
@@ -983,10 +984,17 @@ function checkAwbPrintable(order, options = {}) {
  * front — `download_shipping_document` fails the entire request if even one
  * package is not READY (KB §7.3), so partial batches are not worth attempting.
  *
+ * Shopee additionally refuses to put two couriers in one document
+ * ("packages_can_not_download_together … different channel_id"), which made a
+ * mixed selection unprintable and forced the operator to filter by courier and
+ * print each group by hand. So the selection is grouped by logistics channel,
+ * fetched one document per group, and the PDFs are stitched back into the
+ * single file the operator asked for.
+ *
  * @param {string[]} orderRowIds
  * @param {Object} [options={}]
  * @param {string} [options.shippingDocumentType]
- * @returns {Promise<{ buffer: Buffer, format: string, documentType: string, filePath: string, orderRowIds: string[] }>}
+ * @returns {Promise<{ buffer: Buffer, format: string, documentType: string, filePath: string, orderRowIds: string[], channelCount: number }>}
  */
 async function fetchAwb(orderRowIds, options = {}) {
   if (!Array.isArray(orderRowIds) || orderRowIds.length === 0) {
@@ -1026,16 +1034,35 @@ async function fetchAwb(orderRowIds, options = {}) {
 
   const accessToken = await ensureFreshToken(store);
 
-  const doc = await shopeeService.fetchShippingDocument(
-    accessToken,
-    store.shopId,
-    rows.map(r => ({
-      orderSn:        r.orderId,
-      packageNumber:  r.packageNumber || undefined,
-      trackingNumber: r.trackingNumber || undefined,
-    })),
-    { shippingDocumentType: options.shippingDocumentType },
-  );
+  // Rows whose channel was never recorded are keyed separately rather than
+  // lumped with a real channel — an unknown is not evidence of a match, and
+  // guessing wrong resurrects the very error this grouping exists to avoid.
+  const byChannel = new Map();
+  for (const r of rows) {
+    const key = r.logisticsChannelId == null ? `unknown:${r.id}` : String(r.logisticsChannelId);
+    if (!byChannel.has(key)) byChannel.set(key, []);
+    byChannel.get(key).push(r);
+  }
+
+  console.log(`[fulfillment] AWB for ${rows.length} package(s) across ${byChannel.size} channel(s)`);
+
+  const docs = [];
+  for (const [key, group] of byChannel) {
+    const doc = await shopeeService.fetchShippingDocument(
+      accessToken,
+      store.shopId,
+      group.map(r => ({
+        orderSn:        r.orderId,
+        packageNumber:  r.packageNumber || undefined,
+        trackingNumber: r.trackingNumber || undefined,
+      })),
+      { shippingDocumentType: options.shippingDocumentType },
+    );
+    console.log(`[fulfillment] AWB channel ${key}: ${group.length} package(s) → ${doc.format}`);
+    docs.push(doc);
+  }
+
+  const doc = docs.length === 1 ? docs[0] : await mergeAwbDocuments(docs);
 
   fs.mkdirSync(AWB_DIR, { recursive: true });
   const fileName = `awb-${Date.now()}-${rows.length}pkg.${doc.format === 'unknown' ? 'bin' : doc.format}`;
@@ -1054,7 +1081,45 @@ async function fetchAwb(orderRowIds, options = {}) {
 
   console.log(`[fulfillment] Downloaded Shopee AWB for ${rows.length} package(s) → ${filePath} (${doc.format})`);
 
-  return { ...doc, filePath, orderRowIds };
+  return { ...doc, filePath, orderRowIds, channelCount: byChannel.size };
+}
+
+/**
+ * Stitch the per-channel documents back into one file.
+ *
+ * Only PDF can be merged. Shopee also serves HTML (TW) and ZIP (thermal
+ * printing) per KB §7.2, and concatenating either produces a file that opens to
+ * a fraction of the labels — worse than refusing, because the operator would
+ * ship the packages whose labels silently went missing. Those markets keep the
+ * old one-courier-at-a-time flow, with an error that says so.
+ *
+ * @param {Array<{ buffer: Buffer, format: string, documentType: string }>} docs
+ * @returns {Promise<{ buffer: Buffer, format: string, documentType: string }>}
+ */
+async function mergeAwbDocuments(docs) {
+  const formats = [...new Set(docs.map(d => d.format))];
+
+  if (formats.length > 1 || formats[0] !== 'pdf') {
+    throw fail(
+      409,
+      `Pesanan terpilih memakai beberapa ekspedisi dan Shopee mengirim formatnya sebagai ${
+        formats.join(' + ')} — hanya PDF yang bisa digabung. Cetak per ekspedisi untuk pesanan ini.`,
+    );
+  }
+
+  const merged = await PDFDocument.create();
+
+  for (const doc of docs) {
+    const src = await PDFDocument.load(doc.buffer);
+    const pages = await merged.copyPages(src, src.getPageIndices());
+    pages.forEach(p => merged.addPage(p));
+  }
+
+  return {
+    buffer: Buffer.from(await merged.save()),
+    format: 'pdf',
+    documentType: docs[0].documentType,
+  };
 }
 
 /**
@@ -1244,6 +1309,7 @@ module.exports = {
   getTrackingEvents,
   checkAwbPrintable,
   fetchAwb,
+  mergeAwbDocuments,
   readStoredAwb,
   cleanupOldAwbFiles,
   fetchAwbDataInfo,
