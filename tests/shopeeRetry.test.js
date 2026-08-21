@@ -113,3 +113,104 @@ test('auth endpoints are never retried, even on a 5xx', quiet(async () => {
   );
   assert.equal(calls.length, 1, 'auth must stay single-attempt');
 }));
+
+// ── search_package_list request shape ────────────────────────────────────────
+// Shopee rejected every call to this endpoint with "page_size must be 1 or
+// greater" because pagination was sent at the top level. The error named a
+// field the request did carry, which is why it read as transient rather than as
+// the deterministic shape bug it was. These lock the shape down.
+
+/** Capture the parsed body of the single request the call makes. */
+const captureBody = (responseData = {}) => {
+  const seen = {};
+  global.fetch = async (url, opts) => {
+    seen.url = String(url);
+    seen.body = JSON.parse(opts.body);
+    return {
+      status: 200,
+      headers: { get: () => null },
+      text: async () => JSON.stringify({ response: responseData }),
+    };
+  };
+  return seen;
+};
+
+test('page_size and cursor are nested under pagination, not top level', quiet(async () => {
+  const seen = captureBody({ packages_list: [], pagination: { more: false } });
+
+  await shopee.searchPackageList('tok', '123', { packageStatus: 0, pageSize: 50 });
+
+  assert.equal(seen.body.pagination.page_size, 50);
+  assert.equal(seen.body.pagination.cursor, '');
+  assert.equal(seen.body.page_size, undefined, 'top-level page_size is what Shopee ignores');
+  assert.equal(seen.body.cursor, undefined);
+  assert.equal(seen.body.filter.package_status, 0);
+  // The old code duplicated pagination onto the query string; it never helped.
+  assert.ok(!seen.url.includes('page_size='), 'pagination does not belong on the query string');
+}));
+
+test('page_size is capped at this endpoint\'s limit of 50', quiet(async () => {
+  const seen = captureBody({ packages_list: [], pagination: { more: false } });
+
+  await shopee.searchPackageList('tok', '123', { pageSize: 100 });
+
+  assert.equal(seen.body.pagination.page_size, 50);
+}));
+
+test('a logistics channel filter is sent as a plural array', quiet(async () => {
+  const seen = captureBody({ packages_list: [], pagination: { more: false } });
+
+  await shopee.searchPackageList('tok', '123', { logisticsChannelId: 80001 });
+
+  assert.deepEqual(seen.body.filter.logistics_channel_ids, [80001]);
+  assert.equal(seen.body.filter.logistics_channel_id, undefined);
+}));
+
+test('packages are read from packages_list with pagination one level down', quiet(async () => {
+  stubFetch([
+    ok({ response: {
+      packages_list: [{ order_sn: 'A', package_number: 'P1' }],
+      pagination: { more: true, next_cursor: 'c1' },
+    } }),
+    ok({ response: {
+      packages_list: [{ order_sn: 'B', package_number: 'P2' }],
+      pagination: { more: false },
+    } }),
+  ]);
+
+  const all = await shopee.getAllPackages('tok', '123', 0);
+
+  assert.deepEqual(all.map(p => p.package_number), ['P1', 'P2']);
+}));
+
+test('the older flat response shape is still understood', quiet(async () => {
+  // Published schemas disagree on the plural; neither spelling may go silently
+  // empty, because an empty list looks exactly like a shop with no packages.
+  stubFetch([
+    ok({ response: { package_list: [{ order_sn: 'A', package_number: 'P1' }], more: false } }),
+  ]);
+
+  const all = await shopee.getAllPackages('tok', '123', 0);
+
+  assert.deepEqual(all.map(p => p.package_number), ['P1']);
+}));
+
+test('paging stops at the cap instead of following a cursor forever', quiet(async () => {
+  let calls = 0;
+  global.fetch = async () => {
+    calls++;
+    return {
+      status: 200,
+      headers: { get: () => null },
+      text: async () => JSON.stringify({ response: {
+        packages_list: [{ order_sn: `A${calls}`, package_number: `P${calls}` }],
+        pagination: { more: true, next_cursor: 'always-more' },
+      } }),
+    };
+  };
+
+  const all = await shopee.getAllPackages('tok', '123', 0, 3);
+
+  assert.equal(calls, 3, 'must not page past the valve');
+  assert.equal(all.length, 3);
+}));

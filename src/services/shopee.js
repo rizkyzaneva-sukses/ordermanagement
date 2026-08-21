@@ -538,49 +538,42 @@ class ShopeeService {
    * @param {string} accessToken
    * @param {string|number} shopId
    * @param {Object} [options={}]
+   * Pagination is NOT a pair of top-level fields. `page_size` and `cursor` live
+   * inside a `pagination` object, and Shopee reads it from nowhere else: sending
+   * them at the top level (or on the query string) leaves it seeing no page size
+   * at all, which it reports as "page_size must be 1 or greater" — an error that
+   * names a field the request demonstrably carried, which is what made this look
+   * like a transient fault for so long. It is deterministic: every call failed.
+   *
+   * @param {string} accessToken
+   * @param {string|number} shopId
+   * @param {Object} [options={}]
    * @param {number} [options.packageStatus=2] - Defaults to ToProcess (ready to ship)
-   * @param {number} [options.pageSize=50]     - 1–100
+   * @param {number} [options.pageSize=50]     - 1–50 (this endpoint caps at 50, not 100)
    * @param {string} [options.cursor='']
-   * @returns {Promise<Object>} response.package_list / response.more / response.next_cursor
+   * @returns {Promise<Object>} response.packages_list / response.pagination
    */
   async searchPackageList(accessToken, shopId, options = {}) {
-    const pageSize = Math.min(options.pageSize || 50, 100);
+    // Capped at 50 here — unlike get_order_list, which allows 100.
+    const pageSize = Math.min(options.pageSize || 50, 50);
     const packageStatus = options.packageStatus ?? 2;
 
     console.error(`[ShopeeService.searchPackageList] shop=${shopId} package_status=${packageStatus} page_size=${pageSize} cursor=${options.cursor || '(none)'}`);
 
     const body = {
-      page_size: pageSize,
-      cursor: options.cursor || '',
       filter: { package_status: packageStatus },
+      pagination: {
+        page_size: pageSize,
+        cursor: options.cursor || '',
+      },
     };
     if (options.logisticsChannelId) {
-      body.filter.logistics_channel_id = options.logisticsChannelId;
+      // Plural, and an array — the singular form is silently ignored.
+      body.filter.logistics_channel_ids = [Number(options.logisticsChannelId)];
     }
 
-    // Pagination goes on the query string as well as in the body. Shopee has
-    // been rejecting every call here with "page_size must be 1 or greater"
-    // despite the body carrying page_size, so it evidently does not read it
-    // from there. Duplicating is safe in both directions: the signature covers
-    // only path+timestamp+access_token+shop_id (see _buildUrl), so extra query
-    // params do not invalidate it.
-    const paginationParams = {
-      page_size: pageSize,
-      cursor: options.cursor || '',
-    };
-
-    try {
-      return await this._request('POST', '/api/v2/order/search_package_list',
-        paginationParams, body, accessToken, String(shopId));
-    } catch (err) {
-      // The rejection names a field we demonstrably send, which means the guess
-      // about where Shopee reads it from is still wrong. Log exactly what left
-      // this process so the next failure identifies the shape instead of
-      // prompting another guess. Read-only call, so this costs nothing.
-      console.error(`[ShopeeService.searchPackageList] REQUEST SHAPE query=${
-        JSON.stringify(paginationParams)} body=${JSON.stringify(body)}`);
-      throw err;
-    }
+    return this._request('POST', '/api/v2/order/search_package_list',
+      {}, body, accessToken, String(shopId));
   }
 
   /**
@@ -589,9 +582,10 @@ class ShopeeService {
    * @param {string} accessToken
    * @param {string|number} shopId
    * @param {number} [packageStatus=2]
+   * @param {number} [maxPages=200] - Safety valve against a cursor that never terminates
    * @returns {Promise<Array<{ order_sn: string, package_number: string }>>}
    */
-  async getAllPackages(accessToken, shopId, packageStatus = 2) {
+  async getAllPackages(accessToken, shopId, packageStatus = 2, maxPages = 200) {
     const all = [];
     let cursor = '';
     let page = 0;
@@ -601,17 +595,33 @@ class ShopeeService {
       page++;
       const result = await this.searchPackageList(accessToken, shopId, {
         packageStatus,
-        pageSize: 100,
+        pageSize: 50,
         cursor,
       });
 
-      const list = result.response?.package_list || [];
+      // Published schemas disagree on the plural here, and the paging flags sit
+      // one level down from where the rest of this client expects them. Reading
+      // both shapes costs nothing and keeps a naming mismatch from looking like
+      // a shop with no packages — the failure mode that hides itself.
+      const data = result.response || {};
+      const list = data.packages_list || data.package_list || [];
+      const pagination = data.pagination || data;
+
       all.push(...list);
       console.error(`[ShopeeService.getAllPackages] Page ${page}: ${list.length} package(s) (total ${all.length})`);
 
-      if (!result.response?.more || !list.length) break;
-      cursor = result.response?.next_cursor || '';
+      if (!pagination.more || !list.length) break;
+      cursor = pagination.next_cursor || '';
       if (!cursor) break;
+
+      // This loop had no cap while every call to it was failing, so it has
+      // never actually paged. It only ever walks packages still awaiting
+      // fulfillment, so 200 pages of 50 is far more headroom than a backlog
+      // needs — the valve is there for a cursor that refuses to terminate.
+      if (page >= maxPages) {
+        console.error(`[ShopeeService.getAllPackages] WARNING: stopped at the ${maxPages}-page cap with more results pending`);
+        break;
+      }
     }
 
     return all;
