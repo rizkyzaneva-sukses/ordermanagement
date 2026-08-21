@@ -93,8 +93,10 @@ class ShopeeService {
   /**
    * Execute an HTTP request against the Shopee API.
    *
-   * Includes automatic retry for transient server errors (5xx) up to 3 attempts
-   * with exponential back-off.
+   * Retries transient failures up to 3 attempts with jittered exponential
+   * back-off: network errors and timeouts, HTTP 429 (honouring Retry-After) and
+   * 5xx, and the Shopee error codes known to be temporary. Auth endpoints are
+   * exempt — see the note on MAX_RETRIES below.
    *
    * @param {string} method         - HTTP method (GET | POST)
    * @param {string} path           - API path
@@ -107,6 +109,14 @@ class ShopeeService {
    */
   async _request(method, path, params = {}, body = null, accessToken = '', shopId = '') {
     const BASE_DELAY_MS = 500;
+    const MAX_BACKOFF_MS = 8_000;
+    // Jittered so the retries of a fanned-out sync do not line up: a run fires
+    // several status passes per store across every store at once, and a plain
+    // doubling sends the whole burst back at Shopee on the same tick.
+    const backoffMs = (attempt) => {
+      const base = Math.min(BASE_DELAY_MS * Math.pow(2, attempt - 1), MAX_BACKOFF_MS);
+      return Math.round(base * (0.5 + Math.random() * 0.5));
+    };
     // Node's fetch has no default timeout — a Shopee response that never arrives
     // (as opposed to one that errors) would otherwise hang this call, the route
     // handler awaiting it, and the browser spinner on the other end, forever.
@@ -152,7 +162,7 @@ class ShopeeService {
         if (attempt === MAX_RETRIES) {
           throw isTimeout ? new Error(`Shopee API: ${path} timed out after ${REQUEST_TIMEOUT_MS}ms`) : networkErr;
         }
-        const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        const delay = backoffMs(attempt);
         console.error(`[ShopeeService._request] Retrying in ${delay}ms…`);
         await new Promise(r => setTimeout(r, delay));
         continue;
@@ -165,12 +175,32 @@ class ShopeeService {
 
       // Read body as text first so we can log raw on parse failure
       const raw = await response.text();
+
+      // The HTTP status used to be logged and nothing more, so the 5xx retry
+      // this method advertises never actually ran. It matters most exactly when
+      // a sync fans out: a throttled or briefly unavailable Shopee answers 429
+      // or 502 — often from a gateway, with an HTML body that does not even
+      // parse as JSON — and the whole status pass was discarded on the first
+      // blip, which is what surfaces in the UI as a partial sync.
+      const isRetryableStatus = response.status === 429 || response.status >= 500;
+      if (isRetryableStatus && attempt < MAX_RETRIES) {
+        // Shopee sends Retry-After on throttle; obeying it beats guessing, but
+        // cap it so a long header value cannot stall the whole sync run.
+        const retryAfter = Number(response.headers.get('retry-after'));
+        const delay = Number.isFinite(retryAfter) && retryAfter > 0
+          ? Math.min(retryAfter * 1000, MAX_BACKOFF_MS)
+          : backoffMs(attempt);
+        console.error(`[ShopeeService._request] HTTP ${response.status} on ${path}, retrying in ${delay}ms…`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+
       let data;
       try {
         data = JSON.parse(raw);
       } catch (parseErr) {
-        console.error(`[ShopeeService._request] JSON parse error: ${parseErr.message}`);
-        throw new Error(`Shopee API: invalid JSON response – ${parseErr.message}`);
+        console.error(`[ShopeeService._request] JSON parse error: ${parseErr.message} (HTTP ${response.status}, body: ${raw.slice(0, 200)})`);
+        throw new Error(`Shopee API: invalid JSON response from ${path} (HTTP ${response.status}) – ${parseErr.message}`);
       }
 
       console.error(`[ShopeeService._request] Parsed response: error=${data.error || 'none'} message=${data.message || 'none'} request_id=${data.request_id || 'n/a'}`);
@@ -183,7 +213,7 @@ class ShopeeService {
         // Some Shopee errors are transient (e.g. system_error, db_error)
         const retryableErrors = ['system_error', 'db_error', 'service_temporarily_unavailable'];
         if (retryableErrors.includes(data.error) && attempt < MAX_RETRIES) {
-          const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+          const delay = backoffMs(attempt);
           console.error(`[ShopeeService._request] Retryable error "${data.error}", retrying in ${delay}ms…`);
           await new Promise(r => setTimeout(r, delay));
           continue;
