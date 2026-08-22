@@ -55,6 +55,14 @@ const config = {
       : path.resolve(__dirname, '../../storage'),
   },
 
+  // The seller's business day. Date filters arrive as a bare YYYY-MM-DD from a
+  // date picker, and a day only means something once anchored to a zone —
+  // relying on the server's own would silently shift every "hari ini" by seven
+  // hours the moment the app runs in a UTC container.
+  business: {
+    utcOffset: process.env.BUSINESS_UTC_OFFSET || '+07:00',
+  },
+
   queue: {
     defaultJobOptions: {
       attempts: 3,

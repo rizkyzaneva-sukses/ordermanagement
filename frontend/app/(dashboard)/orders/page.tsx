@@ -1281,7 +1281,7 @@ export default function OrdersPage() {
                   </button>
                   <button
                     onClick={handleMassShip}
-                    disabled={bulkBusy || !massAddressId || !massPickupTimeId}
+                    disabled={bulkBusy || (massMode === 'pickup' && (!massAddressId || !massPickupTimeId))}
                     className="btn-primary"
                   >
                     {bulkBusy && <Loader2 className="w-4 h-4 animate-spin" />}

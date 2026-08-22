@@ -635,7 +635,12 @@ async function upsertOrderRows(storeId, orders) {
 }
 
 /** Local statuses that still expect an operator to act, so drift is expensive. */
-const ACTIONABLE_STATUSES = ['READY_TO_SHIP', 'RETRY_SHIP', 'PROCESSED'];
+// UNPAID belongs here even though nothing can be done to such an order yet.
+// Shopee auto-cancels orders the buyer never pays for, and once that happens
+// the order stops appearing in the UNPAID pass — so without reconciliation the
+// row keeps claiming UNPAID forever, inflating the order count and hiding the
+// cancellation.
+const ACTIONABLE_STATUSES = ['UNPAID', 'READY_TO_SHIP', 'RETRY_SHIP', 'PROCESSED'];
 
 /** Ceiling on re-reads per sync, so reconciliation cannot dominate the run. */
 const RECONCILE_LIMIT = 200;

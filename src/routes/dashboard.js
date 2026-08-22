@@ -4,6 +4,7 @@ const express = require('express');
 const prisma = require('../prisma/client');
 const { authenticate } = require('../middleware/auth');
 const { orderMerchandiseValue } = require('../services/orderValue');
+const { orderDateRange } = require('../utils/dateRange');
 
 const router = express.Router();
 router.use(authenticate);
@@ -97,12 +98,8 @@ router.get('/statistics', async (req, res) => {
 
     if (platform) where.store = { platform };
 
-    if (dateFrom || dateTo) {
-      where.orderDate = {};
-      if (dateFrom) where.orderDate.gte = new Date(`${dateFrom}T00:00:00`);
-      // The picker sends a day, and a day means through its last second
-      if (dateTo) where.orderDate.lte = new Date(`${dateTo}T23:59:59.999`);
-    }
+    const orderDate = orderDateRange(dateFrom, dateTo);
+    if (orderDate) where.orderDate = orderDate;
 
     const rows = await prisma.order.findMany({
       where,

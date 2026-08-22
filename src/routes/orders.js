@@ -5,6 +5,7 @@ const { syncQueue, isRedisReady, hasQueueWorkers } = require('../services/queue.
 const { authenticate } = require('../middleware/auth.js');
 const pdfService = require('../services/pdf.js');
 const fulfillmentService = require('../services/fulfillment.js');
+const { orderDateRange } = require('../utils/dateRange.js');
 
 // All order routes require auth
 router.use(authenticate);
@@ -74,14 +75,8 @@ router.get('/', async (req, res) => {
       where.shippingCourier = { contains: shippingCourier, mode: 'insensitive' };
     }
 
-    // The picker sends a bare day, and a day means from its first moment
-    // through its last. `new Date('2026-08-22')` parses as UTC midnight, so a
-    // same-day range used to match only orders created in that single instant.
-    if (dateFrom || dateTo) {
-      where.orderDate = {};
-      if (dateFrom) where.orderDate.gte = new Date(`${dateFrom}T00:00:00`);
-      if (dateTo) where.orderDate.lte = new Date(`${dateTo}T23:59:59.999`);
-    }
+    const orderDate = orderDateRange(dateFrom, dateTo);
+    if (orderDate) where.orderDate = orderDate;
 
     if (search) {
       where.OR = [
