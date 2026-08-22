@@ -30,10 +30,26 @@ test('either bound may stand alone', () => {
   assert.deepEqual(Object.keys(orderDateRange(undefined, '2026-08-22')), ['lte']);
 });
 
+test('an hour cut-off is exclusive, matching the "s/d Pk 15:00" window', () => {
+  // 14:59:59.999 WIB — the last instant before 15:00, so an order placed at
+  // 15:00 sharp belongs to the next window rather than being counted twice.
+  assert.equal(endOfDay('2026-08-22T15:00').toISOString(), '2026-08-22T07:59:59.999Z');
+});
+
+test('an hour on the lower bound starts exactly at that minute', () => {
+  assert.equal(startOfDay('2026-08-22T09:30').toISOString(), '2026-08-22T02:30:00.000Z');
+});
+
+test('a bare day still spans the whole day once times are accepted', () => {
+  assert.equal(endOfDay('2026-08-22').toISOString(), '2026-08-22T16:59:59.999Z');
+});
+
 test('a malformed date is ignored rather than becoming an Invalid Date', () => {
   assert.equal(orderDateRange('kemarin', ''), null);
   assert.equal(orderDateRange(undefined, undefined), null);
   // A full ISO timestamp is not what the picker sends, and silently reading it
   // as a day would move the boundary; refuse it instead.
   assert.equal(startOfDay('2026-08-22T10:00:00Z'), null);
+  // Half a time is not a time.
+  assert.equal(endOfDay('2026-08-22T15'), null);
 });

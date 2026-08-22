@@ -125,8 +125,29 @@ export default function DashboardPage() {
   // Defaults to the paid orders: that is the number the team treats as real,
   // since an unpaid order can still evaporate.
   const [statsBasis, setStatsBasis] = useState<StatsBasis>('paid')
+  // Optional cut-off on the last day, so a partial day can be compared against
+  // Seller Centre's own real-time window ("Hari Ini - Pk 15:00"). Empty means
+  // the whole day.
+  const [statsUntil, setStatsUntil] = useState('')
   const [statistics, setStatistics] = useState<Statistics | null>(null)
   const [statsLoading, setStatsLoading] = useState(false)
+
+  /**
+   * How current the statistics really are.
+   *
+   * Seller Centre is real-time and says so ("Hari Ini - Pk 15:00"); ours is
+   * only as fresh as the last sync, and on several stores only as fresh as
+   * whichever one lagged furthest behind. Without this the hour filter would
+   * promise a precision the data does not have.
+   */
+  const dataUpTo = (() => {
+    const inScope = stores.filter((s) =>
+      (!statsPlatform || s.platform === statsPlatform) &&
+      (!statsStoreId || s.id === statsStoreId))
+    const times = inScope.map((s) => s.lastSyncAt).filter((t): t is string => Boolean(t))
+    if (times.length === 0) return null
+    return times.reduce((oldest, t) => (new Date(t) < new Date(oldest) ? t : oldest))
+  })()
 
   const fetchDashboard = async () => {
     try {
@@ -148,7 +169,7 @@ export default function DashboardPage() {
     try {
       const params: Record<string, string> = {}
       if (statsFrom) params.dateFrom = statsFrom
-      if (statsTo) params.dateTo = statsTo
+      if (statsTo) params.dateTo = statsUntil ? `${statsTo}T${statsUntil}` : statsTo
       if (statsPlatform) params.platform = statsPlatform
       if (statsStoreId) params.storeId = statsStoreId
       params.basis = statsBasis
@@ -161,7 +182,7 @@ export default function DashboardPage() {
     } finally {
       setStatsLoading(false)
     }
-  }, [statsFrom, statsTo, statsPlatform, statsStoreId, statsBasis])
+  }, [statsFrom, statsTo, statsUntil, statsPlatform, statsStoreId, statsBasis])
 
   useEffect(() => {
     fetchDashboard()
@@ -266,7 +287,16 @@ export default function DashboardPage() {
           describe the whole backlog. */}
       <div className="card">
         <div className="px-4 sm:px-6 py-4 border-b border-gray-200 dark:border-slate-700 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">Statistik</h2>
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">Statistik</h2>
+            <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
+              {dataUpTo
+                ? `Data s/d pukul ${new Date(dataUpTo).toLocaleTimeString('id-ID', {
+                    hour: '2-digit', minute: '2-digit',
+                  })} (sync terakhir)`
+                : 'Belum pernah disinkronkan'}
+            </p>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <input
               type="date"
@@ -284,6 +314,14 @@ export default function DashboardPage() {
               min={statsFrom || undefined}
               onChange={(e) => setStatsTo(e.target.value)}
               aria-label="Tanggal akhir"
+            />
+            <input
+              type="time"
+              className="input w-auto"
+              value={statsUntil}
+              onChange={(e) => setStatsUntil(e.target.value)}
+              aria-label="Sampai jam"
+              title="Batas jam pada tanggal akhir. Kosong berarti sampai akhir hari."
             />
             <select
               className="input w-auto"

@@ -20,6 +20,8 @@
 const config = require('../config');
 
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+/** `YYYY-MM-DDTHH:MM`, what a paired date + time input sends. */
+const MINUTE_PATTERN = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})$/;
 
 /**
  * @param {string} day - `YYYY-MM-DD`
@@ -36,11 +38,24 @@ function boundary(day, time) {
 
 /** First instant of `day` in the business timezone. */
 function startOfDay(day) {
+  const withMinute = MINUTE_PATTERN.exec(day || '');
+  if (withMinute) return boundary(withMinute[1], `${withMinute[2]}:00.000`);
   return boundary(day, '00:00:00.000');
 }
 
-/** Last instant of `day` in the business timezone. */
+/**
+ * Last instant of `day` in the business timezone.
+ *
+ * Given a time as well, that time is the exclusive edge: "sampai jam 15:00"
+ * means the orders placed before 15:00, matching how Seller Centre labels its
+ * own real-time window ("Hari Ini - Pk 15:00").
+ */
 function endOfDay(day) {
+  const withMinute = MINUTE_PATTERN.exec(day || '');
+  if (withMinute) {
+    const at = boundary(withMinute[1], `${withMinute[2]}:00.000`);
+    return at ? new Date(at.getTime() - 1) : null;
+  }
   return boundary(day, '23:59:59.999');
 }
 

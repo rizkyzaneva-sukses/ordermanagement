@@ -899,6 +899,66 @@ export default function OrdersPage() {
 
       {/* Table */}
       <div className="card overflow-hidden">
+        {/* Pagination, above the rows: with 20-500 orders on screen the
+            controls were a full scroll away from the filters that change what
+            they page through. Rendered whenever there are rows, not only when
+            the list spills past one page — the page-size control lives here,
+            and hiding it at 500-per-page would strand the operator with no way
+            back to 20. */}
+        {total > 0 && (
+          <div className="px-4 py-3 border-b border-gray-200 dark:border-slate-700 flex flex-col sm:flex-row items-center justify-between gap-3 bg-gray-50 dark:bg-slate-800/80">
+            <div className="flex items-center gap-3">
+              <p className="text-sm text-gray-500 dark:text-slate-400">
+                Menampilkan {(page - 1) * limit + 1}–{Math.min(page * limit, total)} dari {total} pesanan
+              </p>
+              <select
+                value={limit}
+                onChange={(e) => { setLimit(Number(e.target.value)); setPage(1) }}
+                className="input py-1 text-sm w-auto min-w-[110px]"
+                aria-label="Jumlah per halaman"
+              >
+                {[20, 50, 100, 200, 500].map((n) => (
+                  <option key={n} value={n}>{n} / halaman</option>
+                ))}
+              </select>
+            </div>
+            {totalPages > 1 && (
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page === 1}
+                className="btn-ghost p-2"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                const pageNum = Math.max(1, Math.min(page - 2, totalPages - 4)) + i
+                if (pageNum > totalPages) return null
+                return (
+                  <button
+                    key={pageNum}
+                    onClick={() => setPage(pageNum)}
+                    className={`w-9 h-9 rounded-lg text-sm font-medium transition-colors ${
+                      page === pageNum
+                        ? 'bg-primary-600 text-white'
+                        : 'text-gray-600 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-700'
+                    }`}
+                  >
+                    {pageNum}
+                  </button>
+                )
+              })}
+              <button
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={page === totalPages}
+                className="btn-ghost p-2"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+            )}
+          </div>
+        )}
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead className="bg-gray-50 dark:bg-slate-800/80 border-b border-gray-200 dark:border-slate-700">
@@ -1049,64 +1109,6 @@ export default function OrdersPage() {
             </tbody>
           </table>
         </div>
-
-        {/* Pagination. Rendered whenever there are rows, not only when the list
-            spills past one page: the page-size control lives here, and hiding it
-            at 500-per-page would strand the operator with no way back to 20. */}
-        {total > 0 && (
-          <div className="px-4 py-3 border-t border-gray-200 dark:border-slate-700 flex flex-col sm:flex-row items-center justify-between gap-3 bg-gray-50 dark:bg-slate-800/80">
-            <div className="flex items-center gap-3">
-              <p className="text-sm text-gray-500 dark:text-slate-400">
-                Menampilkan {(page - 1) * limit + 1}–{Math.min(page * limit, total)} dari {total} pesanan
-              </p>
-              <select
-                value={limit}
-                onChange={(e) => { setLimit(Number(e.target.value)); setPage(1) }}
-                className="input py-1 text-sm w-auto min-w-[110px]"
-                aria-label="Jumlah per halaman"
-              >
-                {[20, 50, 100, 200, 500].map((n) => (
-                  <option key={n} value={n}>{n} / halaman</option>
-                ))}
-              </select>
-            </div>
-            {totalPages > 1 && (
-            <div className="flex items-center gap-1">
-              <button
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page === 1}
-                className="btn-ghost p-2"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-              {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                const pageNum = Math.max(1, Math.min(page - 2, totalPages - 4)) + i
-                if (pageNum > totalPages) return null
-                return (
-                  <button
-                    key={pageNum}
-                    onClick={() => setPage(pageNum)}
-                    className={`w-9 h-9 rounded-lg text-sm font-medium transition-colors ${
-                      page === pageNum
-                        ? 'bg-primary-600 text-white'
-                        : 'text-gray-600 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-700'
-                    }`}
-                  >
-                    {pageNum}
-                  </button>
-                )
-              })}
-              <button
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={page === totalPages}
-                className="btn-ghost p-2"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-            )}
-          </div>
-        )}
       </div>
 
       {/* Bulk action result — only when no selection bar is showing.
