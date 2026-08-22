@@ -151,6 +151,10 @@ function absoluteTime(iso: string): string {
   })
 }
 
+/** YYYY-MM-DD in local time — `toISOString` would shift a WIB date back a day. */
+const isoDate = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+
 const statusBadgeClass: Record<string, string> = {
   PENDING: 'badge-pending',
   PROCESSING: 'badge-processing',
@@ -223,8 +227,12 @@ export default function OrdersPage() {
   const [storeId, setStoreId] = useState('')
   const [status, setStatus] = useState('')
   const [courier, setCourier] = useState('')
-  const [dateFrom, setDateFrom] = useState('')
-  const [dateTo, setDateTo] = useState('')
+  // The page opens on today's orders: that is the day an operator is packing,
+  // and an unbounded list makes every load pull months of history it has to
+  // page through. Widening the range is one click on the date boxes.
+  const today = isoDate(new Date())
+  const [dateFrom, setDateFrom] = useState(today)
+  const [dateTo, setDateTo] = useState(today)
 
   const [limit, setLimit] = useState(20)
 
@@ -667,12 +675,15 @@ export default function OrdersPage() {
     setStoreId('')
     setStatus('')
     setCourier('')
-    setDateFrom('')
-    setDateTo('')
+    setDateFrom(today)
+    setDateTo(today)
     setPage(1)
   }
 
-  const hasActiveFilters = platform || storeId || status || courier || dateFrom || dateTo || search
+  // Today's range is the default, not something the operator chose, so it does
+  // not by itself light up Reset or explain an empty table.
+  const isDefaultRange = dateFrom === today && dateTo === today
+  const hasActiveFilters = platform || storeId || status || courier || !isDefaultRange || search
   const totalPages = Math.ceil(total / limit)
 
   return (
@@ -930,7 +941,7 @@ export default function OrdersPage() {
                     <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">
                       {hasActiveFilters
                         ? 'Coba ubah filter atau kata kunci pencarian'
-                        : 'Klik "Sync" untuk mengambil pesanan terbaru'}
+                        : 'Belum ada pesanan hari ini. Ubah rentang tanggal untuk melihat hari lain, atau klik "Sync" untuk mengambil pesanan terbaru'}
                     </p>
                   </td>
                 </tr>
