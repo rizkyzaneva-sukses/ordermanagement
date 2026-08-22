@@ -37,7 +37,39 @@ interface StoreInfo {
   lastSyncError: string | null
 }
 
+type StatsBasis = 'created' | 'paid' | 'completed'
+
+/** Which orders a statistics run counts — mirrors Shopee's "Status Pesanan". */
+const BASIS_OPTIONS: { key: StatsBasis; label: string; hint: string }[] = [
+  { key: 'created',   label: 'Pesanan Dibuat',       hint: 'Semua pesanan yang masuk di periode ini' },
+  { key: 'paid',      label: 'Pesanan Siap Dikirim', hint: 'Sudah dibayar — tanpa yang belum bayar & dibatalkan' },
+  { key: 'completed', label: 'Pesanan Selesai',      hint: 'Hanya pesanan yang sudah selesai' },
+]
+
+/** Labels for the status breakdown, in the order an order moves through them. */
+const BUCKET_LABELS: { key: keyof Statistics['breakdown']; label: string }[] = [
+  { key: 'unpaid',         label: 'Belum Bayar' },
+  { key: 'toShip',         label: 'Siap Kirim' },
+  { key: 'awaitingPickup', label: 'Menunggu Pickup' },
+  { key: 'needsAttention', label: 'Perlu Tindakan' },
+  { key: 'shipped',        label: 'Dikirim' },
+  { key: 'completed',      label: 'Selesai' },
+  { key: 'cancelled',      label: 'Dibatalkan' },
+]
+
 interface Statistics {
+  basis: StatsBasis
+  /** What each basis would report, so the panel can show the alternatives. */
+  basisCounts: Record<StatsBasis, number>
+  breakdown: {
+    toShip: number
+    awaitingPickup: number
+    shipped: number
+    needsAttention: number
+    cancelled: number
+    unpaid: number
+    completed: number
+  }
   orderCount: number
   packageCount: number
   readyToShipCount: number
@@ -90,6 +122,9 @@ export default function DashboardPage() {
   const [statsTo, setStatsTo] = useState(today)
   const [statsPlatform, setStatsPlatform] = useState('')
   const [statsStoreId, setStatsStoreId] = useState('')
+  // Defaults to the paid orders: that is the number the team treats as real,
+  // since an unpaid order can still evaporate.
+  const [statsBasis, setStatsBasis] = useState<StatsBasis>('paid')
   const [statistics, setStatistics] = useState<Statistics | null>(null)
   const [statsLoading, setStatsLoading] = useState(false)
 
@@ -116,6 +151,7 @@ export default function DashboardPage() {
       if (statsTo) params.dateTo = statsTo
       if (statsPlatform) params.platform = statsPlatform
       if (statsStoreId) params.storeId = statsStoreId
+      params.basis = statsBasis
 
       const res = await api.get<Statistics>('/dashboard/statistics', { params })
       setStatistics(res.data)
@@ -125,7 +161,7 @@ export default function DashboardPage() {
     } finally {
       setStatsLoading(false)
     }
-  }, [statsFrom, statsTo, statsPlatform, statsStoreId])
+  }, [statsFrom, statsTo, statsPlatform, statsStoreId, statsBasis])
 
   useEffect(() => {
     fetchDashboard()
@@ -251,6 +287,17 @@ export default function DashboardPage() {
             />
             <select
               className="input w-auto"
+              value={statsBasis}
+              onChange={(e) => setStatsBasis(e.target.value as StatsBasis)}
+              aria-label="Status pesanan"
+              title={BASIS_OPTIONS.find((o) => o.key === statsBasis)?.hint}
+            >
+              {BASIS_OPTIONS.map((o) => (
+                <option key={o.key} value={o.key}>{o.label}</option>
+              ))}
+            </select>
+            <select
+              className="input w-auto"
               value={statsPlatform}
               onChange={(e) => {
                 setStatsPlatform(e.target.value)
@@ -353,6 +400,44 @@ export default function DashboardPage() {
                   )
                 })}
               </div>
+
+              {/* The headline count, broken down until it adds up. Four tiles
+                  used to account for 11 of 43 orders, with PROCESSED and UNPAID
+                  invisible — which is what made the total look wrong rather
+                  than merely unexplained. */}
+              {statistics && (
+                <div className="rounded-xl border border-gray-200 dark:border-slate-700 p-4 space-y-2.5">
+                  <p className="text-xs text-gray-500 dark:text-slate-400">
+                    Rincian {statistics.orderCount.toLocaleString('id-ID')} pesanan pada dasar{' '}
+                    <span className="font-medium text-gray-700 dark:text-slate-200">
+                      {BASIS_OPTIONS.find((o) => o.key === statistics.basis)?.label}
+                    </span>
+                  </p>
+                  {statistics.orderCount === 0 ? (
+                    <p className="text-sm text-gray-500 dark:text-slate-400">Tidak ada pesanan di periode ini.</p>
+                  ) : (
+                    <div className="flex flex-wrap gap-x-5 gap-y-2">
+                      {BUCKET_LABELS.filter((b) => statistics.breakdown[b.key] > 0).map((b) => (
+                        <span key={b.key} className="text-sm text-gray-700 dark:text-slate-300">
+                          {b.label}{' '}
+                          <span className="font-semibold text-gray-900 dark:text-slate-100">
+                            {statistics.breakdown[b.key].toLocaleString('id-ID')}
+                          </span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {/* Seller Centre reports a different number per basis, so the
+                      others are shown here rather than leaving a mismatch to be
+                      discovered against Shopee. */}
+                  <p className="text-xs text-gray-500 dark:text-slate-400">
+                    Dasar lain:{' '}
+                    {BASIS_OPTIONS.filter((o) => o.key !== statistics.basis)
+                      .map((o) => `${o.label} ${(statistics.basisCounts?.[o.key] ?? 0).toLocaleString('id-ID')}`)
+                      .join(' · ')}
+                  </p>
+                </div>
+              )}
 
               {/* The schema has no order-total column, so these are item
                   subtotals. Saying so beats letting them be read as payouts. */}

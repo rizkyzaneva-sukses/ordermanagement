@@ -28,6 +28,24 @@ const STAT_BUCKETS = {
 };
 
 /**
+ * Which orders a statistics run counts — the same choice Shopee's Data Center
+ * offers under "Status Pesanan", and it matters: on one shop the same morning
+ * Shopee reported 61 orders created but 55 ready to ship. Counting one and
+ * comparing it against the other is what makes the totals look wrong.
+ *
+ * `paid` keeps IN_CANCEL: the buyer has asked to cancel but the money is in and
+ * the order still stands until the request is approved.
+ */
+const ORDER_BASIS = {
+  created:   () => true,
+  paid:      (status) => !STAT_BUCKETS.unpaid.includes(status) &&
+                         !STAT_BUCKETS.cancelled.includes(status),
+  completed: (status) => STAT_BUCKETS.completed.includes(status),
+};
+
+const DEFAULT_BASIS = 'paid';
+
+/**
  * GET /stats - Summary counts of packages by operational bucket
  */
 router.get('/stats', async (req, res) => {
@@ -70,7 +88,7 @@ router.get('/stats', async (req, res) => {
 /**
  * GET /statistics - Order value and counts over a date range
  *
- * Query: dateFrom, dateTo (YYYY-MM-DD), platform, storeId
+ * Query: dateFrom, dateTo (YYYY-MM-DD), platform, storeId, basis
  *
  * Counts are per order, not per package: a split order is one order here even
  * though it occupies several rows.
@@ -79,6 +97,9 @@ router.get('/statistics', async (req, res) => {
   try {
     const user = req.user;
     const { dateFrom, dateTo, platform, storeId } = req.query;
+    const basis = Object.prototype.hasOwnProperty.call(ORDER_BASIS, req.query.basis)
+      ? req.query.basis
+      : DEFAULT_BASIS;
 
     const where = {};
 
@@ -114,38 +135,56 @@ router.get('/statistics', async (req, res) => {
     }
 
     const inBucket = (status, bucket) => STAT_BUCKETS[bucket].includes(status);
+    const countsBasis = ORDER_BASIS[basis];
 
     let totalValue = 0;
     let completedValue = 0;
     let cancelledValue = 0;
-    let readyToShipCount = 0;
-    let shippedCount = 0;
-    let cancelledCount = 0;
-    let completedCount = 0;
+    let packageCount = 0;
+    let orderCount = 0;
+
+    // Every bucket, so the headline count can be shown broken down and add up.
+    // Leaving PROCESSED and UNPAID out of the response is what made "43 orders"
+    // impossible to trace: the visible tiles only accounted for 11 of them.
+    const breakdown = Object.fromEntries(Object.keys(STAT_BUCKETS).map((b) => [b, 0]));
+
+    // Totals for every basis, so the UI can say what the other choices would
+    // show without a second round trip.
+    const basisCounts = Object.fromEntries(Object.keys(ORDER_BASIS).map((b) => [b, 0]));
 
     for (const order of byOrder.values()) {
+      for (const [name, predicate] of Object.entries(ORDER_BASIS)) {
+        if (predicate(order.status)) basisCounts[name]++;
+      }
+
+      if (!countsBasis(order.status)) continue;
+
       const value = orderMerchandiseValue(order.rows);
+      orderCount++;
+      packageCount += order.rows.length;
       totalValue += value;
 
-      if (inBucket(order.status, 'completed')) {
-        completedCount++;
-        completedValue += value;
+      for (const bucket of Object.keys(STAT_BUCKETS)) {
+        if (inBucket(order.status, bucket)) breakdown[bucket]++;
       }
-      if (inBucket(order.status, 'cancelled')) {
-        cancelledCount++;
-        cancelledValue += value;
-      }
-      if (inBucket(order.status, 'toShip')) readyToShipCount++;
-      if (inBucket(order.status, 'shipped')) shippedCount++;
+
+      if (inBucket(order.status, 'completed')) completedValue += value;
+      if (inBucket(order.status, 'cancelled')) cancelledValue += value;
     }
 
-    const orderCount = byOrder.size;
+    const readyToShipCount = breakdown.toShip;
+    const shippedCount = breakdown.shipped;
+    const cancelledCount = breakdown.cancelled;
+    const completedCount = breakdown.completed;
 
     return res.json({
       success: true,
       data: {
+        basis,
+        basisCounts,
+        breakdown,
         orderCount,
-        packageCount: rows.length,
+        packageCount,
         readyToShipCount,
         shippedCount,
         cancelledCount,
