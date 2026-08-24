@@ -281,8 +281,14 @@ async function getShippingOptions(orderRowId) {
     ctx.accessToken, ctx.store.shopId, ctx.order.orderId, pkgNumber);
 
   const infoNeeded = resp.response?.info_needed || {};
+  // A mode is on offer when its key is present, whatever the array holds — an
+  // empty one means "no extra fields needed", not "unavailable".
   const available = ['pickup', 'dropoff', 'non_integrated']
     .filter(m => Object.prototype.hasOwnProperty.call(infoNeeded, m));
+
+  // Logged because an empty info_needed is otherwise invisible: the dialog just
+  // shows every mode greyed out with nothing to explain why Shopee offered none.
+  console.log(`[fulfillment] Shipping options ${ctx.order.orderId} pkg=${pkgNumber || '(default)'} courier=${ctx.order.shippingCourier || '-'} info_needed=${JSON.stringify(infoNeeded)}`);
 
   return {
     orderStatus:     live.orderStatus,
@@ -479,6 +485,12 @@ async function getMassShippingOptions(orderRowIds) {
       }
     }
 
+    // Two different dead ends, and they need different words. Shopee refusing
+    // to answer is a transient problem worth retrying; Shopee answering with no
+    // mode at all is the channel saying this package cannot be arranged through
+    // the API, which no amount of retrying will change.
+    const answeredWithNothing = options && options.availableModes.length === 0;
+
     groups.push(options
       ? {
         ...group,
@@ -487,6 +499,9 @@ async function getMassShippingOptions(orderRowIds) {
         infoNeeded:     options.infoNeeded,
         pickup:         options.pickup,
         dropoff:        options.dropoff,
+        ...(answeredWithNothing
+          ? { error: 'Shopee tidak menawarkan cara pengiriman apa pun untuk kurir ini — atur lewat Seller Centre' }
+          : {}),
       }
       : {
         ...group,
@@ -496,10 +511,12 @@ async function getMassShippingOptions(orderRowIds) {
       });
   }
 
-  // Nothing at all could answer — that is a failure worth surfacing as one,
-  // rather than an empty dialog the operator has to interpret.
+  // Nothing at all could be arranged — a failure worth surfacing as one, rather
+  // than an empty dialog the operator has to interpret. The reason comes from
+  // the groups themselves, so it says which courier and why.
   if (groups.every((g) => g.availableModes.length === 0)) {
-    throw lastError || fail(409, 'Tidak ada pesanan terpilih yang bisa memberikan opsi pengiriman');
+    const reasons = [...new Set(groups.map((g) => `${g.courier}: ${g.error}`))].join(' | ');
+    throw lastError || fail(409, `Tidak ada pesanan terpilih yang bisa diatur pengirimannya — ${reasons}`);
   }
 
   return { groups };
