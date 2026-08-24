@@ -1210,7 +1210,7 @@ export default function OrdersPage() {
           </div>
         )}
         <div className="overflow-x-auto">
-          <table className="w-full">
+          <table className="w-full min-w-[1100px]">
             <thead className="bg-gray-50 dark:bg-slate-800/80 border-b border-gray-200 dark:border-slate-700">
               <tr>
                 <th className="table-header w-10">
@@ -1281,7 +1281,7 @@ export default function OrdersPage() {
                           />
                         )}
                       </td>
-                      <td className="table-cell font-mono text-sm font-medium text-gray-900 dark:text-slate-100">
+                      <td className="table-cell font-mono text-sm font-medium text-gray-900 dark:text-slate-100 whitespace-nowrap">
                         {order.orderId}
                         {order.packageNumber && (
                           <p className="text-xs text-gray-400 dark:text-slate-500" title="Nomor paket">
@@ -1289,14 +1289,14 @@ export default function OrdersPage() {
                           </p>
                         )}
                       </td>
-                      <td className="table-cell">{order.storeName}</td>
+                      <td className="table-cell whitespace-nowrap">{order.storeName}</td>
                       <td className="table-cell">
                         <span className={platformBadgeClass[order.platform] || 'badge'}>
                           {order.platform}
                         </span>
                       </td>
                       <td className="table-cell">{order.buyerName}</td>
-                      <td className="table-cell w-[200px] max-w-[200px]">
+                      <td className="table-cell min-w-[250px]">
                         {order.items.length === 0 ? (
                           <span className="text-xs text-gray-400 dark:text-slate-500">—</span>
                         ) : (
@@ -1309,7 +1309,7 @@ export default function OrdersPage() {
                               .join('\n')}
                           >
                             {order.items.slice(0, 2).map((it, idx) => (
-                              <p key={idx} className="text-sm text-gray-700 dark:text-slate-300 truncate">
+                              <p key={idx} className="text-sm text-gray-700 dark:text-slate-300">
                                 <span className="text-gray-400 dark:text-slate-500 font-mono text-xs">
                                   {it.quantity}x
                                 </span>{' '}
