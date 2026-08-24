@@ -74,11 +74,14 @@ function waitForRedis(timeoutMs = 10_000) {
  * Safe to call multiple times — BullMQ deduplicates by jobId.
  *
  * @param {string} storeId
+ * @returns {Promise<boolean>} whether the job was actually registered — a
+ *   caller tracking whether auto-sync is live cannot tell that from a silent
+ *   return, and Redis can drop between the readiness check and this call.
  */
 async function addStore(storeId) {
   if (!isRedisReady()) {
     console.warn(`[scheduler] Redis not available — skipping job registration for store ${storeId}`);
-    return;
+    return false;
   }
   await syncQueue.add(
     'sync-store',
@@ -86,6 +89,7 @@ async function addStore(storeId) {
     repeatableJobOpts(storeId),
   );
   console.log(`[scheduler] Repeatable sync registered for store ${storeId} (every ${SYNC_INTERVAL_MS / 60_000} min)`);
+  return true;
 }
 
 /**
@@ -198,8 +202,84 @@ function stopAwbCleanup() {
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 /**
+ * Whether the repeatable sync jobs are actually registered right now.
+ *
+ * Read by `GET /orders/sync-status` so the UI can say auto-sync is down,
+ * instead of leaving the operator to infer it from a "last synced" stamp that
+ * quietly stops moving.
+ */
+let autoSyncRegistered = false;
+let registering = false;
+
+function isAutoSyncRunning() {
+  return autoSyncRegistered;
+}
+
+/**
+ * Register the repeatable job for every active store.
+ *
+ * Guarded against overlapping runs: the retry below and a reconnect event can
+ * both fire, and BullMQ deduplicates by jobId anyway — but doing the work twice
+ * at once wastes a DB read and muddles the log.
+ *
+ * @returns {Promise<boolean>} whether registration completed
+ */
+async function registerAllStores() {
+  if (registering) return autoSyncRegistered;
+  registering = true;
+
+  try {
+    let stores;
+    try {
+      stores = await prisma.store.findMany({
+        where: { isActive: true },
+        select: { id: true, name: true, platform: true },
+      });
+    } catch (err) {
+      console.error('[scheduler] Failed to load active stores from DB:', err.message);
+      return false;
+    }
+
+    if (stores.length === 0) {
+      console.log('[scheduler] No active stores found — no repeatable jobs registered');
+      autoSyncRegistered = true;
+      return true;
+    }
+
+    console.log(`[scheduler] Registering repeatable sync for ${stores.length} active store(s)…`);
+    let failures = 0;
+    for (const store of stores) {
+      try {
+        if (!await addStore(store.id)) failures++;
+      } catch (err) {
+        failures++;
+        console.error(`[scheduler] Failed to register sync for store ${store.id} (${store.name}):`, err.message);
+      }
+    }
+
+    if (failures === stores.length) {
+      console.error('[scheduler] No store could be registered — auto-sync is not running');
+      return false;
+    }
+
+    autoSyncRegistered = true;
+    console.log('[scheduler] All repeatable sync jobs registered');
+    return true;
+  } finally {
+    registering = false;
+  }
+}
+
+/**
  * Bootstrap: register repeatable jobs for all currently active stores.
  * Call this once after the server starts.
+ *
+ * Redis is often slower to accept connections than the API is to boot —
+ * container start order, a restarting Redis, a slow network. This used to give
+ * up after ten seconds and never look again, so auto-sync stayed dead until
+ * somebody restarted the server, with nothing on screen to say so. The wait is
+ * now open-ended: registration happens the moment Redis is reachable, whether
+ * that is on the first attempt or an hour later.
  */
 async function start() {
   console.log(`[scheduler] Starting — sync interval: ${SYNC_INTERVAL_MS / 60_000} min`);
@@ -210,41 +290,46 @@ async function start() {
   startTokenRefresh();
   startAwbCleanup();
 
-  // Wait for Redis to be ready before registering jobs
-  const isReady = await waitForRedis(10_000);
-  if (!isReady) {
-    console.error('[scheduler] Aborted: Redis not available. Auto-sync will not run until server restarts.');
-    return;
-  }
-
-  let stores;
-  try {
-    stores = await prisma.store.findMany({
-      where: { isActive: true },
-      select: { id: true, name: true, platform: true },
-    });
-  } catch (err) {
-    console.error('[scheduler] Failed to load active stores from DB:', err.message);
-    return;
-  }
-
-  if (stores.length === 0) {
-    console.log('[scheduler] No active stores found — no repeatable jobs registered');
-    return;
-  }
-
-  console.log(`[scheduler] Registering repeatable sync for ${stores.length} active store(s)…`);
-  for (const store of stores) {
-    try {
-      await addStore(store.id);
-    } catch (err) {
-      console.error(`[scheduler] Failed to register sync for store ${store.id} (${store.name}):`, err.message);
+  if (await waitForRedis(10_000)) {
+    if (await registerAllStores()) {
+      warnIfNoWorker();
+      return;
     }
   }
 
-  console.log('[scheduler] All repeatable sync jobs registered');
+  console.warn('[scheduler] Auto-sync not registered yet — will keep trying until Redis is reachable');
+  retryRegistration();
+}
 
-  warnIfNoWorker();
+/** How often to look again once the first attempt failed. */
+const REGISTRATION_RETRY_MS = 60_000;
+
+/**
+ * Keep attempting registration in the background until it succeeds.
+ *
+ * Both triggers are kept on purpose: the 'ready' event catches a reconnect
+ * promptly, and the timer covers a Redis that was reachable but whose store
+ * read failed, which fires no event at all.
+ */
+function retryRegistration() {
+  if (autoSyncRegistered) return;
+
+  const attempt = async () => {
+    if (autoSyncRegistered) return;
+    if (!isRedisReady()) return;
+
+    if (await registerAllStores()) {
+      clearInterval(timer);
+      connection.off('ready', attempt);
+      console.log('[scheduler] Auto-sync recovered — repeatable sync jobs are registered');
+      warnIfNoWorker();
+    }
+  };
+
+  const timer = setInterval(() => { attempt().catch(() => {}); }, REGISTRATION_RETRY_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+
+  connection.on('ready', () => { attempt().catch(() => {}); });
 }
 
 /**
@@ -279,6 +364,7 @@ function warnIfNoWorker() {
 
 module.exports = {
   start,
+  isAutoSyncRunning,
   addStore,
   removeStore,
   startTokenRefresh,

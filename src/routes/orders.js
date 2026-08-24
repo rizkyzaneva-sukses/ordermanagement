@@ -6,6 +6,7 @@ const { authenticate } = require('../middleware/auth.js');
 const pdfService = require('../services/pdf.js');
 const fulfillmentService = require('../services/fulfillment.js');
 const { orderDateRange } = require('../utils/dateRange.js');
+const scheduler = require('../services/scheduler.js');
 
 // All order routes require auth
 router.use(authenticate);
@@ -368,6 +369,10 @@ router.get('/sync-status', async (req, res) => {
         needsReconnect: stores.filter((s) => s.needsReconnect).length,
         redisReady: isRedisReady(),
         workerRunning,
+        // Registered jobs, not merely a reachable Redis: the two come apart
+        // when Redis was down at boot, and only this one says whether anything
+        // is actually scheduled to run.
+        autoSyncRunning: scheduler.isAutoSyncRunning(),
       },
     });
   } catch (err) {
@@ -585,6 +590,20 @@ router.post('/print', async (req, res) => {
     // Generate batch PDF
     const pdfBuffer = await pdfService.generateBatchPdf(ordersWithItems, awbDataMap);
 
+    // Marked here rather than by a follow-up call from the browser. As two
+    // requests, a blip between them left the label printed and the order still
+    // sitting in "Belum Dicetak" — silently queued to be printed again. Doing
+    // it here can only fail the other way: the operator sees no PDF arrive and
+    // reaches for "Cetak ulang", which is a mistake that announces itself.
+    await prisma.order.updateMany({
+      where: { id: { in: ids } },
+      data: {
+        printedAt: new Date(),
+        printedById: req.user.id,
+        ...(reprint ? { reprintCount: { increment: 1 } } : {}),
+      },
+    });
+
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="resi-${new Date().toISOString().slice(0, 10)}.pdf"`);
     return res.send(Buffer.from(pdfBuffer));
@@ -598,6 +617,10 @@ router.post('/print', async (req, res) => {
  * POST /mark-printed
  * Mark a list of orders as printed.
  * Body: { ids: string[] }
+ *
+ * `POST /print` now marks its own batch, so this is no longer part of the
+ * printing flow. Kept for marking labels printed outside the app — a run done
+ * from Seller Centre, or one whose PDF never reached the browser.
  */
 router.post('/mark-printed', async (req, res) => {
   try {
@@ -811,6 +834,24 @@ router.post('/:id/split', fulfillmentRoute('Split order', async (req) => {
 router.post('/:id/unsplit', fulfillmentRoute('Unsplit order', async (req) => {
   await loadAccessibleOrder(req.user, req.params.id);
   return fulfillmentService.unsplitOrder(req.params.id);
+}));
+
+/**
+ * POST /refresh-tracking - Pull tracking numbers for many packages at once
+ * Body: { ids: string[] }
+ *
+ * Declared before the `/:id/` route below so Express does not read the literal
+ * path as an order id.
+ */
+router.post('/refresh-tracking', fulfillmentRoute('Refresh tracking', async (req) => {
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) {
+    const err = new Error('ids must be a non-empty array');
+    err.statusCode = 400;
+    throw err;
+  }
+  await assertAccessibleOrders(req.user, ids);
+  return fulfillmentService.refreshTrackingMany(ids);
 }));
 
 /**

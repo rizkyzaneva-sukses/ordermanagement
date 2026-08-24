@@ -120,9 +120,9 @@ function PrintPageContent() {
       clearInterval(interval)
       setProgress(100)
       setDone(true)
-
-      // Mark as printed
-      await api.post('/orders/mark-printed', { ids })
+      // No follow-up call to mark these printed: /orders/print does it in the
+      // same request. As two calls, a failure between them left the label
+      // printed and the order still listed as unprinted.
     } catch (err) {
       setError('Gagal mencetak resi. Silakan coba lagi.')
       setProgress(0)

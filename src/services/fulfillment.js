@@ -1027,6 +1027,54 @@ async function refreshTracking(orderRowId) {
 }
 
 /**
+ * Pull the tracking number for many packages at once.
+ *
+ * The per-order call existed, but a print run stuck on twenty missing waybills
+ * left the operator opening twenty menus or waiting out the next 15-minute
+ * sync. Sequential on purpose — twenty parallel calls against one shop is how
+ * you meet Shopee's rate limiter.
+ *
+ * One package failing is normal here: the courier simply may not have issued a
+ * number yet. Each is reported on its own rather than taking down the run.
+ *
+ * @param {string[]} orderRowIds
+ * @returns {Promise<{ refreshed: Array, stillMissing: Array, failed: Array }>}
+ */
+async function refreshTrackingMany(orderRowIds) {
+  if (!Array.isArray(orderRowIds) || orderRowIds.length === 0) {
+    throw fail(400, 'orderRowIds must be a non-empty array');
+  }
+  if (orderRowIds.length > 100) {
+    throw fail(400, 'At most 100 packages can be refreshed in one request');
+  }
+
+  const rows = await prisma.order.findMany({
+    where: { id: { in: orderRowIds } },
+    select: { id: true, orderId: true },
+  });
+  const orderIdOf = new Map(rows.map((r) => [r.id, r.orderId]));
+
+  const refreshed = [];
+  const stillMissing = [];
+  const failed = [];
+
+  for (const id of orderRowIds) {
+    const orderId = orderIdOf.get(id) || id;
+    try {
+      const { trackingNumber } = await refreshTracking(id);
+      if (trackingNumber) refreshed.push({ id, orderId, trackingNumber });
+      else stillMissing.push({ id, orderId });
+    } catch (err) {
+      failed.push({ id, orderId, message: err.message });
+    }
+  }
+
+  console.log(`[fulfillment] Refresh tracking: ${refreshed.length} found, ${stillMissing.length} not issued yet, ${failed.length} failed`);
+
+  return { refreshed, stillMissing, failed };
+}
+
+/**
  * Get the 3PL event history for a package (status enum in KB §10.4).
  *
  * @param {string} orderRowId
@@ -1430,6 +1478,7 @@ module.exports = {
   cancelOrder,
   respondToCancellation,
   refreshTracking,
+  refreshTrackingMany,
   getTrackingEvents,
   checkAwbPrintable,
   fetchAwb,

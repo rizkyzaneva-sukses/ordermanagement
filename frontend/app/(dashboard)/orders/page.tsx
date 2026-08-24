@@ -82,6 +82,9 @@ interface SyncStatus {
   needsReconnect: number
   redisReady: boolean
   workerRunning: boolean
+  /** Whether the repeatable sync jobs are registered — a reachable Redis is
+      not the same thing, and only this says anything is scheduled to run. */
+  autoSyncRunning?: boolean
 }
 
 /**
@@ -682,6 +685,50 @@ export default function OrdersPage() {
     }
   }
 
+  /**
+   * Ask the courier for every waybill still missing on this page.
+   *
+   * The per-order action already existed, but a print run held up by twenty
+   * missing numbers meant twenty menus or a 15-minute wait for the next sync.
+   * Scoped to the rows on screen rather than the whole backlog, so the operator
+   * gets back what they are looking at.
+   */
+  const handleRefreshTrackingAll = async () => {
+    const missing = orders.filter((o) => !o.trackingNumber && !o.printed)
+    if (missing.length === 0) return
+
+    setBulkBusy(true)
+    setBulkMessage(null)
+    try {
+      const res = await api.post<any>('/orders/refresh-tracking', {
+        ids: missing.map((o) => o.id),
+      })
+      const found = res.data?.refreshed?.length ?? 0
+      const pending = res.data?.stillMissing?.length ?? 0
+      const failed = res.data?.failed ?? []
+
+      setBulkMessage({
+        // Nothing found is not an error — the courier simply has not issued
+        // them yet, and saying "gagal" would send the operator hunting for a
+        // fault that is not theirs.
+        type: failed.length > 0 ? 'error' : 'success',
+        text: [
+          found > 0 ? `${found} nomor resi didapat` : null,
+          pending > 0 ? `${pending} belum diterbitkan kurir` : null,
+          failed.length > 0
+            ? `${failed.length} gagal: ${failed.map((f: any) => `${f.orderId} (${f.message})`).join(', ')}`
+            : null,
+        ].filter(Boolean).join(' · ') || 'Tidak ada perubahan',
+      })
+
+      await fetchOrders({ background: true })
+    } catch (err) {
+      setBulkMessage({ type: 'error', text: await readError(err) })
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
   const handleDownloadAwb = async () => {
     if (awbSelected.length === 0) return
     setBulkBusy(true)
@@ -766,11 +813,22 @@ export default function OrdersPage() {
       </div>
 
       {/* Standing sync health banner — visible without having to press Sync first */}
-      {syncStatus && (syncStatus.needsReconnect > 0 || syncStatus.failing > 0 || syncStatus.partial > 0) && (
+      {syncStatus && (syncStatus.needsReconnect > 0 || syncStatus.failing > 0 || syncStatus.partial > 0
+        || syncStatus.autoSyncRunning === false) && (
         <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-4 py-3">
           <div className="flex items-start gap-2 text-sm text-amber-800 dark:text-amber-200">
             <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
             <div className="space-y-1">
+              {/* Nothing is scheduled, so the list only moves when someone
+                  presses Sync. Without this the sole clue is a "last synced"
+                  stamp that quietly stops advancing. */}
+              {syncStatus.autoSyncRunning === false && (
+                <p>
+                  <span className="font-semibold">Sync otomatis sedang tidak berjalan.</span>{' '}
+                  Pesanan baru tidak akan masuk sendiri — tekan &ldquo;Sync Pesanan&rdquo; untuk menarik sekarang.
+                  Sistem terus mencoba menyalakannya kembali sendiri.
+                </p>
+              )}
               {syncStatus.needsReconnect > 0 && (
                 <p>
                   <span className="font-semibold">{syncStatus.needsReconnect} toko perlu dihubungkan ulang.</span>{' '}
@@ -820,13 +878,22 @@ export default function OrdersPage() {
 
       {/* Orders that exist but cannot be printed yet */}
       {awaitingTracking > 0 && (
-        <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 px-4 py-3 text-sm text-slate-700 dark:text-slate-300 flex items-start gap-2">
-          <Package className="w-4 h-4 mt-0.5 shrink-0" />
-          <p>
-            <span className="font-semibold">{awaitingTracking} pesanan belum punya nomor resi</span> — kurir belum
-            menerbitkannya. Pesanan tetap ditampilkan, tapi belum bisa dicentang untuk dicetak. Gunakan
-            &ldquo;Ambil nomor resi&rdquo; di kolom Aksi, atau tunggu sync berikutnya.
-          </p>
+        <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 px-4 py-3 text-sm text-slate-700 dark:text-slate-300 flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="flex items-start gap-2 flex-1">
+            <Package className="w-4 h-4 mt-0.5 shrink-0" />
+            <p>
+              <span className="font-semibold">{awaitingTracking} pesanan belum punya nomor resi</span> — kurir belum
+              menerbitkannya. Pesanan tetap ditampilkan, tapi belum bisa dicentang untuk dicetak.
+            </p>
+          </div>
+          <button
+            onClick={handleRefreshTrackingAll}
+            disabled={bulkBusy}
+            className="btn-secondary self-start sm:self-auto shrink-0 flex items-center gap-2"
+          >
+            {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            Ambil semua nomor resi
+          </button>
         </div>
       )}
 
