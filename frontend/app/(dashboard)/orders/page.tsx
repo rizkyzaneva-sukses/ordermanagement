@@ -1210,10 +1210,22 @@ export default function OrdersPage() {
           </div>
         )}
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1100px]">
+          <table className="w-full table-fixed">
+            <colgroup>
+              <col className="w-[40px]" />
+              <col className="w-[12%]" />
+              <col className="w-[10%]" />
+              <col className="w-[7%]" />
+              <col className="w-[9%]" />
+              <col className="w-[28%]" />
+              <col className="w-[10%]" />
+              <col className="w-[9%]" />
+              <col className="w-[8%]" />
+              <col className="w-[40px]" />
+            </colgroup>
             <thead className="bg-gray-50 dark:bg-slate-800/80 border-b border-gray-200 dark:border-slate-700">
               <tr>
-                <th className="table-header w-10">
+                <th className="table-header">
                   <input
                     type="checkbox"
                     checked={
@@ -1232,7 +1244,7 @@ export default function OrdersPage() {
                 <th className="table-header">Kurir</th>
                 <th className="table-header">Status</th>
                 <th className="table-header">Tanggal</th>
-                <th className="table-header w-10">Aksi</th>
+                <th className="table-header">Aksi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-slate-700/60">
@@ -1262,7 +1274,7 @@ export default function OrdersPage() {
                     <tr key={order.id} className="hover:bg-gray-50 dark:hover:bg-slate-700/40 transition-colors">
                       <td className="table-cell">
                         {order.printed ? (
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-col gap-0.5">
                             <span className="text-xs text-gray-400">Sudah dicetak</span>
                             <button
                               onClick={() => router.push(`/print?ids=${order.id}&reprint=true`)}
@@ -1281,36 +1293,34 @@ export default function OrdersPage() {
                           />
                         )}
                       </td>
-                      <td className="table-cell font-mono text-sm font-medium text-gray-900 dark:text-slate-100 whitespace-nowrap">
+                      <td className="table-cell font-mono text-xs font-medium text-gray-900 dark:text-slate-100 break-all">
                         {order.orderId}
                         {order.packageNumber && (
-                          <p className="text-xs text-gray-400 dark:text-slate-500" title="Nomor paket">
+                          <p className="text-[10px] text-gray-400 dark:text-slate-500 break-all" title="Nomor paket">
                             pkg {order.packageNumber}
                           </p>
                         )}
                       </td>
-                      <td className="table-cell whitespace-nowrap">{order.storeName}</td>
+                      <td className="table-cell text-sm break-words">{order.storeName}</td>
                       <td className="table-cell">
                         <span className={platformBadgeClass[order.platform] || 'badge'}>
                           {order.platform}
                         </span>
                       </td>
-                      <td className="table-cell">{order.buyerName}</td>
-                      <td className="table-cell min-w-[250px]">
+                      <td className="table-cell text-sm break-words">{order.buyerName}</td>
+                      <td className="table-cell">
                         {order.items.length === 0 ? (
                           <span className="text-xs text-gray-400 dark:text-slate-500">—</span>
                         ) : (
                           <div
                             className="space-y-0.5"
-                            // Names run long enough that showing them in full would
-                            // dominate the row; the full list stays reachable on hover.
                             title={order.items
                               .map((it) => `${it.quantity}x ${it.name}${it.variant ? ` (${it.variant})` : ''}`)
                               .join('\n')}
                           >
                             {order.items.slice(0, 2).map((it, idx) => (
-                              <p key={idx} className="text-sm text-gray-700 dark:text-slate-300">
-                                <span className="text-gray-400 dark:text-slate-500 font-mono text-xs">
+                              <p key={idx} className="text-xs text-gray-700 dark:text-slate-300 break-words">
+                                <span className="text-gray-400 dark:text-slate-500 font-mono text-[10px]">
                                   {it.quantity}x
                                 </span>{' '}
                                 {it.name}
@@ -1324,11 +1334,11 @@ export default function OrdersPage() {
                           </div>
                         )}
                       </td>
-                      <td className="table-cell">
+                      <td className="table-cell text-sm break-words">
                         <div>
                           <p>{order.courier}</p>
                           {order.trackingNumber && (
-                            <p className="text-xs text-gray-400 dark:text-slate-500 font-mono">{order.trackingNumber}</p>
+                            <p className="text-[10px] text-gray-400 dark:text-slate-500 font-mono break-all">{order.trackingNumber}</p>
                           )}
                         </div>
                       </td>
@@ -1337,12 +1347,12 @@ export default function OrdersPage() {
                           {order.status.replace(/_/g, ' ')}
                         </span>
                         {order.logisticsStatus && (
-                          <p className="text-xs text-gray-400 dark:text-slate-500 mt-1">
+                          <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-1">
                             {logisticsLabel[order.logisticsStatus] || order.logisticsStatus}
                           </p>
                         )}
                       </td>
-                      <td className="table-cell text-gray-500 dark:text-slate-400 whitespace-nowrap">
+                      <td className="table-cell text-xs text-gray-500 dark:text-slate-400 whitespace-nowrap">
                         {new Date(order.createdAt).toLocaleDateString('id-ID', {
                           day: '2-digit',
                           month: 'short',
