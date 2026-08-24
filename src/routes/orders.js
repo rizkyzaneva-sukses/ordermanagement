@@ -6,10 +6,19 @@ const { authenticate } = require('../middleware/auth.js');
 const pdfService = require('../services/pdf.js');
 const fulfillmentService = require('../services/fulfillment.js');
 const { orderDateRange } = require('../utils/dateRange.js');
+const {
+  ORDER_TABS,
+  ORDER_SUB_TABS,
+  resolveTab,
+  resolveSubTab,
+  statusesFor,
+  statusFilter,
+} = require('../utils/orderTabs.js');
 const scheduler = require('../services/scheduler.js');
 
 // All order routes require auth
 router.use(authenticate);
+
 
 /**
  * GET / - List orders with filters
@@ -31,7 +40,12 @@ router.get('/', async (req, res) => {
       page = 1,
       limit = 50,
       printFilter = 'unprinted',
+      tab = 'toShip',
+      subTab = 'all',
     } = req.query;
+
+    const activeTab = resolveTab(tab);
+    const activeSubTab = resolveSubTab(subTab);
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(500, Math.max(1, parseInt(limit, 10) || 50));
@@ -64,9 +78,9 @@ router.get('/', async (req, res) => {
       where.store = { platform: platform };
     }
 
-    if (status) {
-      where.status = status;
-    }
+    const statuses = statusesFor({ tab: activeTab, subTab: activeSubTab, status });
+    const byStatusFilter = statusFilter(statuses);
+    if (byStatusFilter !== undefined) where.status = byStatusFilter;
 
     // Exact match when the dropdown supplies a courier from the real list;
     // `contains` stays for the legacy free-text parameter.
@@ -113,17 +127,29 @@ router.get('/', async (req, res) => {
       prisma.order.count({ where: listWhere }),
     ]);
 
-    // Tab counts share every filter the list uses (store, platform, status,
-    // courier, date range, search) — only printedAt varies per tab. Counting
-    // against a bare role-access filter here used to show the same three
-    // numbers no matter what was selected above, which reads as "the filter
-    // did nothing" even though the list itself was filtering correctly.
-    const [unprintedCount, printedCount, allCount, awaitingTrackingCount] = await Promise.all([
+    // Tab counts share every filter the list uses except the one they vary.
+    // Counting against a bare role-access filter used to show the same numbers
+    // whatever was selected above, which reads as "the filter did nothing".
+    //
+    // `statusCounts` is one groupBy rather than a count per tab: the tab and
+    // sub-tab totals are all derivable from the per-status tally, and seven
+    // round trips for numbers that fit in one query is a waste on a shop with
+    // thousands of rows.
+    // Everything the operator selected except the status itself, so each tab
+    // count describes what that tab *would* show. Taken here rather than
+    // earlier so the courier, date range and search are all included — built
+    // from a snapshot before those were applied, every tab would ignore them.
+    const { status: _ignoredStatus, ...tabAgnosticWhere } = where;
+
+    const [statusRows, unprintedCount, printedCount, awaitingTrackingCount] = await Promise.all([
+      prisma.order.groupBy({ by: ['status'], where: tabAgnosticWhere, _count: { _all: true } }),
       prisma.order.count({ where: { ...where, printedAt: null } }),
       prisma.order.count({ where: { ...where, printedAt: { not: null } } }),
-      prisma.order.count({ where }),
       prisma.order.count({ where: { ...where, printedAt: null, trackingNumber: null } }),
     ]);
+
+    const byStatus = Object.fromEntries(statusRows.map((r) => [r.status, r._count._all]));
+    const sumOf = (list) => (list || Object.keys(byStatus)).reduce((n, st) => n + (byStatus[st] || 0), 0);
 
     return res.json({
       success: true,
@@ -132,10 +158,23 @@ router.get('/', async (req, res) => {
         total,
         page: pageNum,
         limit: limitNum,
+        tab: activeTab,
+        subTab: activeSubTab,
+        tabCounts: {
+          all:     sumOf(null),
+          unpaid:  sumOf(ORDER_TABS.unpaid),
+          toShip:  sumOf(ORDER_TABS.toShip),
+          shipped: sumOf(ORDER_TABS.shipped),
+        },
+        subTabCounts: {
+          all:       sumOf(ORDER_TABS.toShip),
+          toProcess: sumOf(ORDER_SUB_TABS.toProcess),
+          processed: sumOf(ORDER_SUB_TABS.processed),
+        },
         counts: {
           unprinted: unprintedCount,
           printed: printedCount,
-          all: allCount,
+          all: unprintedCount + printedCount,
           // Visible but not printable yet — the 3PL has not issued a tracking
           // number, so the UI can explain why they cannot be selected.
           awaitingTracking: awaitingTrackingCount,

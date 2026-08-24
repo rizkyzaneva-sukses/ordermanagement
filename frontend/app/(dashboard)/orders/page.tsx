@@ -136,6 +136,51 @@ interface MassShipChoice {
 
 type PrintFilter = 'belum' | 'sudah' | 'semua'
 
+type OrderTab = 'all' | 'unpaid' | 'toShip' | 'shipped'
+type SubTab = 'all' | 'toProcess' | 'processed'
+
+/**
+ * Primary tabs, in marketplace statuses — the only counts that can be checked
+ * against Seller Centre.
+ *
+ * Selesai / Pembatalan / Retur are missing on purpose: sync fetches four
+ * statuses within 15 days, so those totals would not match Shopee. They stay
+ * reachable through the status dropdown until a backfill makes honest tabs
+ * possible.
+ */
+const ORDER_TABS: { key: OrderTab; label: string }[] = [
+  { key: 'all',     label: 'Semua' },
+  { key: 'unpaid',  label: 'Belum Bayar' },
+  { key: 'toShip',  label: 'Perlu Dikirim' },
+  { key: 'shipped', label: 'Dikirim' },
+]
+
+/** Inside "Perlu Dikirim", split by whether the shipment has been arranged. */
+const ORDER_SUB_TABS: { key: SubTab; label: string }[] = [
+  { key: 'all',       label: 'Semua' },
+  { key: 'toProcess', label: 'Perlu Diproses' },
+  { key: 'processed', label: 'Telah Diproses' },
+]
+
+/** Statuses each tab covers, so the dropdown cannot offer a contradiction. */
+const TAB_STATUSES: Record<OrderTab, string[] | null> = {
+  all:     null,
+  unpaid:  ['UNPAID'],
+  toShip:  ['READY_TO_SHIP', 'RETRY_SHIP', 'PROCESSED'],
+  shipped: ['SHIPPED'],
+}
+
+const STATUS_LABELS: Record<string, string> = {
+  UNPAID: 'Belum Bayar',
+  READY_TO_SHIP: 'Siap Kirim',
+  PROCESSED: 'Sudah Diatur',
+  RETRY_SHIP: 'Pickup Gagal',
+  SHIPPED: 'Dikirim',
+  IN_CANCEL: 'Minta Batal',
+  CANCELLED: 'Dibatalkan',
+  COMPLETED: 'Selesai',
+}
+
 /**
  * "3 menit lalu" — the form that actually answers "is what I'm looking at
  * current?". An absolute timestamp alone forces the reader to do that
@@ -244,8 +289,23 @@ export default function OrdersPage() {
   const [couriers, setCouriers] = useState<string[]>([])
 
   // Filters
+  // Print status is a secondary filter now, not the page's primary navigation:
+  // `printedAt` only ever knows about labels printed from this app, so it can
+  // never be reconciled against Shopee. The tabs above it can.
   const [printFilter, setPrintFilter] = useState<PrintFilter>(
-    (searchParams.get('printFilter') as PrintFilter) || 'belum'
+    (searchParams.get('printFilter') as PrintFilter) || 'semua'
+  )
+  const [tab, setTab] = useState<OrderTab>(
+    (searchParams.get('tab') as OrderTab) || 'toShip'
+  )
+  const [subTab, setSubTab] = useState<SubTab>(
+    (searchParams.get('subTab') as SubTab) || 'all'
+  )
+  const [tabCounts, setTabCounts] = useState<Record<OrderTab, number>>(
+    { all: 0, unpaid: 0, toShip: 0, shipped: 0 }
+  )
+  const [subTabCounts, setSubTabCounts] = useState<Record<SubTab, number>>(
+    { all: 0, toProcess: 0, processed: 0 }
   )
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
@@ -291,6 +351,8 @@ export default function OrdersPage() {
         page,
         limit,
         printFilter,
+        tab,
+        subTab,
       }
       if (search) params.search = search
       if (platform) params.platform = platform
@@ -311,6 +373,8 @@ export default function OrdersPage() {
         semua: rawCounts.all ?? rawCounts.semua ?? ((rawCounts.unprinted || 0) + (rawCounts.printed || 0)),
       }
       setAwaitingTracking(rawCounts.awaitingTracking ?? 0)
+      if (data.tabCounts) setTabCounts(data.tabCounts)
+      if (data.subTabCounts) setSubTabCounts(data.subTabCounts)
 
       const formattedOrders = rawOrders.map((o: any) => ({
         ...o,
@@ -336,7 +400,7 @@ export default function OrdersPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, limit, printFilter, search, platform, storeId, status, courier, dateFrom, dateTo])
+  }, [page, limit, printFilter, tab, subTab, search, platform, storeId, status, courier, dateFrom, dateTo])
 
   const fetchStores = async () => {
     try {
@@ -411,7 +475,7 @@ export default function OrdersPage() {
 
   useEffect(() => {
     setSelected(new Set())
-  }, [printFilter, page])
+  }, [printFilter, tab, subTab, page])
 
   /**
    * Trigger a sync, then poll until every store reports back.
@@ -474,12 +538,37 @@ export default function OrdersPage() {
     }
   }
 
+  /** Keep the chosen view in the URL, so a reload or a shared link lands back on it. */
+  const pushParams = (patch: Record<string, string>) => {
+    const params = new URLSearchParams(searchParams.toString())
+    for (const [k, v] of Object.entries(patch)) params.set(k, v)
+    router.push(`/orders?${params.toString()}`)
+  }
+
   const handlePrintFilterChange = (filter: PrintFilter) => {
     setPrintFilter(filter)
     setPage(1)
-    const params = new URLSearchParams(searchParams.toString())
-    params.set('printFilter', filter)
-    router.push(`/orders?${params.toString()}`)
+    pushParams({ printFilter: filter })
+  }
+
+  const handleTabChange = (next: OrderTab) => {
+    setTab(next)
+    setPage(1)
+    // A status carried over from another tab would silently empty the list, so
+    // it is dropped unless the new tab actually covers it.
+    const allowed = TAB_STATUSES[next]
+    const keepStatus = !status || !allowed || allowed.includes(status)
+    if (!keepStatus) setStatus('')
+    // Sub-tabs only exist inside Perlu Dikirim; leaving one set would carry an
+    // invisible filter into a tab that shows no sub-tabs at all.
+    setSubTab('all')
+    pushParams({ tab: next, subTab: 'all', ...(keepStatus ? {} : { status: '' }) })
+  }
+
+  const handleSubTabChange = (next: SubTab) => {
+    setSubTab(next)
+    setPage(1)
+    pushParams({ subTab: next })
   }
 
   /**
@@ -515,7 +604,9 @@ export default function OrdersPage() {
   }
 
   const isCheckboxEnabled = (order: Order) => {
-    if (printFilter === 'sudah') return false
+    // Keyed on the order, not on which view is open: printed and unprinted rows
+    // now sit on the same page, so "which tab am I on" no longer answers this.
+    if (order.printed) return false
     return isPrintable(order) || isShippable(order)
   }
 
@@ -774,6 +865,7 @@ export default function OrdersPage() {
     setStoreId('')
     setStatus('')
     setCourier('')
+    setPrintFilter('semua')
     setDateFrom(today)
     setDateTo(today)
     setPage(1)
@@ -782,7 +874,10 @@ export default function OrdersPage() {
   // Today's range is the default, not something the operator chose, so it does
   // not by itself light up Reset or explain an empty table.
   const isDefaultRange = dateFrom === today && dateTo === today
+  // Tabs are navigation, not filters, so they stay out of this — but the print
+  // dropdown is one now that it no longer leads the page.
   const hasActiveFilters = platform || storeId || status || courier || !isDefaultRange || search
+    || printFilter !== 'semua'
   const totalPages = Math.ceil(total / limit)
 
   return (
@@ -897,35 +992,55 @@ export default function OrdersPage() {
         </div>
       )}
 
-      {/* Print Filter Tabs */}
+      {/* Primary tabs — marketplace status, the only counts Seller Centre can
+          confirm. Print status moved down into the filter row: it is a local
+          flag that no marketplace can vouch for, so it has no business being
+          the first thing the operator navigates by. */}
       <div className="card p-1">
         <div className="flex gap-1 overflow-x-auto">
-          {([
-            { key: 'belum' as PrintFilter, label: 'Belum Dicetak', count: counts.belumDicetak },
-            { key: 'sudah' as PrintFilter, label: 'Sudah Dicetak', count: counts.sudahDicetak },
-            { key: 'semua' as PrintFilter, label: 'Semua', count: counts.semua },
-          ]).map((tab) => (
+          {ORDER_TABS.map((t) => (
             <button
-              key={tab.key}
-              onClick={() => handlePrintFilterChange(tab.key)}
+              key={t.key}
+              onClick={() => handleTabChange(t.key)}
               className={`flex-1 py-2.5 px-3 sm:px-4 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
-                printFilter === tab.key
+                tab === t.key
                   ? 'bg-primary-600 text-white shadow-sm dark:bg-primary-600'
                   : 'text-gray-600 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-700/60'
               }`}
             >
-              {tab.label}
+              {t.label}
               <span className={`ml-2 px-2 py-0.5 rounded-full text-xs ${
-                printFilter === tab.key
+                tab === t.key
                   ? 'bg-white/20 text-white'
                   : 'bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-slate-300'
               }`}>
-                {tab.count}
+                {tabCounts[t.key]}
               </span>
             </button>
           ))}
         </div>
       </div>
+
+      {/* Sub-tabs, only inside Perlu Dikirim: "Perlu Diproses" still needs a
+          shipment arranged, "Telah Diproses" already has one and is waiting to
+          be printed. Two different jobs, two different buttons. */}
+      {tab === 'toShip' && (
+        <div className="flex gap-4 px-1 overflow-x-auto">
+          {ORDER_SUB_TABS.map((st) => (
+            <button
+              key={st.key}
+              onClick={() => handleSubTabChange(st.key)}
+              className={`py-1.5 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
+                subTab === st.key
+                  ? 'border-primary-600 text-primary-700 dark:text-primary-400'
+                  : 'border-transparent text-gray-500 dark:text-slate-400 hover:text-gray-700 dark:hover:text-slate-200'
+              }`}
+            >
+              {st.label} <span className="text-xs">({subTabCounts[st.key]})</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Filters */}
       <div className="card p-4">
@@ -971,16 +1086,32 @@ export default function OrdersPage() {
               ))}
             </select>
 
-            <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1) }} className="input w-full lg:w-auto min-w-[140px]">
+            {/* Only the statuses the active tab covers. Offering one it does
+                not would hand the operator a choice that can only ever come
+                back empty. On "Semua" the full list is available, which is how
+                Dibatalkan and Selesai stay reachable while they have no tab. */}
+            <select
+              value={status}
+              onChange={(e) => { setStatus(e.target.value); setPage(1) }}
+              className="input w-full lg:w-auto min-w-[140px]"
+              aria-label="Status pesanan"
+            >
               <option value="">Semua Status</option>
-              <option value="UNPAID">Belum Bayar</option>
-              <option value="READY_TO_SHIP">Siap Kirim</option>
-              <option value="PROCESSED">Sudah Diatur</option>
-              <option value="RETRY_SHIP">Pickup Gagal</option>
-              <option value="SHIPPED">Dikirim</option>
-              <option value="IN_CANCEL">Minta Batal</option>
-              <option value="CANCELLED">Dibatalkan</option>
-              <option value="COMPLETED">Selesai</option>
+              {(TAB_STATUSES[tab] ?? Object.keys(STATUS_LABELS)).map((st) => (
+                <option key={st} value={st}>{STATUS_LABELS[st] || st}</option>
+              ))}
+            </select>
+
+            {/* Demoted from the page's main tabs — see the comment there. */}
+            <select
+              value={printFilter}
+              onChange={(e) => handlePrintFilterChange(e.target.value as PrintFilter)}
+              className="input w-full lg:w-auto min-w-[150px]"
+              aria-label="Status cetak"
+            >
+              <option value="semua">Semua Status Cetak</option>
+              <option value="belum">Belum Dicetak ({counts.belumDicetak})</option>
+              <option value="sudah">Sudah Dicetak ({counts.sudahDicetak})</option>
             </select>
 
             <select
@@ -1130,7 +1261,7 @@ export default function OrdersPage() {
                   return (
                     <tr key={order.id} className="hover:bg-gray-50 dark:hover:bg-slate-700/40 transition-colors">
                       <td className="table-cell">
-                        {printFilter === 'sudah' && order.printed ? (
+                        {order.printed ? (
                           <div className="flex items-center gap-2">
                             <span className="text-xs text-gray-400">Sudah dicetak</span>
                             <button
