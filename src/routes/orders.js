@@ -718,14 +718,25 @@ router.post('/ship-mass/options', fulfillmentRoute('Mass shipping options', asyn
  * Body: { ids: string[], mode?, modeData? }
  */
 router.post('/ship-mass', fulfillmentRoute('Mass ship', async (req) => {
-  const { ids, mode, modeData } = req.body;
-  if (!Array.isArray(ids) || ids.length === 0) {
+  const { ids, mode, modeData, groups } = req.body;
+
+  // Grouped form: one batch per courier, each with its own pickup schedule.
+  // The flat form is kept for a selection that needs no splitting.
+  const batched = Array.isArray(groups) && groups.length > 0;
+  const allIds = batched
+    ? groups.flatMap((g) => (Array.isArray(g?.ids) ? g.ids : []))
+    : ids;
+
+  if (!Array.isArray(allIds) || allIds.length === 0) {
     const err = new Error('ids must be a non-empty array');
     err.statusCode = 400;
     throw err;
   }
-  await assertAccessibleOrders(req.user, ids);
-  return fulfillmentService.massArrangeShipment(ids, { mode, modeData, userId: req.user.id });
+  await assertAccessibleOrders(req.user, allIds);
+  return fulfillmentService.massArrangeShipment(allIds, {
+    ...(batched ? { groups } : { mode, modeData }),
+    userId: req.user.id,
+  });
 }));
 
 /**

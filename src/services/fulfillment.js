@@ -390,37 +390,119 @@ async function arrangeShipment(orderRowId, options = {}) {
 }
 
 /**
- * Pickup addresses and time slots to offer for a bulk shipment.
+ * Split a selection into batches that can share one set of shipping answers.
  *
- * `get_shipping_parameter` is per-order, but a seller's pickup addresses are a
- * shop-level setting, so one order's answer serves the whole batch. Which order
- * it comes from still matters: a selection easily contains one Shopee has moved
- * on since the list was loaded, and failing the dialog because that order
- * happened to be first would be needless. So try a few before giving up, and
- * report the last refusal if none of them can answer.
+ * A pickup time slot belongs to one courier's own schedule, and the pickup
+ * address is a setting of one shop — so a selection spanning either cannot be
+ * shipped with a single answer. Sending SiCepat's slot id along with an SPX
+ * package is what Shopee rejects as "Pickup time is out of range".
+ *
+ * Keyed on the logistics channel where it is known. Rows synced before that
+ * column existed, and those whose package list Shopee did not break down, have
+ * none — the courier name is the fallback, since that is the distinction the
+ * schedule actually follows.
+ *
+ * @param {Array<Object>} rows - Order rows including their store
+ * @returns {Array<{key, storeId, storeName, courier, logisticsChannelId, orderRowIds}>}
+ */
+function groupRowsForShipping(rows) {
+  const groups = new Map();
+
+  for (const row of rows) {
+    const courier = row.shippingCourier || 'Tanpa kurir';
+    const channelKey = row.logisticsChannelId != null
+      ? `ch:${row.logisticsChannelId}`
+      : `name:${courier.toLowerCase()}`;
+    const key = `${row.storeId}|${channelKey}`;
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        storeId:            row.storeId,
+        storeName:          row.store?.name || 'Toko',
+        courier,
+        logisticsChannelId: row.logisticsChannelId ?? null,
+        orderRowIds:        [],
+      });
+    }
+    groups.get(key).orderRowIds.push(row.id);
+  }
+
+  return [...groups.values()];
+}
+
+/**
+ * Shipping modes, pickup addresses and time slots for a bulk shipment, one set
+ * per courier and shop.
+ *
+ * This used to return a single answer taken from whichever order replied first,
+ * and that answer was then applied to the whole selection — so a mixed-courier
+ * batch had one courier's slot forced onto all of them, and every other courier
+ * was rejected.
+ *
+ * A group that cannot answer does not sink the dialog: the selection easily
+ * contains an order Shopee has moved on since the list was loaded. Each group
+ * gets a few attempts, and one that still refuses is returned carrying its
+ * reason so the operator can see which courier is stuck and why.
  *
  * @param {string[]} orderRowIds
- * @returns {Promise<Object>} getShippingOptions result, plus the order it came from
+ * @returns {Promise<{groups: Object[]}>}
  */
 async function getMassShippingOptions(orderRowIds) {
   if (!Array.isArray(orderRowIds) || orderRowIds.length === 0) {
     throw fail(400, 'orderRowIds must be a non-empty array');
   }
 
+  const rows = await prisma.order.findMany({
+    where: { id: { in: orderRowIds } },
+    include: { store: { select: { id: true, name: true } } },
+  });
+
+  if (rows.length === 0) throw fail(404, 'No orders found');
+
   const MAX_ATTEMPTS = 3;
+  const groups = [];
   let lastError = null;
 
-  for (const orderRowId of orderRowIds.slice(0, MAX_ATTEMPTS)) {
-    try {
-      const options = await getShippingOptions(orderRowId);
-      return { ...options, sourceOrderRowId: orderRowId };
-    } catch (err) {
-      console.warn(`[fulfillment] Mass shipping options: ${orderRowId} could not answer (${err.message})`);
-      lastError = err;
+  for (const group of groupRowsForShipping(rows)) {
+    let options = null;
+    let groupError = null;
+
+    for (const orderRowId of group.orderRowIds.slice(0, MAX_ATTEMPTS)) {
+      try {
+        options = await getShippingOptions(orderRowId);
+        break;
+      } catch (err) {
+        console.warn(`[fulfillment] Mass shipping options: ${orderRowId} (${group.courier}) could not answer (${err.message})`);
+        groupError = err;
+        lastError = err;
+      }
     }
+
+    groups.push(options
+      ? {
+        ...group,
+        availableModes: options.availableModes,
+        suggestedMode:  options.suggestedMode,
+        infoNeeded:     options.infoNeeded,
+        pickup:         options.pickup,
+        dropoff:        options.dropoff,
+      }
+      : {
+        ...group,
+        availableModes: [],
+        suggestedMode:  null,
+        error:          groupError?.message || 'Tidak bisa mengambil opsi pengiriman',
+      });
   }
 
-  throw lastError || fail(409, 'Tidak ada pesanan terpilih yang bisa memberikan opsi pengiriman');
+  // Nothing at all could answer — that is a failure worth surfacing as one,
+  // rather than an empty dialog the operator has to interpret.
+  if (groups.every((g) => g.availableModes.length === 0)) {
+    throw lastError || fail(409, 'Tidak ada pesanan terpilih yang bisa memberikan opsi pengiriman');
+  }
+
+  return { groups };
 }
 
 /**
@@ -449,49 +531,73 @@ async function getMassShippingOptions(orderRowIds) {
  * @returns {Promise<{ shipped: Object[], failed: Object[] }>}
  */
 async function massArrangeShipment(orderRowIds, options = {}) {
-  if (!Array.isArray(orderRowIds) || orderRowIds.length === 0) {
+  // Each batch carries its own mode and schedule. The flat form is still
+  // accepted — a single-courier selection has nothing to split.
+  const batches = Array.isArray(options.groups) && options.groups.length > 0
+    ? options.groups.map((g) => ({
+      ids:      Array.isArray(g.ids) ? g.ids : [],
+      mode:     g.mode,
+      modeData: g.modeData || {},
+    }))
+    : [{ ids: orderRowIds, mode: options.mode, modeData: options.modeData || {} }];
+
+  const allIds = batches.flatMap((b) => b.ids);
+  if (allIds.length === 0) {
     throw fail(400, 'orderRowIds must be a non-empty array');
   }
-  if (orderRowIds.length > 50) {
+  if (allIds.length > 50) {
     throw fail(400, 'At most 50 packages can be shipped in one request');
   }
 
   const rows = await prisma.order.findMany({
-    where: { id: { in: orderRowIds } },
+    where: { id: { in: allIds } },
     include: { store: true },
   });
 
   if (rows.length === 0) throw fail(404, 'No orders found');
 
-  const storeIds = [...new Set(rows.map(r => r.storeId))];
-  if (storeIds.length > 1) {
-    throw fail(400, 'All packages in one mass ship request must belong to the same store');
+  const byId = new Map(rows.map((r) => [r.id, r]));
+
+  const foreign = rows.filter((r) => r.store.platform !== 'SHOPEE');
+  if (foreign.length > 0) {
+    throw fail(400, `Mass ship is only supported for Shopee stores (found ${foreign[0].store.platform})`);
   }
 
-  const store = rows[0].store;
-  if (store.platform !== 'SHOPEE') {
-    throw fail(400, `Mass ship is only supported for Shopee stores (this one is ${store.platform})`);
-  }
+  // The single-store rule is gone: it guarded a shared pickup address that no
+  // longer exists, now that every batch brings its own. Batches are still
+  // built per shop upstream, so nothing here mixes addresses.
 
   const shipped = [];
   const failed = [];
   const modesUsed = new Set();
 
-  for (const row of rows) {
-    try {
-      const result = await arrangeShipment(row.id, { ...options, pollTracking: false });
-      if (result.mode) modesUsed.add(result.mode);
-      shipped.push({
-        id: row.id,
-        orderId: row.orderId,
-        alreadyArranged: Boolean(result.alreadyArranged),
-      });
-    } catch (err) {
-      failed.push({ orderId: row.orderId, message: err.message });
+  for (const batch of batches) {
+    for (const id of batch.ids) {
+      const row = byId.get(id);
+      if (!row) {
+        failed.push({ orderId: id, message: 'Pesanan tidak ditemukan' });
+        continue;
+      }
+      try {
+        const result = await arrangeShipment(id, {
+          mode:         batch.mode,
+          modeData:     batch.modeData,
+          userId:       options.userId,
+          pollTracking: false,
+        });
+        if (result.mode) modesUsed.add(result.mode);
+        shipped.push({
+          id,
+          orderId: row.orderId,
+          alreadyArranged: Boolean(result.alreadyArranged),
+        });
+      } catch (err) {
+        failed.push({ orderId: row.orderId, message: err.message });
+      }
     }
   }
 
-  console.log(`[fulfillment] Mass ship: ${shipped.length} shipped, ${failed.length} rejected`);
+  console.log(`[fulfillment] Mass ship: ${shipped.length} shipped, ${failed.length} rejected across ${batches.length} batch(es)`);
 
   return {
     mode: [...modesUsed].join('+') || null,
@@ -1295,6 +1401,7 @@ async function fetchAwbDataForRows(rows) {
 module.exports = {
   fetchAwbDataForRows,
   getShippingOptions,
+  groupRowsForShipping,
   getMassShippingOptions,
   arrangeShipment,
   massArrangeShipment,

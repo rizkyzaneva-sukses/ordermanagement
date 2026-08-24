@@ -84,8 +84,19 @@ interface SyncStatus {
   workerRunning: boolean
 }
 
-/** Shipping modes offered for a bulk shipment (POST /orders/ship-mass/options) */
-interface MassShipOptions {
+/**
+ * One courier's worth of a bulk shipment (POST /orders/ship-mass/options).
+ *
+ * A pickup slot belongs to one courier's schedule, so a mixed selection comes
+ * back split — one group per courier and shop, each with its own answers.
+ */
+interface MassShipGroup {
+  key: string
+  storeId: string
+  storeName: string
+  courier: string
+  logisticsChannelId: number | null
+  orderRowIds: string[]
   availableModes: string[]
   suggestedMode?: string | null
   /** Per-mode list of fields Shopee still wants; an empty dropoff array means
@@ -105,6 +116,19 @@ interface MassShipOptions {
       }>
     }>
   } | null
+  /** Why this courier could not be asked, when Shopee refused every attempt. */
+  error?: string
+}
+
+interface MassShipOptions {
+  groups: MassShipGroup[]
+}
+
+/** What the operator picked for one courier group. */
+interface MassShipChoice {
+  mode: 'pickup' | 'dropoff'
+  addressId: number | null
+  pickupTimeId: string
 }
 
 type PrintFilter = 'belum' | 'sudah' | 'semua'
@@ -210,9 +234,8 @@ export default function OrdersPage() {
   const [bulkMessage, setBulkMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [massShipOpen, setMassShipOpen] = useState(false)
   const [massShipOptions, setMassShipOptions] = useState<MassShipOptions | null>(null)
-  const [massAddressId, setMassAddressId] = useState<number | null>(null)
-  const [massPickupTimeId, setMassPickupTimeId] = useState('')
-  const [massMode, setMassMode] = useState<'pickup' | 'dropoff'>('pickup')
+  /** Keyed by group key — every courier keeps its own address and slot. */
+  const [massChoices, setMassChoices] = useState<Record<string, MassShipChoice>>({})
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
   const [awaitingTracking, setAwaitingTracking] = useState(0)
   const [couriers, setCouriers] = useState<string[]>([])
@@ -520,9 +543,6 @@ export default function OrdersPage() {
   const tiktokCount = selectedOrders.filter((o) => o.platform === 'TIKTOK' && isPrintable(o)).length
 
   const shippableSelected = selectedOrders.filter(isShippable)
-  const selectedMassAddress = massShipOptions?.pickup?.address_list?.find(
-    (a) => a.address_id === massAddressId
-  )
   const awbSelected = selectedOrders.filter((o) => o.platform === 'SHOPEE' && isPrintable(o))
   // One AWB request covers a single shop, so the button is only meaningful when
   // the selection has not spread across stores.
@@ -548,40 +568,48 @@ export default function OrdersPage() {
     return body?.error || err?.message || 'Gagal memproses permintaan'
   }
 
+  /** The default choice for one courier: pickup when it is on offer, else drop-off. */
+  const defaultChoice = (group: MassShipGroup): MassShipChoice => {
+    const modes = group.availableModes || []
+    // Shopee's own preference order already lands in suggestedMode; picking a
+    // mode the channel does not support is a guaranteed rejection.
+    const suggested = group.suggestedMode
+    const mode: 'pickup' | 'dropoff' =
+      suggested === 'pickup' || suggested === 'dropoff'
+        ? suggested
+        : modes.includes('pickup') ? 'pickup' : 'dropoff'
+
+    const firstAddress = group.pickup?.address_list?.[0]
+    return {
+      mode,
+      addressId: firstAddress?.address_id ?? null,
+      pickupTimeId: firstAddress?.time_slot_list?.[0]?.pickup_time_id || '',
+    }
+  }
+
   /**
-   * Open the bulk-ship dialog and load the pickup addresses to offer.
+   * Open the bulk-ship dialog and load each courier's own pickup options.
    *
-   * Shopee needs an address and a time slot before it will accept a pickup, and
-   * those are a shop-level setting, so one order's answer covers the selection.
+   * One answer per courier and shop, because a pickup slot belongs to one
+   * courier's schedule: applying SiCepat's slot to an SPX package is what
+   * Shopee rejects as "Pickup time is out of range".
    */
   const openMassShip = async () => {
     if (shippableSelected.length === 0) return
     setMassShipOpen(true)
     setMassShipOptions(null)
-    setMassAddressId(null)
-    setMassPickupTimeId('')
+    setMassChoices({})
     setBulkMessage(null)
     setBulkBusy(true)
     try {
       const res = await api.post<MassShipOptions>('/orders/ship-mass/options', {
         ids: shippableSelected.map((o) => o.id),
       })
-      setMassShipOptions(res.data)
-
-      // Default to what this channel actually offers rather than always pickup:
-      // picking a mode the channel does not support is a guaranteed rejection,
-      // and Shopee's own preference order already lands in suggestedMode.
-      const modes = res.data.availableModes || []
-      const preferred = (res.data.suggestedMode === 'dropoff' || res.data.suggestedMode === 'pickup')
-        ? res.data.suggestedMode
-        : null
-      setMassMode(preferred ?? (modes.includes('pickup') ? 'pickup' : modes.includes('dropoff') ? 'dropoff' : 'pickup'))
-
-      const firstAddress = res.data.pickup?.address_list?.[0]
-      if (firstAddress) {
-        setMassAddressId(firstAddress.address_id)
-        setMassPickupTimeId(firstAddress.time_slot_list?.[0]?.pickup_time_id || '')
-      }
+      const groups = res.data.groups || []
+      setMassShipOptions({ groups })
+      setMassChoices(Object.fromEntries(
+        groups.filter((g) => g.availableModes.length > 0).map((g) => [g.key, defaultChoice(g)])
+      ))
     } catch (err) {
       setBulkMessage({ type: 'error', text: await readError(err) })
       setMassShipOpen(false)
@@ -590,24 +618,48 @@ export default function OrdersPage() {
     }
   }
 
+  /** Groups that can actually be sent — one Shopee refused is skipped, not blocking. */
+  const shippableGroups = (massShipOptions?.groups || []).filter((g) => g.availableModes.length > 0)
+  const blockedGroups = (massShipOptions?.groups || []).filter((g) => g.availableModes.length === 0)
+
+  // Only a pickup needs an address and a slot, and only for its own courier.
+  // Demanding them across the board is what made "antar ke counter"
+  // unselectable, and one courier's missing slot must not block the others.
+  const incompleteGroups = shippableGroups.filter((g) => {
+    const choice = massChoices[g.key]
+    return choice?.mode === 'pickup' && (!choice.addressId || !choice.pickupTimeId)
+  })
+
+  const setChoice = (key: string, patch: Partial<MassShipChoice>) =>
+    setMassChoices((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }))
+
+  /** Orders actually covered by the batches, which excludes any blocked courier. */
+  const groupedOrderCount = shippableGroups.reduce((n, g) => n + g.orderRowIds.length, 0)
+
   const handleMassShip = async () => {
-    if (shippableSelected.length === 0) return
-    // Only pickup needs an address and a slot; demanding them for a drop-off is
-    // what made "antar ke counter" impossible to choose here at all.
-    if (massMode === 'pickup' && (!massAddressId || !massPickupTimeId)) {
-      setBulkMessage({ type: 'error', text: 'Pilih alamat dan slot waktu penjemputan terlebih dahulu' })
+    if (shippableGroups.length === 0) return
+    if (incompleteGroups.length > 0) {
+      setBulkMessage({
+        type: 'error',
+        text: `Pilih alamat dan slot penjemputan untuk ${incompleteGroups.map((g) => g.courier).join(', ')}`,
+      })
       return
     }
     setBulkBusy(true)
     setBulkMessage(null)
     try {
       const res = await api.post<any>('/orders/ship-mass', {
-        ids: shippableSelected.map((o) => o.id),
-        mode: massMode,
-        // Drop-off takes an empty object unless the channel asks for more (KB §5.1)
-        modeData: massMode === 'pickup'
-          ? { address_id: massAddressId, pickup_time_id: massPickupTimeId }
-          : {},
+        groups: shippableGroups.map((g) => {
+          const choice = massChoices[g.key]
+          return {
+            ids: g.orderRowIds,
+            mode: choice.mode,
+            // Drop-off takes an empty object unless the channel asks for more (KB §5.1)
+            modeData: choice.mode === 'pickup'
+              ? { address_id: choice.addressId, pickup_time_id: choice.pickupTimeId }
+              : {},
+          }
+        }),
       })
       setMassShipOpen(false)
       const shipped = res.data?.shipped?.length ?? 0
@@ -1142,14 +1194,15 @@ export default function OrdersPage() {
           onClick={() => { if (!bulkBusy) setMassShipOpen(false) }}
         >
           <div
-            className="card w-full max-w-lg p-5 space-y-4 max-h-[85vh] overflow-y-auto"
+            className="card w-full max-w-2xl p-5 space-y-3 max-h-[85vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h3 className="font-semibold text-gray-900 dark:text-slate-100">Kirim Massal</h3>
                 <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
-                  {shippableSelected.length} pesanan · {massMode === 'pickup' ? 'dijemput kurir' : 'diantar ke counter'}
+                  {shippableSelected.length} pesanan
+                  {massShipOptions ? ` · ${massShipOptions.groups.length} kurir` : ''}
                 </p>
               </div>
               <button onClick={() => setMassShipOpen(false)} disabled={bulkBusy} className="btn-ghost p-1">
@@ -1171,123 +1224,142 @@ export default function OrdersPage() {
 
             {massShipOptions && (
               <>
-                {/* KB Rule #2: exactly one mode per shipment. A mode the channel
-                    does not list is disabled rather than hidden, so the operator
-                    can see the choice exists and why it is unavailable. */}
-                <div>
-                  <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
-                    Cara pengiriman
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {([
-                      { key: 'pickup' as const,  label: 'Dijemput kurir', hint: 'Pickup di alamat toko' },
-                      { key: 'dropoff' as const, label: 'Antar ke counter', hint: 'Drop-off mandiri' },
-                    ]).map((m) => {
-                      const offered = massShipOptions.availableModes?.includes(m.key)
-                      const active = massMode === m.key
-                      return (
-                        <button
-                          key={m.key}
-                          type="button"
-                          onClick={() => setMassMode(m.key)}
-                          disabled={!offered || bulkBusy}
-                          title={offered ? undefined : 'Channel ini tidak menawarkan mode tersebut'}
-                          className={`rounded-lg border px-3 py-2 text-left transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-                            active
-                              ? 'border-primary-600 bg-primary-50 dark:bg-primary-900/30'
-                              : 'border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800'
-                          }`}
-                        >
-                          <span className="block text-sm font-medium text-gray-900 dark:text-slate-100">{m.label}</span>
-                          <span className="block text-xs text-gray-500 dark:text-slate-400">{m.hint}</span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
+                {/* One card per courier. KB Rule #2 still holds — exactly one
+                    mode per shipment — it is simply decided per courier now,
+                    because a pickup slot belongs to one courier's own schedule
+                    and a shared one is rejected for everybody else. */}
+                {shippableGroups.map((group) => {
+                  const choice = massChoices[group.key]
+                  if (!choice) return null
+                  const addresses = group.pickup?.address_list || []
+                  const address = addresses.find((a) => a.address_id === choice.addressId)
+                  const slots = address?.time_slot_list || []
+                  const canPickup = group.availableModes.includes('pickup')
+                  const canDropoff = group.availableModes.includes('dropoff')
 
-                {!massShipOptions.availableModes?.includes(massMode) && (
-                  <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
-                    Channel ini tidak menawarkan mode {massMode} (tersedia:{' '}
-                    {massShipOptions.availableModes?.join(', ') || 'tidak ada'}). Pengiriman kemungkinan akan ditolak.
-                  </div>
-                )}
+                  return (
+                    <div key={group.key} className="rounded-lg border border-gray-200 dark:border-slate-700 p-3 space-y-2.5">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-medium text-gray-900 dark:text-slate-100">{group.courier}</p>
+                          <p className="text-xs text-gray-500 dark:text-slate-400">
+                            {group.storeName} · {group.orderRowIds.length} pesanan
+                          </p>
+                        </div>
+                        {canPickup && canDropoff ? (
+                          <div className="flex gap-1 shrink-0">
+                            {([
+                              { key: 'pickup' as const, label: 'Dijemput' },
+                              { key: 'dropoff' as const, label: 'Ke counter' },
+                            ]).map((m) => (
+                              <button
+                                key={m.key}
+                                type="button"
+                                disabled={bulkBusy}
+                                onClick={() => setChoice(group.key, { mode: m.key })}
+                                className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-40 ${
+                                  choice.mode === m.key
+                                    ? 'border-primary-600 bg-primary-50 text-primary-700 dark:bg-primary-900/30 dark:text-primary-300'
+                                    : 'border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800'
+                                }`}
+                              >
+                                {m.label}
+                              </button>
+                            ))}
+                          </div>
+                        ) : (
+                          /* Only one mode on offer — say which, rather than
+                             showing a toggle that cannot move. */
+                          <span className="text-xs text-gray-500 dark:text-slate-400 shrink-0 pt-0.5">
+                            {canPickup ? 'Dijemput kurir' : 'Antar ke counter'}
+                          </span>
+                        )}
+                      </div>
 
-                {massMode === 'dropoff' && (massShipOptions.infoNeeded?.dropoff?.length ?? 0) > 0 && (
-                  <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
-                    Channel ini meminta data tambahan untuk drop-off ({massShipOptions.infoNeeded?.dropoff?.join(', ')}),
-                    yang belum bisa diisi dari sini. Pesanan yang ditolak akan dilaporkan satu per satu.
-                  </div>
-                )}
+                      {choice.mode === 'dropoff' && (group.infoNeeded?.dropoff?.length ?? 0) > 0 && (
+                        <p className="rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-2.5 py-1.5 text-xs text-amber-700 dark:text-amber-300">
+                          Channel ini meminta data tambahan untuk drop-off ({group.infoNeeded?.dropoff?.join(', ')}),
+                          yang belum bisa diisi dari sini. Pesanan yang ditolak akan dilaporkan satu per satu.
+                        </p>
+                      )}
 
-                {/* Pickup-only: a drop-off has no address to collect from */}
-                {massMode === 'pickup' && (
-                  <>
-                  <div>
-                    <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
-                      Alamat penjemputan
-                    </label>
-                    <select
-                      className="input"
-                      value={massAddressId ?? ''}
-                      onChange={(e) => {
-                        const id = Number(e.target.value)
-                        setMassAddressId(id)
-                        const addr = massShipOptions.pickup?.address_list?.find((a) => a.address_id === id)
-                        setMassPickupTimeId(addr?.time_slot_list?.[0]?.pickup_time_id || '')
-                      }}
-                    >
-                      {(massShipOptions.pickup?.address_list || []).map((a) => (
-                        <option key={a.address_id} value={a.address_id}>
-                          {[a.address, a.city, a.state].filter(Boolean).join(', ') || `Alamat #${a.address_id}`}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                      {choice.mode === 'pickup' && (
+                        <div className="grid sm:grid-cols-2 gap-2">
+                          <select
+                            className="input text-sm"
+                            aria-label={`Alamat penjemputan ${group.courier}`}
+                            value={choice.addressId ?? ''}
+                            disabled={bulkBusy}
+                            onChange={(e) => {
+                              const id = Number(e.target.value)
+                              const addr = addresses.find((a) => a.address_id === id)
+                              setChoice(group.key, {
+                                addressId: id,
+                                pickupTimeId: addr?.time_slot_list?.[0]?.pickup_time_id || '',
+                              })
+                            }}
+                          >
+                            {addresses.map((a) => (
+                              <option key={a.address_id} value={a.address_id}>
+                                {[a.address, a.city, a.state].filter(Boolean).join(', ') || `Alamat #${a.address_id}`}
+                              </option>
+                            ))}
+                          </select>
 
-                  <div>
-                    <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
-                      Slot waktu
-                    </label>
-                    <select
-                      className="input"
-                      value={massPickupTimeId}
-                      onChange={(e) => setMassPickupTimeId(e.target.value)}
-                    >
-                      {(selectedMassAddress?.time_slot_list || []).map((slot) => (
-                        <option key={slot.pickup_time_id} value={slot.pickup_time_id}>
-                          {slot.time_text ||
-                            (slot.date ? new Date(slot.date * 1000).toLocaleString('id-ID') : slot.pickup_time_id)}
-                        </option>
-                      ))}
-                    </select>
-                    {(selectedMassAddress?.time_slot_list || []).length === 0 && (
-                      <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
-                        Tidak ada slot tersedia untuk alamat ini.
+                          <select
+                            className="input text-sm"
+                            aria-label={`Slot waktu ${group.courier}`}
+                            value={choice.pickupTimeId}
+                            disabled={bulkBusy || slots.length === 0}
+                            onChange={(e) => setChoice(group.key, { pickupTimeId: e.target.value })}
+                          >
+                            {slots.length === 0 && <option value="">Tidak ada slot tersedia</option>}
+                            {slots.map((slot) => (
+                              <option key={slot.pickup_time_id} value={slot.pickup_time_id}>
+                                {slot.time_text ||
+                                  (slot.date ? new Date(slot.date * 1000).toLocaleString('id-ID') : slot.pickup_time_id)}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+
+                {/* A courier Shopee would not answer for is shown rather than
+                    dropped, so the operator knows those orders were left behind
+                    instead of working it out from the count afterwards. */}
+                {blockedGroups.length > 0 && (
+                  <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 space-y-1">
+                    <p className="text-sm font-medium text-amber-800 dark:text-amber-300">Tidak bisa diatur dari sini</p>
+                    {blockedGroups.map((g) => (
+                      <p key={g.key} className="text-xs text-amber-700 dark:text-amber-300 break-words [overflow-wrap:anywhere]">
+                        {g.courier} · {g.orderRowIds.length} pesanan — {g.error}
                       </p>
-                    )}
+                    ))}
                   </div>
-                  </>
                 )}
 
                 <p className="text-xs text-gray-500 dark:text-slate-400">
-                  {massMode === 'pickup'
-                    ? `Alamat dan slot ini dipakai untuk seluruh ${shippableSelected.length} pesanan`
-                    : `Seluruh ${shippableSelected.length} pesanan diatur sebagai antar ke counter`}
-                  , dikirim satu per satu ke Shopee. Nomor resi tidak ditunggu di sini — akan terisi pada sync berikutnya.
+                  Tiap kurir dikirim dengan jadwalnya sendiri, satu per satu ke Shopee. Nomor resi tidak
+                  ditunggu di sini — akan terisi pada sync berikutnya.
                 </p>
 
                 <div className="flex justify-end gap-2 pt-2">
                   <button onClick={() => setMassShipOpen(false)} disabled={bulkBusy} className="btn-ghost">
                     Batal
                   </button>
+                  {/* Left enabled when a schedule is missing: handleMassShip
+                      names the courier that still needs one, which a dead
+                      button never could. */}
                   <button
                     onClick={handleMassShip}
-                    disabled={bulkBusy || (massMode === 'pickup' && (!massAddressId || !massPickupTimeId))}
+                    disabled={bulkBusy || shippableGroups.length === 0}
                     className="btn-primary"
                   >
                     {bulkBusy && <Loader2 className="w-4 h-4 animate-spin" />}
-                    Kirim {shippableSelected.length} pesanan
+                    Kirim {groupedOrderCount} pesanan
                   </button>
                 </div>
               </>
