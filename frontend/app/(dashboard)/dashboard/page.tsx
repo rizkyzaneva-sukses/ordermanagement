@@ -13,6 +13,7 @@ import {
   ShoppingBag,
   Ban,
   Info,
+  Clock,
 } from 'lucide-react'
 
 interface DashboardStats {
@@ -90,6 +91,27 @@ const rupiah = (value: number) =>
     maximumFractionDigits: 0,
   }).format(value || 0)
 
+function relativeTime(iso: string): string {
+  const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
+
+  if (seconds < 60) return 'baru saja'
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} menit lalu`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} jam lalu`
+  const days = Math.floor(hours / 24)
+  return `${days} hari lalu`
+}
+
+function absoluteTime(iso: string): string {
+  return new Date(iso).toLocaleString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
 /** YYYY-MM-DD in local time — `toISOString` would shift a WIB date back a day. */
 const isoDate = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -140,14 +162,27 @@ export default function DashboardPage() {
    * whichever one lagged furthest behind. Without this the hour filter would
    * promise a precision the data does not have.
    */
-  const dataUpTo = (() => {
-    const inScope = stores.filter((s) =>
-      (!statsPlatform || s.platform === statsPlatform) &&
-      (!statsStoreId || s.id === statsStoreId))
-    const times = inScope.map((s) => s.lastSyncAt).filter((t): t is string => Boolean(t))
+  /**
+   * The oldest successful sync in a set of stores, not the newest.
+   *
+   * With several shops the page is only as current as whichever one lagged
+   * furthest behind; showing the newest would overstate it. Stores that have
+   * never synced are skipped rather than treated as infinitely stale — they
+   * have no data here to be stale about.
+   */
+  const oldestSync = (list: StoreInfo[]) => {
+    const times = list.map((s) => s.lastSyncAt).filter((t): t is string => Boolean(t))
     if (times.length === 0) return null
     return times.reduce((oldest, t) => (new Date(t) < new Date(oldest) ? t : oldest))
-  })()
+  }
+
+  /** Covers the whole page, including the operational tiles, which ignore the filters. */
+  const lastSyncedAt = oldestSync(stores)
+
+  const statsScopeStores = stores.filter((s) =>
+    (!statsPlatform || s.platform === statsPlatform) &&
+    (!statsStoreId || s.id === statsStoreId))
+  const dataUpTo = oldestSync(statsScopeStores)
 
   const fetchDashboard = async () => {
     try {
@@ -186,6 +221,27 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetchDashboard()
+  }, [])
+
+  /**
+   * Keep the sync stamp honest.
+   *
+   * "5 menit lalu" is computed at render, so without this it would sit frozen
+   * at whatever it said when the page loaded — a staleness indicator that goes
+   * stale is worse than none. Re-reads the store list rather than the whole
+   * dashboard: it is the only thing that changes on its own between syncs.
+   */
+  useEffect(() => {
+    const id = setInterval(async () => {
+      try {
+        const res = await api.get<StoreInfo[]>('/dashboard/stores')
+        setStores(res.data)
+      } catch {
+        // A failed poll is not worth interrupting the page for; the next tick
+        // tries again and the stamp simply ages in the meantime.
+      }
+    }, 60_000)
+    return () => clearInterval(id)
   }, [])
 
   useEffect(() => {
@@ -252,6 +308,20 @@ export default function DashboardPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">Dashboard</h1>
           <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">Ringkasan pesanan & status toko Anda</p>
+          {/* Every number on this page is a snapshot from the last sync, not
+              live. Said once here rather than per tile, since the tiles above
+              the statistics ignore the filters and share this same cut-off. */}
+          <p className="text-xs text-gray-500 dark:text-slate-400 mt-1 flex items-center gap-1.5">
+            <Clock className="w-3.5 h-3.5 shrink-0" />
+            {lastSyncedAt ? (
+              <span>
+                Data terakhir disinkronkan <span className="font-medium">{relativeTime(lastSyncedAt)}</span>
+                <span className="text-gray-400 dark:text-slate-500"> · {absoluteTime(lastSyncedAt)}</span>
+              </span>
+            ) : (
+              <span>Belum pernah disinkronkan</span>
+            )}
+          </p>
         </div>
         <button onClick={handleSync} disabled={syncing} className="btn-primary self-start sm:self-auto">
           {syncing ? (
@@ -289,13 +359,14 @@ export default function DashboardPage() {
         <div className="px-4 sm:px-6 py-4 border-b border-gray-200 dark:border-slate-700 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">Statistik</h2>
-            <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
-              {dataUpTo
-                ? `Data s/d pukul ${new Date(dataUpTo).toLocaleTimeString('id-ID', {
-                    hour: '2-digit', minute: '2-digit',
-                  })} (sync terakhir)`
-                : 'Belum pernah disinkronkan'}
-            </p>
+            {/* Only when the store or platform filter narrows to a shop with
+                a different cut-off than the header already states — otherwise
+                this is the same sentence twice. */}
+            {dataUpTo && dataUpTo !== lastSyncedAt && (
+              <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
+                Toko terpilih tersinkron {relativeTime(dataUpTo)}
+              </p>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <input
