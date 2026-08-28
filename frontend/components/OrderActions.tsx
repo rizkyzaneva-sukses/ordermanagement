@@ -335,7 +335,11 @@ export default function OrderActions({
     setBusy(true)
     setError('')
     try {
-      const res = await api.get<ShippingOptions>(`/orders/${order.id}/shipping-options`)
+      // A package awaiting a retry is already arranged, and /shipping-options
+      // refuses anything arranged — so this dialog used to open and immediately
+      // report "Pengiriman paket ini sudah diatur sebelumnya", every time.
+      const endpoint = which === 'retry' ? 'retry-options' : 'shipping-options'
+      const res = await api.get<ShippingOptions>(`/orders/${order.id}/${endpoint}`)
       setOptions(res.data)
       setMode(res.data.suggestedMode || res.data.availableModes?.[0] || '')
 

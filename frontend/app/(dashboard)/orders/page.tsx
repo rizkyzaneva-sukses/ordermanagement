@@ -18,6 +18,7 @@ import {
   AlertTriangle,
   X,
   Clock,
+  RotateCcw,
 } from 'lucide-react'
 
 interface OrderItem {
@@ -129,6 +130,23 @@ interface MassShipGroup {
 
 interface MassShipOptions {
   groups: MassShipGroup[]
+}
+
+/** One courier's pickup options when re-scheduling a failed collection. */
+interface MassRetryGroup {
+  key: string
+  storeName: string
+  courier: string
+  orderRowIds: string[]
+  dropoffOnly?: boolean
+  pickup?: MassShipGroup['pickup']
+  error?: string
+}
+
+/** What the operator picked for one courier when re-scheduling. */
+interface MassRetryChoice {
+  addressId: number | null
+  pickupTimeId: string
 }
 
 /** What the operator picked for one courier group. */
@@ -339,6 +357,9 @@ export default function OrdersPage() {
   const [massShipOptions, setMassShipOptions] = useState<MassShipOptions | null>(null)
   /** Keyed by group key — every courier keeps its own address and slot. */
   const [massChoices, setMassChoices] = useState<Record<string, MassShipChoice>>({})
+  const [massRetryOpen, setMassRetryOpen] = useState(false)
+  const [massRetryOptions, setMassRetryOptions] = useState<{ groups: MassRetryGroup[] } | null>(null)
+  const [retryChoices, setRetryChoices] = useState<Record<string, MassRetryChoice>>({})
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
   const [awaitingTracking, setAwaitingTracking] = useState(0)
   const [couriers, setCouriers] = useState<string[]>([])
@@ -391,6 +412,26 @@ export default function OrdersPage() {
   })()
 
   /**
+   * The filters that decide *which* orders are in scope.
+   *
+   * Shared by the table and by any bulk action that claims to act on
+   * everything currently filtered — a button that re-derives the filters
+   * itself eventually disagrees with the table it was launched from, and the
+   * operator has no way to tell which of the two is right.
+   */
+  const currentFilters = useCallback(() => {
+    const f: Record<string, string> = { tab, subTab }
+    if (search) f.search = search
+    if (platform) f.platform = platform
+    if (storeId) f.storeId = storeId
+    if (status) f.status = status
+    if (courier) f.courier = courier
+    if (dateFrom) f.dateFrom = dateFrom
+    if (dateTo) f.dateTo = dateTo
+    return f
+  }, [tab, subTab, search, platform, storeId, status, courier, dateFrom, dateTo])
+
+  /**
    * @param opts.background - Refresh without the full-table skeleton.
    *
    * While `loading` is true the tbody renders a placeholder row instead of the
@@ -402,21 +443,7 @@ export default function OrdersPage() {
   const fetchOrders = useCallback(async (opts?: { background?: boolean }) => {
     if (!opts?.background) setLoading(true)
     try {
-      const params: any = {
-        page,
-        limit,
-        printFilter,
-        tab,
-        subTab,
-        sort,
-      }
-      if (search) params.search = search
-      if (platform) params.platform = platform
-      if (storeId) params.storeId = storeId
-      if (status) params.status = status
-      if (courier) params.courier = courier
-      if (dateFrom) params.dateFrom = dateFrom
-      if (dateTo) params.dateTo = dateTo
+      const params: any = { page, limit, printFilter, sort, ...currentFilters() }
 
       const res = await api.get<any>('/orders', { params })
       const data = res.data || {}
@@ -457,7 +484,7 @@ export default function OrdersPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, limit, printFilter, tab, subTab, sort, search, platform, storeId, status, courier, dateFrom, dateTo])
+  }, [page, limit, printFilter, sort, currentFilters])
 
   const fetchStores = async () => {
     try {
@@ -651,20 +678,33 @@ export default function OrdersPage() {
    * here keeps the count on the button honest rather than promising a bulk run
    * that is half rejections.
    */
+  /**
+   * Awaiting a second attempt at collection: the shipment exists, the courier
+   * simply never came.
+   *
+   * These need `update_shipping_order`, not `ship_order` — sending them through
+   * a bulk ship only makes it notice the shipment is already arranged and
+   * refresh the tracking number, which looks like success and changes nothing.
+   */
+  const isRetryable = (order: Order) =>
+    order.platform === 'SHOPEE' &&
+    (order.status === 'RETRY_SHIP' || order.logisticsStatus === 'LOGISTICS_PICKUP_RETRY')
+
   const isShippable = (order: Order) => {
     if (order.platform !== 'SHOPEE') return false
     if (!['READY_TO_SHIP', 'RETRY_SHIP'].includes(order.status)) return false
+    // A retry belongs to the other button, not this one.
+    if (isRetryable(order)) return false
     // Unknown fulfillment state: let the server make the call, it re-reads live
     if (!order.logisticsStatus) return true
-    return order.logisticsStatus === 'LOGISTICS_READY' ||
-      order.logisticsStatus === 'LOGISTICS_PICKUP_RETRY'
+    return order.logisticsStatus === 'LOGISTICS_READY'
   }
 
   const isCheckboxEnabled = (order: Order) => {
     // Keyed on the order, not on which view is open: printed and unprinted rows
     // now sit on the same page, so "which tab am I on" no longer answers this.
     if (order.printed) return false
-    return isPrintable(order) || isShippable(order)
+    return isPrintable(order) || isShippable(order) || isRetryable(order)
   }
 
   const toggleSelect = (orderId: string) => {
@@ -694,6 +734,7 @@ export default function OrdersPage() {
   const tiktokCount = selectedOrders.filter((o) => o.platform === 'TIKTOK' && isPrintable(o)).length
 
   const shippableSelected = selectedOrders.filter(isShippable)
+  const retrySelected = selectedOrders.filter(isRetryable)
   const awbSelected = selectedOrders.filter((o) => o.platform === 'SHOPEE' && isPrintable(o))
   // One AWB request covers a single shop, so the button is only meaningful when
   // the selection has not spread across stores.
@@ -839,27 +880,106 @@ export default function OrdersPage() {
     }
   }
 
+  /** Open the bulk retry dialog and load each courier's pickup schedule. */
+  const openMassRetry = async () => {
+    if (retrySelected.length === 0) return
+    setMassRetryOpen(true)
+    setMassRetryOptions(null)
+    setRetryChoices({})
+    setBulkMessage(null)
+    setBulkBusy(true)
+    try {
+      const res = await api.post<{ groups: MassRetryGroup[] }>('/orders/retry-ship-mass/options', {
+        ids: retrySelected.map((o) => o.id),
+      })
+      const groups = res.data.groups || []
+      setMassRetryOptions({ groups })
+      setRetryChoices(Object.fromEntries(
+        groups.filter((g) => g.pickup).map((g) => {
+          const address = g.pickup?.address_list?.[0]
+          return [g.key, {
+            addressId: address?.address_id ?? null,
+            pickupTimeId: address?.time_slot_list?.[0]?.pickup_time_id || '',
+          }]
+        })
+      ))
+    } catch (err) {
+      setBulkMessage({ type: 'error', text: await readError(err) })
+      setMassRetryOpen(false)
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
+  /** Couriers that answered with a schedule; one that did not is skipped, not blocking. */
+  const retryGroups = (massRetryOptions?.groups || []).filter((g) => g.pickup)
+  const blockedRetryGroups = (massRetryOptions?.groups || []).filter((g) => !g.pickup)
+  const incompleteRetryGroups = retryGroups.filter((g) => {
+    const choice = retryChoices[g.key]
+    return !choice?.addressId || !choice?.pickupTimeId
+  })
+
+  const setRetryChoice = (key: string, patch: Partial<MassRetryChoice>) =>
+    setRetryChoices((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }))
+
+  const handleMassRetry = async () => {
+    if (retryGroups.length === 0) return
+    if (incompleteRetryGroups.length > 0) {
+      setBulkMessage({
+        type: 'error',
+        text: `Pilih alamat dan slot penjemputan untuk ${incompleteRetryGroups.map((g) => g.courier).join(', ')}`,
+      })
+      return
+    }
+    setBulkBusy(true)
+    setBulkMessage(null)
+    try {
+      const res = await api.post<any>('/orders/retry-ship-mass', {
+        groups: retryGroups.map((g) => ({
+          ids: g.orderRowIds,
+          addressId: retryChoices[g.key].addressId,
+          pickupTimeId: retryChoices[g.key].pickupTimeId,
+        })),
+      })
+      setMassRetryOpen(false)
+      const done = res.data?.rescheduled?.length ?? 0
+      const failed = res.data?.failed ?? []
+      setBulkMessage({
+        type: failed.length > 0 ? 'error' : 'success',
+        text: failed.length > 0
+          ? `${done} pesanan dijadwalkan ulang, ${failed.length} ditolak Shopee: ` +
+            failed.map((f: any) => `${f.orderId} (${f.message})`).join(', ')
+          : `${done} pesanan berhasil dijadwalkan ulang penjemputannya.`,
+      })
+      setSelected(new Set())
+      await fetchOrders()
+    } catch (err) {
+      setBulkMessage({ type: 'error', text: await readError(err) })
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
   /**
-   * Ask the courier for every waybill still missing on this page.
+   * Ask the courier for every waybill still missing across the whole filter.
    *
-   * The per-order action already existed, but a print run held up by twenty
-   * missing numbers meant twenty menus or a 15-minute wait for the next sync.
-   * Scoped to the rows on screen rather than the whole backlog, so the operator
-   * gets back what they are looking at.
+   * This used to be scoped to the rows on screen while the banner above it
+   * counted the entire filter — so "Ambil semua nomor resi" on a backlog of two
+   * hundred fetched fifty and left the same banner showing, with nothing to say
+   * the button had only done part of the job. The server picks the rows now,
+   * most urgent first, and reports how many are left.
    */
   const handleRefreshTrackingAll = async () => {
-    const missing = orders.filter((o) => !o.trackingNumber && !o.printed)
-    if (missing.length === 0) return
+    if (awaitingTracking === 0) return
 
     setBulkBusy(true)
     setBulkMessage(null)
     try {
-      const res = await api.post<any>('/orders/refresh-tracking', {
-        ids: missing.map((o) => o.id),
-      })
+      const res = await api.post<any>('/orders/refresh-tracking-all', currentFilters())
       const found = res.data?.refreshed?.length ?? 0
       const pending = res.data?.stillMissing?.length ?? 0
       const failed = res.data?.failed ?? []
+      const remaining = res.data?.remaining ?? 0
 
       setBulkMessage({
         // Nothing found is not an error — the courier simply has not issued
@@ -872,6 +992,9 @@ export default function OrdersPage() {
           failed.length > 0
             ? `${failed.length} gagal: ${failed.map((f: any) => `${f.orderId} (${f.message})`).join(', ')}`
             : null,
+          // Said plainly rather than left to be inferred from a banner that
+          // stubbornly will not clear.
+          remaining > 0 ? `masih ada ${remaining} lagi — klik sekali lagi untuk melanjutkan` : null,
         ].filter(Boolean).join(' · ') || 'Tidak ada perubahan',
       })
 
@@ -1711,6 +1834,141 @@ export default function OrdersPage() {
         </div>
       )}
 
+      {/* Bulk pickup re-scheduling. Same per-courier shape as Kirim Massal and
+          for the same reason — a pickup slot id belongs to one courier's own
+          schedule — but with no mode to choose: a retry is always a pickup. */}
+      {massRetryOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => { if (!bulkBusy) setMassRetryOpen(false) }}
+        >
+          <div
+            className="card w-full max-w-2xl p-5 space-y-3 max-h-[85vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="font-semibold text-gray-900 dark:text-slate-100">Jadwalkan Ulang Pickup</h3>
+                <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
+                  {retrySelected.length} pesanan
+                  {massRetryOptions ? ` · ${massRetryOptions.groups.length} kurir` : ''}
+                </p>
+              </div>
+              <button onClick={() => setMassRetryOpen(false)} disabled={bulkBusy} className="btn-ghost p-1">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {bulkMessage?.type === 'error' && (
+              <div className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 text-sm text-red-700 dark:text-red-300 break-words [overflow-wrap:anywhere]">
+                {bulkMessage.text}
+              </div>
+            )}
+
+            {bulkBusy && !massRetryOptions && (
+              <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-slate-400">
+                <Loader2 className="w-4 h-4 animate-spin" /> Menghubungi Shopee…
+              </div>
+            )}
+
+            {massRetryOptions && (
+              <>
+                {retryGroups.map((group) => {
+                  const choice = retryChoices[group.key]
+                  if (!choice) return null
+                  const addresses = group.pickup?.address_list || []
+                  const address = addresses.find((a) => a.address_id === choice.addressId)
+                  const slots = address?.time_slot_list || []
+
+                  return (
+                    <div key={group.key} className="rounded-lg border border-gray-200 dark:border-slate-700 p-3 space-y-2.5">
+                      <div>
+                        <p className="text-sm font-medium text-gray-900 dark:text-slate-100">{group.courier}</p>
+                        <p className="text-xs text-gray-500 dark:text-slate-400">
+                          {group.storeName} · {group.orderRowIds.length} pesanan
+                        </p>
+                      </div>
+
+                      {/* Worth saying here too: re-booking a collection from a
+                          courier that does not collect just fails again. */}
+                      {group.dropoffOnly && (
+                        <p className="rounded-md border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 px-2.5 py-1.5 text-xs text-red-700 dark:text-red-300">
+                          {group.courier} tidak menjemput paket — penjemputan ulang kemungkinan besar gagal lagi. Antar ke counter.
+                        </p>
+                      )}
+
+                      <div className="grid sm:grid-cols-2 gap-2">
+                        <select
+                          className="input text-sm"
+                          aria-label={`Alamat penjemputan ${group.courier}`}
+                          value={choice.addressId ?? ''}
+                          disabled={bulkBusy}
+                          onChange={(e) => {
+                            const id = Number(e.target.value)
+                            const addr = addresses.find((a) => a.address_id === id)
+                            setRetryChoice(group.key, {
+                              addressId: id,
+                              pickupTimeId: addr?.time_slot_list?.[0]?.pickup_time_id || '',
+                            })
+                          }}
+                        >
+                          {addresses.map((a) => (
+                            <option key={a.address_id} value={a.address_id}>
+                              {[a.address, a.city, a.state].filter(Boolean).join(', ') || `Alamat #${a.address_id}`}
+                            </option>
+                          ))}
+                        </select>
+
+                        <select
+                          className="input text-sm"
+                          aria-label={`Slot waktu ${group.courier}`}
+                          value={choice.pickupTimeId}
+                          disabled={bulkBusy || slots.length === 0}
+                          onChange={(e) => setRetryChoice(group.key, { pickupTimeId: e.target.value })}
+                        >
+                          {slots.length === 0 && <option value="">Tidak ada slot tersedia</option>}
+                          {slots.map((slot) => (
+                            <option key={slot.pickup_time_id} value={slot.pickup_time_id}>
+                              {slot.time_text ||
+                                (slot.date ? new Date(slot.date * 1000).toLocaleString('id-ID') : slot.pickup_time_id)}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  )
+                })}
+
+                {blockedRetryGroups.length > 0 && (
+                  <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 space-y-1">
+                    <p className="text-sm font-medium text-amber-800 dark:text-amber-300">Tidak bisa dijadwalkan dari sini</p>
+                    {blockedRetryGroups.map((g) => (
+                      <p key={g.key} className="text-xs text-amber-700 dark:text-amber-300 break-words [overflow-wrap:anywhere]">
+                        {g.courier} · {g.orderRowIds.length} pesanan — {g.error}
+                      </p>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <button onClick={() => setMassRetryOpen(false)} disabled={bulkBusy} className="btn-ghost">
+                    Batal
+                  </button>
+                  <button
+                    onClick={handleMassRetry}
+                    disabled={bulkBusy || retryGroups.length === 0}
+                    className="btn-primary"
+                  >
+                    {bulkBusy && <Loader2 className="w-4 h-4 animate-spin" />}
+                    Jadwalkan {retryGroups.reduce((n, g) => n + g.orderRowIds.length, 0)} pesanan
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Selection Bar */}
       {selected.size > 0 && (
         <div className="fixed bottom-0 left-64 right-0 bg-white dark:bg-slate-800 border-t border-gray-200 dark:border-slate-700 shadow-lg px-6 py-4 z-20">
@@ -1746,6 +2004,19 @@ export default function OrdersPage() {
                 >
                   {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Truck className="w-4 h-4" />}
                   Kirim Massal ({shippableSelected.length})
+                </button>
+              )}
+              {/* Its own button because a retry is a different Shopee call:
+                  sending these through Kirim Massal only re-reads the tracking
+                  number and reports success without re-booking anything. */}
+              {retrySelected.length > 0 && (
+                <button
+                  onClick={openMassRetry}
+                  disabled={bulkBusy}
+                  className="btn bg-amber-600 text-white hover:bg-amber-700"
+                >
+                  {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+                  Jadwalkan Ulang Pickup ({retrySelected.length})
                 </button>
               )}
               {awbSelected.length > 0 && (

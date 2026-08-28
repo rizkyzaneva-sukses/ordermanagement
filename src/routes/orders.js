@@ -44,6 +44,93 @@ const SORT_ORDERS = {
 };
 const DEFAULT_SORT = 'newest';
 
+/**
+ * Waybills asked for in one "ambil semua" run.
+ *
+ * Matches refreshTrackingMany's own ceiling. Each one is a separate Shopee
+ * round trip, so an uncapped run over a large backlog would hold the request
+ * open for minutes and time out somewhere in the middle, having done part of
+ * the work with nothing to show for it.
+ */
+const REFRESH_TRACKING_BATCH = 100;
+
+
+/**
+ * The Prisma `where` describing "the orders the operator is currently looking
+ * at", built from the list's own query parameters.
+ *
+ * Shared rather than repeated: a bulk action that re-derives the filters itself
+ * eventually disagrees with the table it was launched from, and the operator
+ * has no way to see which of the two is right. Anything acting on "semua yang
+ * tampil" builds its selection here.
+ *
+ * @param {Object} user - req.user
+ * @param {Object} query - req.query
+ * @returns {Promise<{where: Object, activeTab: string, activeSubTab: string}>}
+ * @throws {Error} with statusCode 403 when a STAFF user asks for a store they
+ *   cannot see
+ */
+async function buildOrderWhere(user, query = {}) {
+  const {
+    storeId, platform, status, shippingCourier, courier,
+    dateFrom, dateTo, search, tab = 'toShip', subTab = 'all',
+  } = query;
+
+  const activeTab = resolveTab(tab);
+  const activeSubTab = resolveSubTab(subTab);
+
+  const where = {};
+
+  // Store access restriction for STAFF
+  if (user.role === 'STAFF') {
+    const access = await prisma.storeAccess.findMany({
+      where: { userId: user.id },
+      select: { storeId: true },
+    });
+    const accessibleStoreIds = access.map((a) => a.storeId);
+    if (storeId) {
+      if (!accessibleStoreIds.includes(storeId)) {
+        const err = new Error('No access to this store');
+        err.statusCode = 403;
+        throw err;
+      }
+      where.storeId = storeId;
+    } else {
+      where.storeId = { in: accessibleStoreIds };
+    }
+  } else if (storeId) {
+    where.storeId = storeId;
+  }
+
+  // Platform filter (via store relation)
+  if (platform) {
+    where.store = { platform: platform };
+  }
+
+  const statuses = statusesFor({ tab: activeTab, subTab: activeSubTab, status });
+  const byStatusFilter = statusFilter(statuses);
+  if (byStatusFilter !== undefined) where.status = byStatusFilter;
+
+  // Exact match when the dropdown supplies a courier from the real list;
+  // `contains` stays for the legacy free-text parameter.
+  if (courier) {
+    where.shippingCourier = courier;
+  } else if (shippingCourier) {
+    where.shippingCourier = { contains: shippingCourier, mode: 'insensitive' };
+  }
+
+  const orderDate = orderDateRange(dateFrom, dateTo);
+  if (orderDate) where.orderDate = orderDate;
+
+  if (search) {
+    where.OR = [
+      { orderId: { contains: search, mode: 'insensitive' } },
+      { buyerName: { contains: search, mode: 'insensitive' } },
+    ];
+  }
+
+  return { where, activeTab, activeSubTab };
+}
 
 /**
  * GET / - List orders with filters
@@ -51,82 +138,22 @@ const DEFAULT_SORT = 'newest';
 router.get('/', async (req, res) => {
   try {
     const user = req.user;
+    // Everything that selects *which* orders is read by buildOrderWhere; what
+    // is left here only shapes how they are presented.
     const {
-      storeId,
-      platform,
-      status,
-      shippingCourier,
-      // The UI has always sent this under the shorter name, so the courier box
-      // silently filtered nothing: the value arrived and was never read.
-      courier,
-      dateFrom,
-      dateTo,
-      search,
       page = 1,
       limit = 50,
       printFilter = 'unprinted',
-      tab = 'toShip',
-      subTab = 'all',
       sort = DEFAULT_SORT,
     } = req.query;
 
     const activeSort = Object.prototype.hasOwnProperty.call(SORT_ORDERS, sort) ? sort : DEFAULT_SORT;
 
-    const activeTab = resolveTab(tab);
-    const activeSubTab = resolveSubTab(subTab);
-
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(500, Math.max(1, parseInt(limit, 10) || 50));
     const skip = (pageNum - 1) * limitNum;
 
-    // Build where clause
-    const where = {};
-
-    // Store access restriction for STAFF
-    if (user.role === 'STAFF') {
-      const access = await prisma.storeAccess.findMany({
-        where: { userId: user.id },
-        select: { storeId: true },
-      });
-      const accessibleStoreIds = access.map((a) => a.storeId);
-      if (storeId) {
-        if (!accessibleStoreIds.includes(storeId)) {
-          return res.status(403).json({ success: false, error: 'No access to this store' });
-        }
-        where.storeId = storeId;
-      } else {
-        where.storeId = { in: accessibleStoreIds };
-      }
-    } else if (storeId) {
-      where.storeId = storeId;
-    }
-
-    // Platform filter (via store relation)
-    if (platform) {
-      where.store = { platform: platform };
-    }
-
-    const statuses = statusesFor({ tab: activeTab, subTab: activeSubTab, status });
-    const byStatusFilter = statusFilter(statuses);
-    if (byStatusFilter !== undefined) where.status = byStatusFilter;
-
-    // Exact match when the dropdown supplies a courier from the real list;
-    // `contains` stays for the legacy free-text parameter.
-    if (courier) {
-      where.shippingCourier = courier;
-    } else if (shippingCourier) {
-      where.shippingCourier = { contains: shippingCourier, mode: 'insensitive' };
-    }
-
-    const orderDate = orderDateRange(dateFrom, dateTo);
-    if (orderDate) where.orderDate = orderDate;
-
-    if (search) {
-      where.OR = [
-        { orderId: { contains: search, mode: 'insensitive' } },
-        { buyerName: { contains: search, mode: 'insensitive' } },
-      ];
-    }
+    const { where, activeTab, activeSubTab } = await buildOrderWhere(user, req.query);
 
     // Print filter logic — accept both English ('unprinted'/'printed') and
     // Indonesian ('belum'/'sudah') values sent by the frontend
@@ -182,7 +209,13 @@ router.get('/', async (req, res) => {
       prisma.order.groupBy({ by: ['status'], where: tabAgnosticWhere, _count: { _all: true } }),
       prisma.order.count({ where: { ...where, printedAt: null } }),
       prisma.order.count({ where: { ...where, printedAt: { not: null } } }),
-      prisma.order.count({ where: { ...where, printedAt: null, trackingNumber: null } }),
+      // Restricted to orders a waybill can still be issued for, because this
+      // number labels the "Ambil semua nomor resi" button — counting an UNPAID
+      // order here promised a waybill that will never exist, and the banner
+      // would not clear no matter how often the button was pressed.
+      prisma.order.count({
+        where: { ...where, printedAt: null, trackingNumber: null, AND: [{ status: { in: AWAITING_SHIPMENT } }] },
+      }),
       prisma.order.count({
         where: { ...tabAgnosticWhere, status: { in: AWAITING_SHIPMENT }, shipByDate: { lt: new Date() } },
       }),
@@ -234,8 +267,14 @@ router.get('/', async (req, res) => {
       },
     });
   } catch (err) {
-    console.error('GET /orders error:', err);
-    return res.status(500).json({ success: false, error: 'Failed to list orders' });
+    // buildOrderWhere refuses a store a STAFF user cannot see, and that is a
+    // 403 the caller can act on — not the 500 every error used to become.
+    const statusCode = err.statusCode || 500;
+    if (statusCode >= 500) console.error('GET /orders error:', err);
+    return res.status(statusCode).json({
+      success: false,
+      error: statusCode >= 500 ? 'Failed to list orders' : err.message,
+    });
   }
 });
 
@@ -854,6 +893,87 @@ router.post('/ship-mass', fulfillmentRoute('Mass ship', async (req) => {
 }));
 
 /**
+ * POST /retry-ship-mass/options - Pickup addresses and slots for a bulk retry
+ * Body: { ids: string[] }
+ */
+router.post('/retry-ship-mass/options', fulfillmentRoute('Mass retry options', async (req) => {
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) {
+    const err = new Error('ids must be a non-empty array');
+    err.statusCode = 400;
+    throw err;
+  }
+  await assertAccessibleOrders(req.user, ids);
+  return fulfillmentService.getMassRetryOptions(ids);
+}));
+
+/**
+ * POST /retry-ship-mass - Re-schedule many failed pickups at once
+ * Body: { groups: [{ ids, addressId, pickupTimeId }] } or { ids, addressId, pickupTimeId }
+ */
+router.post('/retry-ship-mass', fulfillmentRoute('Mass retry ship', async (req) => {
+  const { ids, groups, addressId, pickupTimeId } = req.body || {};
+  const allIds = Array.isArray(groups) && groups.length > 0
+    ? groups.flatMap((g) => (Array.isArray(g.ids) ? g.ids : []))
+    : ids;
+
+  if (!Array.isArray(allIds) || allIds.length === 0) {
+    const err = new Error('ids must be a non-empty array');
+    err.statusCode = 400;
+    throw err;
+  }
+  await assertAccessibleOrders(req.user, allIds);
+  return fulfillmentService.massRetryShipment(allIds, {
+    groups, addressId, pickupTimeId, userId: req.user.id,
+  });
+}));
+
+/**
+ * POST /refresh-tracking-all - Ask the courier for every waybill still missing
+ * across the whole current filter, not just the page on screen.
+ *
+ * Body: the same filter parameters the list takes (storeId, platform, tab,
+ * subTab, status, courier, dateFrom, dateTo, search).
+ *
+ * Capped per call because each waybill is its own Shopee round trip — the reply
+ * says how many are left so the operator can run it again rather than watching
+ * one request grind through a backlog of two hundred.
+ */
+router.post('/refresh-tracking-all', fulfillmentRoute('Refresh tracking (semua)', async (req) => {
+  const { where } = await buildOrderWhere(req.user, req.body || {});
+
+  const missingWhere = {
+    ...where,
+    printedAt: null,
+    trackingNumber: null,
+    // AND rather than a plain `status`, which the tab may already have set —
+    // overwriting it would widen the selection past what the operator can see.
+    // UNPAID orders are excluded by this: no waybill is ever issued for one, so
+    // asking Shopee is a call that can only come back empty.
+    AND: [{ status: { in: AWAITING_SHIPMENT } }],
+  };
+
+  const [rows, total] = await Promise.all([
+    prisma.order.findMany({
+      where: missingWhere,
+      // Most urgent first, so a capped run works through what matters rather
+      // than whatever happens to sort first.
+      orderBy: [{ shipByDate: { sort: 'asc', nulls: 'last' } }, { createdAt: 'asc' }],
+      take: REFRESH_TRACKING_BATCH,
+      select: { id: true },
+    }),
+    prisma.order.count({ where: missingWhere }),
+  ]);
+
+  if (rows.length === 0) {
+    return { refreshed: [], stillMissing: [], failed: [], total: 0, remaining: 0 };
+  }
+
+  const result = await fulfillmentService.refreshTrackingMany(rows.map((r) => r.id));
+  return { ...result, total, remaining: Math.max(0, total - rows.length) };
+}));
+
+/**
  * GET /:id/shipping-options - Modes, pickup addresses and time slots
  */
 router.get('/:id/shipping-options', fulfillmentRoute('Shipping options', async (req) => {
@@ -869,6 +989,17 @@ router.post('/:id/ship', fulfillmentRoute('Ship', async (req) => {
   await loadAccessibleOrder(req.user, req.params.id);
   const { mode, modeData } = req.body || {};
   return fulfillmentService.arrangeShipment(req.params.id, { mode, modeData, userId: req.user.id });
+}));
+
+/**
+ * GET /:id/retry-options - Pickup addresses and slots for a failed collection
+ *
+ * Separate from /shipping-options, which refuses anything already arranged —
+ * and a package awaiting a retry is arranged by definition.
+ */
+router.get('/:id/retry-options', fulfillmentRoute('Retry options', async (req) => {
+  await loadAccessibleOrder(req.user, req.params.id);
+  return fulfillmentService.getRetryShippingOptions(req.params.id);
 }));
 
 /**

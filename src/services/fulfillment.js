@@ -241,41 +241,17 @@ async function syncRowFromLiveState(orderRowId, live, extra = {}) {
 // ── Shipping ──────────────────────────────────────────────────────────────────
 
 /**
- * Fetch the shipping modes and pickup options Shopee will accept for a package.
+ * Read Shopee's shipping parameters for one package.
  *
- * Feeds the UI so an operator can choose an address and time slot before
- * committing to `arrangeShipment`.
+ * The part of the options call that is the same whether the shipment is being
+ * arranged for the first time or re-scheduled after a failed collection — only
+ * the guards in front of it differ, so only those live in the callers.
  *
- * @param {string} orderRowId
+ * @param {Object} ctx - loadContext result
+ * @param {Object} live - fetchLiveState result
  * @returns {Promise<Object>}
  */
-async function getShippingOptions(orderRowId) {
-  const ctx = await loadContext(orderRowId);
-  const live = await fetchLiveState(ctx);
-  await syncRowFromLiveState(orderRowId, live);
-
-  // The live state was already read above but went unchecked, so a package Shopee
-  // considers unshippable produced its raw rejection ("Shipping parameters can
-  // only be obtained when package is ready to be shipped") with no indication of
-  // which state was actually the problem. arrangeShipment guards on the same
-  // conditions; this is the read-only step that precedes it.
-  if (live.orderStatus && !['READY_TO_SHIP', 'RETRY_SHIP'].includes(live.orderStatus)) {
-    const hint = live.orderStatus === 'PROCESSED'
-      ? ' — pengirimannya sudah diatur sebelumnya'
-      : ' — pengiriman hanya bisa diatur saat READY_TO_SHIP atau RETRY_SHIP';
-    throw fail(409, `Pesanan berstatus ${live.orderStatus} di Shopee${hint}. Status di daftar sudah diperbarui.`);
-  }
-
-  if (shipmentAlreadyArranged(live)) {
-    throw fail(409, `Pengiriman paket ini sudah diatur sebelumnya (${live.logisticsStatus || 'is_shipment_arranged'}) — tidak perlu diatur ulang`);
-  }
-
-  // Same LOGISTICS_READY rule as arrangeShipment, checked here so the dialog
-  // explains itself instead of opening a form Shopee will reject.
-  if (live.logisticsStatus && live.logisticsStatus !== 'LOGISTICS_READY') {
-    throw fail(409, `Paket belum siap dikirim (${live.logisticsStatus}) — tunggu sampai Shopee menandainya siap diatur`);
-  }
-
+async function fetchShippingParameters(ctx, live) {
   const pkgNumber = await packageNumberForLogistics(ctx.order, live);
 
   const resp = await shopeeService.getShippingParameter(
@@ -313,6 +289,73 @@ async function getShippingOptions(orderRowId) {
     dropoff:         resp.response?.dropoff || null,
     slug:            resp.response?.slug || null,
   };
+}
+
+/**
+ * Fetch the shipping modes and pickup options Shopee will accept for a package.
+ *
+ * Feeds the UI so an operator can choose an address and time slot before
+ * committing to `arrangeShipment`.
+ *
+ * @param {string} orderRowId
+ * @returns {Promise<Object>}
+ */
+async function getShippingOptions(orderRowId) {
+  const ctx = await loadContext(orderRowId);
+  const live = await fetchLiveState(ctx);
+  await syncRowFromLiveState(orderRowId, live);
+
+  // The live state was already read above but went unchecked, so a package Shopee
+  // considers unshippable produced its raw rejection ("Shipping parameters can
+  // only be obtained when package is ready to be shipped") with no indication of
+  // which state was actually the problem. arrangeShipment guards on the same
+  // conditions; this is the read-only step that precedes it.
+  if (live.orderStatus && !['READY_TO_SHIP', 'RETRY_SHIP'].includes(live.orderStatus)) {
+    const hint = live.orderStatus === 'PROCESSED'
+      ? ' — pengirimannya sudah diatur sebelumnya'
+      : ' — pengiriman hanya bisa diatur saat READY_TO_SHIP atau RETRY_SHIP';
+    throw fail(409, `Pesanan berstatus ${live.orderStatus} di Shopee${hint}. Status di daftar sudah diperbarui.`);
+  }
+
+  if (shipmentAlreadyArranged(live)) {
+    throw fail(409, `Pengiriman paket ini sudah diatur sebelumnya (${live.logisticsStatus || 'is_shipment_arranged'}) — tidak perlu diatur ulang`);
+  }
+
+  // Same LOGISTICS_READY rule as arrangeShipment, checked here so the dialog
+  // explains itself instead of opening a form Shopee will reject.
+  if (live.logisticsStatus && live.logisticsStatus !== 'LOGISTICS_READY') {
+    throw fail(409, `Paket belum siap dikirim (${live.logisticsStatus}) — tunggu sampai Shopee menandainya siap diatur`);
+  }
+
+  return fetchShippingParameters(ctx, live);
+}
+
+/**
+ * Pickup addresses and time slots for a package whose collection failed.
+ *
+ * A retry cannot go through `getShippingOptions`: that one refuses anything
+ * already arranged, and a package in LOGISTICS_PICKUP_RETRY is arranged by
+ * definition — its shipment exists, the courier simply never came. So the
+ * dialog behind "Jadwalkan ulang pickup" asked a function guaranteed to reject
+ * it, and every retry ended at "Pengiriman paket ini sudah diatur sebelumnya".
+ *
+ * Only pickup matters here. `update_shipping_order` takes an address and a slot
+ * and nothing else (KB §3.3 transition 9); there is no drop-off retry.
+ *
+ * @param {string} orderRowId
+ * @returns {Promise<Object>} Same shape as getShippingOptions
+ */
+async function getRetryShippingOptions(orderRowId) {
+  const ctx = await loadContext(orderRowId);
+  const live = await fetchLiveState(ctx);
+  await syncRowFromLiveState(orderRowId, live);
+
+  const retryable = live.orderStatus === 'RETRY_SHIP' || live.logisticsStatus === 'LOGISTICS_PICKUP_RETRY';
+  if (!retryable) {
+    throw fail(409, `Pesanan ini tidak sedang menunggu penjadwalan ulang penjemputan (status=${live.orderStatus}, logistik=${live.logisticsStatus}). Status di daftar sudah diperbarui.`);
+  }
+
+  return fetchShippingParameters(ctx, live);
 }
 
 /**
@@ -677,6 +720,149 @@ async function retryShipment(orderRowId, { addressId, pickupTimeId } = {}) {
 
   console.log(`[fulfillment] Pickup re-arranged for ${ctx.order.orderId} address=${addressId} slot=${pickupTimeId}`);
   return { order: updated };
+}
+
+/**
+ * Pickup addresses and slots for re-scheduling many failed collections at once.
+ *
+ * Grouped exactly like a bulk shipment, and for the same reason: a pickup slot
+ * id belongs to one courier's own schedule, so SiCepat's slot sent with an SPX
+ * package is rejected as "Pickup time is out of range". One courier that cannot
+ * answer is returned carrying its reason rather than sinking the whole dialog.
+ *
+ * @param {string[]} orderRowIds
+ * @returns {Promise<{groups: Object[]}>}
+ */
+async function getMassRetryOptions(orderRowIds) {
+  if (!Array.isArray(orderRowIds) || orderRowIds.length === 0) {
+    throw fail(400, 'orderRowIds must be a non-empty array');
+  }
+
+  const rows = await prisma.order.findMany({
+    where: { id: { in: orderRowIds } },
+    include: { store: { select: { id: true, name: true } } },
+  });
+
+  if (rows.length === 0) throw fail(404, 'No orders found');
+
+  const MAX_ATTEMPTS = 3;
+  const groups = [];
+  let lastError = null;
+
+  for (const group of groupRowsForShipping(rows)) {
+    let options = null;
+    let groupError = null;
+
+    for (const orderRowId of group.orderRowIds.slice(0, MAX_ATTEMPTS)) {
+      try {
+        options = await getRetryShippingOptions(orderRowId);
+        break;
+      } catch (err) {
+        console.warn(`[fulfillment] Mass retry options: ${orderRowId} (${group.courier}) could not answer (${err.message})`);
+        groupError = err;
+        lastError = err;
+      }
+    }
+
+    // A retry only ever goes back out as a pickup, so a courier offering no
+    // pickup address is a dead end no matter what else it offers.
+    const addresses = options?.pickup?.address_list || [];
+
+    groups.push(options && addresses.length > 0
+      ? {
+        ...group,
+        pickup: options.pickup,
+        // Stated for the same reason as in a first arrangement: these couriers
+        // do not collect, so a retry scheduled here waits for nobody.
+        dropoffOnly: isDropoffOnlyCourier(group.courier),
+      }
+      : {
+        ...group,
+        pickup: null,
+        dropoffOnly: isDropoffOnlyCourier(group.courier),
+        error: options
+          ? 'Shopee tidak menawarkan alamat penjemputan untuk kurir ini — jadwalkan lewat Seller Centre'
+          : (groupError?.message || 'Tidak bisa mengambil opsi penjemputan'),
+      });
+  }
+
+  if (groups.every((g) => !g.pickup)) {
+    const reasons = [...new Set(groups.map((g) => `${g.courier}: ${g.error}`))].join(' | ');
+    throw lastError || fail(409, `Tidak ada pesanan terpilih yang bisa dijadwalkan ulang — ${reasons}`);
+  }
+
+  return { groups };
+}
+
+/**
+ * Re-schedule many failed pickups.
+ *
+ * Sequential and per-order for the same reasons as massArrangeShipment: Shopee
+ * has no batch retry endpoint, and one malformed field must not take down every
+ * order in the selection. Each order reports its own verdict.
+ *
+ * @param {string[]} orderRowIds
+ * @param {Object} [options={}]
+ * @param {Array<{ids: string[], addressId: number, pickupTimeId: string}>} [options.groups]
+ * @param {string} [options.userId]
+ * @returns {Promise<{ rescheduled: Object[], failed: Object[] }>}
+ */
+async function massRetryShipment(orderRowIds, options = {}) {
+  const batches = Array.isArray(options.groups) && options.groups.length > 0
+    ? options.groups.map((g) => ({
+      ids:          Array.isArray(g.ids) ? g.ids : [],
+      addressId:    g.addressId,
+      pickupTimeId: g.pickupTimeId,
+    }))
+    : [{ ids: orderRowIds, addressId: options.addressId, pickupTimeId: options.pickupTimeId }];
+
+  const allIds = batches.flatMap((b) => b.ids);
+  if (allIds.length === 0) {
+    throw fail(400, 'orderRowIds must be a non-empty array');
+  }
+  if (allIds.length > 50) {
+    throw fail(400, 'At most 50 packages can be re-scheduled in one request');
+  }
+
+  const incomplete = batches.filter((b) => b.ids.length > 0 && (!b.addressId || !b.pickupTimeId));
+  if (incomplete.length > 0) {
+    throw fail(400, 'Setiap kurir butuh alamat dan slot penjemputan sendiri');
+  }
+
+  const rows = await prisma.order.findMany({
+    where: { id: { in: allIds } },
+    include: { store: true },
+  });
+  if (rows.length === 0) throw fail(404, 'No orders found');
+
+  const byId = new Map(rows.map((r) => [r.id, r]));
+
+  const foreign = rows.filter((r) => r.store.platform !== 'SHOPEE');
+  if (foreign.length > 0) {
+    throw fail(400, `Penjadwalan ulang massal hanya untuk toko Shopee (ditemukan ${foreign[0].store.platform})`);
+  }
+
+  const rescheduled = [];
+  const failed = [];
+
+  for (const batch of batches) {
+    for (const id of batch.ids) {
+      const row = byId.get(id);
+      if (!row) {
+        failed.push({ orderId: id, message: 'Pesanan tidak ditemukan' });
+        continue;
+      }
+      try {
+        await retryShipment(id, { addressId: batch.addressId, pickupTimeId: batch.pickupTimeId });
+        rescheduled.push({ id, orderId: row.orderId });
+      } catch (err) {
+        failed.push({ id, orderId: row.orderId, message: err.message });
+      }
+    }
+  }
+
+  console.log(`[fulfillment] Mass retry: ${rescheduled.length} re-scheduled, ${failed.length} failed`);
+  return { rescheduled, failed };
 }
 
 // ── Split / unsplit (KB §6) ───────────────────────────────────────────────────
@@ -1485,6 +1671,9 @@ async function fetchAwbDataForRows(rows) {
 }
 
 module.exports = {
+  getRetryShippingOptions,
+  getMassRetryOptions,
+  massRetryShipment,
   fetchAwbDataForRows,
   getShippingOptions,
   groupRowsForShipping,
