@@ -98,6 +98,12 @@ model Order {
   // Shopee logistics channel. mass_ship_order only accepts a batch sharing one
   // channel (KB §4.2), so it has to be known before batching.
   logisticsChannelId Int?
+  // Shopee's deadline for handing the parcel to the courier. This is what
+  // decides the order of work — an order due today outranks one that arrived
+  // earlier but is due in three days — and it is the one thing Komplace shows
+  // that no screen here could. Nullable: Shopee omits it for orders that are
+  // not awaiting shipment, and older rows predate this column.
+  shipByDate       DateTime?
   cancelReason     String?     // Reason recorded when the order was cancelled
   awbPath          String?     // Local path of the downloaded Shopee AWB
   awbFormat        String?     // pdf | html | zip — Shopee varies by market (KB §7.2)
@@ -125,6 +131,7 @@ model Order {
   @@index([storeId, logisticsChannelId])
   @@index([batchId])
   @@index([printedAt])
+  @@index([storeId, shipByDate])
   @@map("orders")
 }
 

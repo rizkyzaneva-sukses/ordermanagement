@@ -42,6 +42,8 @@ interface Order {
   awbFetchedAt?: string | null
   printed: boolean
   items: OrderItem[]
+  /** Shopee's deadline for handing the parcel over. Null until a sync sees one. */
+  shipByDate?: string | null
   createdAt: string
 }
 
@@ -119,6 +121,8 @@ interface MassShipGroup {
       }>
     }>
   } | null
+  /** Courier that does not collect — Pos and JNE. Advisory, not enforced. */
+  dropoffOnly?: boolean
   /** Why this courier could not be asked, when Shopee refused every attempt. */
   error?: string
 }
@@ -138,6 +142,54 @@ type PrintFilter = 'belum' | 'sudah' | 'semua'
 
 type OrderTab = 'all' | 'unpaid' | 'toShip' | 'shipped'
 type SubTab = 'all' | 'toProcess' | 'processed'
+
+/**
+ * Sort orders the list can be read in.
+ *
+ * `deadline` is how the work is actually prioritised — an order due today
+ * outranks one that arrived first but is due Friday — which is the ordering
+ * Komplace shows and this list could not.
+ */
+const SORT_OPTIONS = [
+  { key: 'newest', label: 'Terbaru' },
+  { key: 'deadline', label: 'Batas kirim terdekat' },
+] as const
+type SortKey = (typeof SORT_OPTIONS)[number]['key']
+
+const DEADLINE_TONES = {
+  overdue: 'text-red-700 dark:text-red-400 font-semibold',
+  today:   'text-orange-700 dark:text-orange-400 font-semibold',
+  soon:    'text-amber-700 dark:text-amber-400',
+  later:   'text-gray-500 dark:text-slate-400',
+} as const
+
+/**
+ * Time left to hand the parcel to the courier.
+ *
+ * Shown as a countdown rather than a date because that is the decision being
+ * made with it: "hari ini" moves an order to the top of the pile, "28 Agu"
+ * leaves the operator doing the arithmetic. Days are compared at midnight
+ * boundaries, so an order due at 23:00 tonight reads "hari ini" and not
+ * "besok" — which is how a deadline is actually spoken about.
+ */
+function shipDeadline(value?: string | null) {
+  if (!value) return null
+  const due = new Date(value)
+  if (Number.isNaN(due.getTime())) return null
+
+  const now = new Date()
+  const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const days = Math.round((midnight(due) - midnight(now)) / 86_400_000)
+  const time = due.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
+  const full = due.toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+
+  if (due.getTime() < now.getTime()) {
+    return { label: days === 0 ? `Lewat ${time}` : `Lewat ${Math.abs(days)} hari`, tone: 'overdue' as const, title: full }
+  }
+  if (days === 0) return { label: `Hari ini ${time}`, tone: 'today' as const, title: full }
+  if (days === 1) return { label: `Besok ${time}`, tone: 'soon' as const, title: full }
+  return { label: `${days} hari lagi`, tone: 'later' as const, title: full }
+}
 
 /**
  * Primary tabs, in marketplace statuses — the only counts that can be checked
@@ -274,6 +326,9 @@ export default function OrdersPage() {
   const [orders, setOrders] = useState<Order[]>([])
   const [total, setTotal] = useState(0)
   const [counts, setCounts] = useState({ belumDicetak: 0, sudahDicetak: 0, semua: 0 })
+  /** Orders past their deadline, and due before midnight — what to work on first. */
+  const [urgency, setUrgency] = useState({ overdue: 0, dueToday: 0 })
+  const [sort, setSort] = useState<SortKey>('newest')
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [stores, setStores] = useState<Store[]>([])
@@ -353,6 +408,7 @@ export default function OrdersPage() {
         printFilter,
         tab,
         subTab,
+        sort,
       }
       if (search) params.search = search
       if (platform) params.platform = platform
@@ -373,6 +429,7 @@ export default function OrdersPage() {
         semua: rawCounts.all ?? rawCounts.semua ?? ((rawCounts.unprinted || 0) + (rawCounts.printed || 0)),
       }
       setAwaitingTracking(rawCounts.awaitingTracking ?? 0)
+      setUrgency({ overdue: rawCounts.overdue ?? 0, dueToday: rawCounts.dueToday ?? 0 })
       if (data.tabCounts) setTabCounts(data.tabCounts)
       if (data.subTabCounts) setSubTabCounts(data.subTabCounts)
 
@@ -400,7 +457,7 @@ export default function OrdersPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, limit, printFilter, tab, subTab, search, platform, storeId, status, courier, dateFrom, dateTo])
+  }, [page, limit, printFilter, tab, subTab, sort, search, platform, storeId, status, courier, dateFrom, dateTo])
 
   const fetchStores = async () => {
     try {
@@ -662,16 +719,22 @@ export default function OrdersPage() {
     return body?.error || err?.message || 'Gagal memproses permintaan'
   }
 
-  /** The default choice for one courier: pickup when it is on offer, else drop-off. */
+  /**
+   * The default choice for one courier.
+   *
+   * `suggestedMode` already accounts for couriers that do not collect, so this
+   * mostly follows it. The fallback repeats the rule rather than defaulting to
+   * pickup: a Pos or JNE batch defaulting to "dijemput" is a collection nobody
+   * turns up for, and the operator has no reason to suspect the default.
+   */
   const defaultChoice = (group: MassShipGroup): MassShipChoice => {
     const modes = group.availableModes || []
-    // Shopee's own preference order already lands in suggestedMode; picking a
-    // mode the channel does not support is a guaranteed rejection.
     const suggested = group.suggestedMode
+    const fallback: 'pickup' | 'dropoff' = group.dropoffOnly
+      ? (modes.includes('dropoff') ? 'dropoff' : 'pickup')
+      : (modes.includes('pickup') ? 'pickup' : 'dropoff')
     const mode: 'pickup' | 'dropoff' =
-      suggested === 'pickup' || suggested === 'dropoff'
-        ? suggested
-        : modes.includes('pickup') ? 'pickup' : 'dropoff'
+      suggested === 'pickup' || suggested === 'dropoff' ? suggested : fallback
 
     const firstAddress = group.pickup?.address_list?.[0]
     return {
@@ -971,6 +1034,36 @@ export default function OrdersPage() {
         </div>
       )}
 
+      {/* Deadline pressure. Counted across the whole filter rather than the
+          open tab, because an order running out of time matters wherever the
+          operator happens to be looking. */}
+      {(urgency.overdue > 0 || urgency.dueToday > 0) && (
+        <div className={`rounded-lg border px-4 py-3 text-sm flex flex-col sm:flex-row sm:items-center gap-3 ${
+          urgency.overdue > 0
+            ? 'border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/30 text-red-800 dark:text-red-200'
+            : 'border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200'
+        }`}>
+          <div className="flex items-start gap-2 flex-1">
+            <Clock className="w-4 h-4 mt-0.5 shrink-0" />
+            <p>
+              {urgency.overdue > 0 && (
+                <span className="font-semibold">{urgency.overdue} pesanan lewat batas kirim Shopee</span>
+              )}
+              {urgency.overdue > 0 && urgency.dueToday > 0 && ' · '}
+              {urgency.dueToday > 0 && <span>{urgency.dueToday} jatuh tempo hari ini</span>}
+            </p>
+          </div>
+          {sort !== 'deadline' && (
+            <button
+              onClick={() => { setSort('deadline'); setPage(1) }}
+              className="btn-secondary self-start sm:self-auto shrink-0"
+            >
+              Urutkan yang paling mepet
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Orders that exist but cannot be printed yet */}
       {awaitingTracking > 0 && (
         <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 px-4 py-3 text-sm text-slate-700 dark:text-slate-300 flex flex-col sm:flex-row sm:items-center gap-3">
@@ -1115,6 +1208,17 @@ export default function OrdersPage() {
             </select>
 
             <select
+              value={sort}
+              onChange={(e) => { setSort(e.target.value as SortKey); setPage(1) }}
+              className="input w-full lg:w-auto min-w-[150px]"
+              aria-label="Urutkan"
+            >
+              {SORT_OPTIONS.map((o) => (
+                <option key={o.key} value={o.key}>Urutkan: {o.label}</option>
+              ))}
+            </select>
+
+            <select
               value={courier}
               onChange={(e) => { setCourier(e.target.value); setPage(1) }}
               className="input w-full lg:w-auto min-w-[150px]"
@@ -1217,9 +1321,10 @@ export default function OrdersPage() {
               <col className="w-[10%]" />
               <col className="w-[7%]" />
               <col className="w-[9%]" />
-              <col className="w-[28%]" />
+              <col className="w-[22%]" />
               <col className="w-[10%]" />
               <col className="w-[9%]" />
+              <col className="w-[8%]" />
               <col className="w-[8%]" />
               <col className="w-[40px]" />
             </colgroup>
@@ -1243,6 +1348,7 @@ export default function OrdersPage() {
                 <th className="table-header">Produk</th>
                 <th className="table-header">Kurir</th>
                 <th className="table-header">Status</th>
+                <th className="table-header">Batas Kirim</th>
                 <th className="table-header">Tanggal</th>
                 <th className="table-header">Aksi</th>
               </tr>
@@ -1250,14 +1356,14 @@ export default function OrdersPage() {
             <tbody className="divide-y divide-gray-100 dark:divide-slate-700/60">
               {loading ? (
                 <tr>
-                  <td colSpan={10} className="px-4 py-16 text-center">
+                  <td colSpan={11} className="px-4 py-16 text-center">
                     <Loader2 className="w-8 h-8 animate-spin text-primary-600 mx-auto" />
                     <p className="text-sm text-gray-500 dark:text-slate-400 mt-2">Memuat pesanan...</p>
                   </td>
                 </tr>
               ) : orders.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="px-4 py-16 text-center">
+                  <td colSpan={11} className="px-4 py-16 text-center">
                     <Package className="w-12 h-12 text-gray-300 dark:text-slate-600 mx-auto mb-3" />
                     <p className="font-medium text-gray-900 dark:text-slate-200">Tidak ada pesanan</p>
                     <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">
@@ -1351,6 +1457,19 @@ export default function OrdersPage() {
                             {logisticsLabel[order.logisticsStatus] || order.logisticsStatus}
                           </p>
                         )}
+                      </td>
+                      {/* Blank rather than guessed when Shopee never sent a
+                          deadline — an invented "aman" would be read as one. */}
+                      <td className="table-cell text-xs whitespace-nowrap">
+                        {(() => {
+                          const deadline = shipDeadline(order.shipByDate)
+                          if (!deadline) return <span className="text-gray-300 dark:text-slate-600">—</span>
+                          return (
+                            <span className={DEADLINE_TONES[deadline.tone]} title={deadline.title}>
+                              {deadline.label}
+                            </span>
+                          )
+                        })()}
                       </td>
                       <td className="table-cell text-xs text-gray-500 dark:text-slate-400 whitespace-nowrap">
                         {new Date(order.createdAt).toLocaleDateString('id-ID', {
@@ -1483,6 +1602,22 @@ export default function OrdersPage() {
                           </span>
                         )}
                       </div>
+
+                      {/* The rule is the operators' own — Shopee offers
+                          pickup for these couriers regardless — so it is stated
+                          rather than enforced, and only shouts when the choice
+                          actually contradicts it. */}
+                      {group.dropoffOnly && (
+                        <p className={`rounded-md border px-2.5 py-1.5 text-xs ${
+                          choice.mode === 'pickup'
+                            ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300'
+                            : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                        }`}>
+                          {choice.mode === 'pickup'
+                            ? `${group.courier} tidak menjemput paket — pilih "Ke counter", atau pengiriman ini akan menunggu kurir yang tidak datang.`
+                            : `${group.courier} tidak bisa dijemput, jadi paket diantar ke counter.`}
+                        </p>
+                      )}
 
                       {choice.mode === 'dropoff' && (group.infoNeeded?.dropoff?.length ?? 0) > 0 && (
                         <p className="rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-2.5 py-1.5 text-xs text-amber-700 dark:text-amber-300">

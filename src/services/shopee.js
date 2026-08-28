@@ -451,6 +451,67 @@ class ShopeeService {
     return this._request('GET', '/api/v2/shop/get_shop_info', {}, null, accessToken, String(shopId));
   }
 
+  /**
+   * List every shop that has authorized this partner app.
+   *
+   * A public API: the signature covers partner_id, path and timestamp only, so
+   * it needs no shop token. That is exactly why it can answer the question the
+   * stores page could not — which shops granted us access but were never added
+   * here. A shop missing from OrderPro is invisible in every other view: its
+   * orders simply never arrive, and nothing says they are missing.
+   *
+   * Paginated from page_no = 1; `more` reports whether another page follows.
+   * Each entry carries shop_id, auth_time and expire_time (unix seconds).
+   *
+   * @param {Object} [options]
+   * @param {number} [options.pageNo=1]
+   * @param {number} [options.pageSize=100] - Shopee caps this at 100
+   * @returns {Promise<Object>} Raw response: { authed_shop_list, more }
+   */
+  async getShopsByPartner({ pageNo = 1, pageSize = 100 } = {}) {
+    console.error(`[ShopeeService.getShopsByPartner] page_no=${pageNo} page_size=${pageSize}`);
+    return this._request('GET', '/api/v2/public/get_shops_by_partner', {
+      page_no:   pageNo,
+      page_size: Math.min(pageSize, 100),
+    });
+  }
+
+  /**
+   * Every authorized shop, following pagination to the end.
+   *
+   * Shopee has answered this call with the list at the top level and, on other
+   * endpoints, under `response` — both are read, because guessing wrong here
+   * would report zero authorized shops, which reads as "nothing is missing"
+   * when the truth may be the opposite.
+   *
+   * @param {number} [maxPages=20] - Guard against a `more` flag that never clears
+   * @returns {Promise<Array<{shopId: string, authTime: number|null, expireTime: number|null}>>}
+   */
+  async getAllShopsByPartner(maxPages = 20) {
+    const shops = [];
+
+    for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
+      const resp = await this.getShopsByPartner({ pageNo, pageSize: 100 });
+      const body = resp?.response || resp || {};
+      const list = body.authed_shop_list || [];
+
+      for (const entry of list) {
+        const shopId = entry?.shop_id ?? entry?.shopId;
+        if (shopId === undefined || shopId === null) continue;
+        shops.push({
+          shopId:     String(shopId),
+          authTime:   entry.auth_time ?? null,
+          expireTime: entry.expire_time ?? null,
+        });
+      }
+
+      if (!body.more || list.length === 0) break;
+    }
+
+    console.error(`[ShopeeService.getAllShopsByPartner] ${shops.length} authorized shop(s)`);
+    return shops;
+  }
+
   // ──────────────────────────────────────────────
   // Orders
   // ──────────────────────────────────────────────

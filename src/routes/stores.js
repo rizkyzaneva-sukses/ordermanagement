@@ -15,6 +15,23 @@ function getScheduler() {
   try { return require('../services/scheduler'); } catch { return null; }
 }
 
+/**
+ * One label for the several ways a store can be unhealthy.
+ *
+ * Ordered by what the operator has to do about it, most drastic first: a store
+ * flagged needsReconnect can only be fixed by re-authorizing at the
+ * marketplace, so saying "token kadaluarsa" there would send them to a Reconnect
+ * button that is guaranteed to fail. A sync that errored comes last because the
+ * credentials are fine and the next run may well succeed.
+ */
+function storeStatus(store) {
+  if (!store.isActive) return 'ERROR';
+  if (store.needsReconnect) return 'NEEDS_RECONNECT';
+  if (store.tokenExpiry && new Date(store.tokenExpiry) < new Date()) return 'TOKEN_EXPIRED';
+  if (store.lastSyncStatus === 'ERROR') return 'SYNC_ERROR';
+  return 'ACTIVE';
+}
+
 router.use(authenticate);
 
 /**
@@ -50,11 +67,15 @@ router.get('/', async (req, res) => {
       platform: store.platform,
       shopId: store.shopId,
       isActive: store.isActive,
-      status: !store.isActive
-        ? 'ERROR'
-        : store.tokenExpiry && new Date(store.tokenExpiry) < new Date()
-          ? 'TOKEN_EXPIRED'
-          : 'ACTIVE',
+      status: storeStatus(store),
+      // The schema has recorded all of this since sync learned to report
+      // failures, but the list withheld it — so a shop whose token died and a
+      // shop with genuinely no orders both showed up as "Terhubung", and the
+      // difference only surfaced as orders quietly missing from the table.
+      needsReconnect: store.needsReconnect,
+      lastSyncStatus: store.lastSyncStatus || null,
+      lastSyncError: store.lastSyncError || null,
+      lastSyncAttemptAt: store.lastSyncAttemptAt || null,
       lastSyncAt: store.lastSyncAt || store.updatedAt,
       orderCount: store._count.orders,
       createdAt: store.createdAt,
@@ -69,6 +90,87 @@ router.get('/', async (req, res) => {
 
 // Admin-only middleware for remaining store modifications
 router.use(requireAdmin());
+
+/**
+ * GET /authorized
+ * Which Shopee shops have authorized this app, and which of them are missing
+ * from OrderPro.
+ *
+ * Until now a shop that was never connected was invisible: its orders simply
+ * did not arrive, and no screen said they were absent. The operator only found
+ * out by noticing an order in Seller Centre that OrderPro had never heard of —
+ * which is the exact moment they stop trusting OrderPro and reopen Komplace.
+ *
+ * Shopee's own list is the authority here, so this reads it live rather than
+ * inferring anything from what happens to be in the database.
+ *
+ * Answers 200 with `supported: false` when the list cannot be fetched at all
+ * (no partner credentials configured, or Shopee refusing the call). A missing
+ * comparison is not the same as a clean bill of health, and a red error box
+ * would imply something is broken with the shops themselves.
+ */
+router.get('/authorized', async (req, res) => {
+  if (!process.env.SHOPEE_PARTNER_ID || !process.env.SHOPEE_PARTNER_KEY) {
+    return res.json({
+      success: true,
+      data: {
+        supported: false,
+        reason: 'Kredensial partner Shopee belum diisi di server (SHOPEE_PARTNER_ID / SHOPEE_PARTNER_KEY)',
+      },
+    });
+  }
+
+  try {
+    const [authorized, stores] = await Promise.all([
+      shopeeService.getAllShopsByPartner(),
+      prisma.store.findMany({
+        where: { platform: 'SHOPEE' },
+        select: { id: true, name: true, shopId: true, isActive: true, needsReconnect: true },
+      }),
+    ]);
+
+    const known = new Map(stores.map((s) => [String(s.shopId), s]));
+    const authorizedIds = new Set(authorized.map((a) => a.shopId));
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    // Authorized at Shopee, absent from OrderPro — the shops whose orders no
+    // one here has ever seen.
+    const unlinked = authorized
+      .filter((a) => !known.has(a.shopId))
+      .map((a) => ({
+        shopId:     a.shopId,
+        authTime:   a.authTime,
+        expireTime: a.expireTime,
+        expired:    a.expireTime ? a.expireTime < nowSec : false,
+      }));
+
+    // The mirror image: a store row we go on syncing although Shopee no longer
+    // lists it as authorized. Its orders stopped arriving some time ago.
+    const revoked = stores
+      .filter((s) => s.isActive && !authorizedIds.has(String(s.shopId)))
+      .map((s) => ({ id: s.id, name: s.name, shopId: s.shopId }));
+
+    return res.json({
+      success: true,
+      data: {
+        supported:       true,
+        authorizedCount: authorized.length,
+        linkedCount:     authorized.length - unlinked.length,
+        unlinked,
+        revoked,
+      },
+    });
+  } catch (err) {
+    console.error('[stores] Could not list authorized shops:', err.message);
+    return res.json({
+      success: true,
+      data: {
+        supported: false,
+        reason: `Shopee tidak bisa dimintai daftar toko terotorisasi: ${err.message}`,
+      },
+    });
+  }
+});
 
 /**
  * POST /quick-connect

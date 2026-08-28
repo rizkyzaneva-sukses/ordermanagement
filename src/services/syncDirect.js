@@ -89,6 +89,10 @@ function expandShopeeOrderToPackages(order, knownPackages) {
     buyerNote:       order.note || null,
     paymentMethod:   order.payment_method || null,
     status:          order.order_status || null,
+    // Shopee reports this in unix seconds and sends 0 for orders that have no
+    // deadline (already shipped, cancelled, still unpaid) — which is absent,
+    // not "1 Jan 1970".
+    shipByDate:      order.ship_by_date ? new Date(order.ship_by_date * 1000) : null,
     orderDate:       new Date((order.create_time || Math.floor(Date.now() / 1000)) * 1000),
   };
 
@@ -435,6 +439,18 @@ async function runStoreSync(storeId) {
 
       await backfillShopeeTracking(accessToken, shopId, orders);
 
+      // Whether Shopee volunteers ship_by_date without it being named in
+      // response_optional_fields is not something this codebase can test
+      // against a live shop, and asking for a field name Shopee does not accept
+      // makes get_order_detail fail outright — taking the entire sync with it.
+      // So the field is simply read if offered, and its total absence is
+      // reported here rather than showing up as an empty column nobody can
+      // explain.
+      const awaitingShipment = orders.filter(o => ['READY_TO_SHIP', 'RETRY_SHIP', 'PROCESSED'].includes(o.status));
+      if (awaitingShipment.length > 0 && awaitingShipment.every(o => !o.shipByDate)) {
+        console.warn(`[sync] No ship_by_date on any of ${awaitingShipment.length} order(s) awaiting shipment for store ${storeId} — Shopee may require it in response_optional_fields for this shop.`);
+      }
+
       const splitCount = orders.length - allDetails.length;
       if (splitCount > 0) {
         console.log(`[sync] ${allDetails.length} order(s) expanded to ${orders.length} package row(s)`);
@@ -589,6 +605,7 @@ async function upsertOrderRows(storeId, orders) {
             logisticsStatus: orderData.logisticsStatus || null,
             logisticsChannelId: orderData.logisticsChannelId ?? null,
             status:          orderData.status,
+            shipByDate:      orderData.shipByDate || null,
             orderDate:       orderData.orderDate,
           },
         });
@@ -621,6 +638,10 @@ async function upsertOrderRows(storeId, orders) {
           items:           JSON.stringify(Array.isArray(orderData.items) ? orderData.items : []),
           buyerNote:       orderData.buyerNote    ?? row.buyerNote,
           paymentMethod:   orderData.paymentMethod ?? row.paymentMethod,
+          // Same rule as tracking above: Shopee stops reporting a deadline once
+          // the parcel ships, and blanking it would erase the only record of
+          // whether the order was sent on time.
+          shipByDate:      orderData.shipByDate ?? row.shipByDate,
         },
       });
       updated++;

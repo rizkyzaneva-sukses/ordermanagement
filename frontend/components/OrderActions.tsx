@@ -52,6 +52,9 @@ interface ShippingOptions {
   availableModes: string[]
   suggestedMode: string | null
   logisticsStatus: string | null
+  /** Courier that does not collect — Pos and JNE. Advisory, not enforced. */
+  dropoffOnly?: boolean
+  courier?: string | null
   pickup?: {
     address_list?: Array<{
       address_id: number
@@ -642,6 +645,21 @@ export default function OrderActions({
                     </div>
                   )}
                 </div>
+
+                {/* Shopee offers pickup for Pos and JNE all the same, so this
+                    states the operators' rule rather than removing the option —
+                    and only turns red once the choice contradicts it. */}
+                {options.dropoffOnly && (
+                  <p className={`rounded-md border px-3 py-2 text-xs ${
+                    mode === 'pickup'
+                      ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300'
+                      : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                  }`}>
+                    {mode === 'pickup'
+                      ? `${options.courier || 'Kurir ini'} tidak menjemput paket — pilih "Antar sendiri", atau pengiriman ini akan menunggu kurir yang tidak datang.`
+                      : `${options.courier || 'Kurir ini'} tidak bisa dijemput, jadi paket harus diantar ke counter.`}
+                  </p>
+                )}
 
                 {mode === 'pickup' && (
                   <>

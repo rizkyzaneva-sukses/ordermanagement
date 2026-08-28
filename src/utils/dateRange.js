@@ -76,4 +76,26 @@ function orderDateRange(dateFrom, dateTo) {
   };
 }
 
-module.exports = { startOfDay, endOfDay, orderDateRange };
+/**
+ * Today's calendar date in the business timezone, as `YYYY-MM-DD`.
+ *
+ * `new Date().setHours(23,59,59,999)` is the shortcut this module exists to
+ * avoid: in a container with no TZ set it lands on UTC midnight, so "jatuh
+ * tempo hari ini" would really mean 07:00 WIB today through 07:00 WIB tomorrow.
+ *
+ * @returns {string}
+ */
+function businessToday() {
+  const match = /^([+-])(\d{2}):(\d{2})$/.exec(config.business.utcOffset);
+  const offsetMs = match
+    ? (match[1] === '-' ? -1 : 1) * ((Number(match[2]) * 60 + Number(match[3])) * 60_000)
+    : 0;
+  return new Date(Date.now() + offsetMs).toISOString().slice(0, 10);
+}
+
+/** Last instant of today, in the business timezone. */
+function endOfBusinessToday() {
+  return endOfDay(businessToday());
+}
+
+module.exports = { startOfDay, endOfDay, orderDateRange, businessToday, endOfBusinessToday };

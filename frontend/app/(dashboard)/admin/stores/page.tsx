@@ -13,26 +13,48 @@ import {
   ShieldCheck,
   Zap,
   ArrowRight,
+  AlertTriangle,
+  Unlink,
 } from 'lucide-react'
+
+type StoreStatus = 'ACTIVE' | 'TOKEN_EXPIRED' | 'NEEDS_RECONNECT' | 'SYNC_ERROR' | 'ERROR'
 
 interface StoreData {
   id: string
   name: string
   platform: 'SHOPEE' | 'TIKTOK'
   shopId: string
-  status: 'ACTIVE' | 'TOKEN_EXPIRED' | 'ERROR'
+  status: StoreStatus
   lastSyncAt: string | null
   orderCount: number
+  needsReconnect?: boolean
+  lastSyncStatus?: string | null
+  lastSyncError?: string | null
+}
+
+/** Shopee's own view of who authorized us, against what is stored here. */
+interface AuthorizedShops {
+  supported: boolean
+  reason?: string
+  authorizedCount?: number
+  linkedCount?: number
+  unlinked?: { shopId: string; authTime: number | null; expireTime: number | null; expired: boolean }[]
+  revoked?: { id: string; name: string; shopId: string }[]
 }
 
 const statusConfig: Record<string, { label: string; class: string; icon: any }> = {
   ACTIVE: { label: 'Terhubung', class: 'bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-300', icon: CheckCircle2 },
   TOKEN_EXPIRED: { label: 'Token Kadaluarsa', class: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-950/60 dark:text-yellow-300', icon: Clock },
+  // Re-authorization is the only fix, so this must not look like the expiry
+  // above — that one the Reconnect button can still repair on its own.
+  NEEDS_RECONNECT: { label: 'Perlu Otorisasi Ulang', class: 'bg-orange-100 text-orange-700 dark:bg-orange-950/60 dark:text-orange-300', icon: Unlink },
+  SYNC_ERROR: { label: 'Sync Gagal', class: 'bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300', icon: AlertTriangle },
   ERROR: { label: 'Error', class: 'bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300', icon: AlertCircle },
 }
 
 export default function StoresPage() {
   const [stores, setStores] = useState<StoreData[]>([])
+  const [authorized, setAuthorized] = useState<AuthorizedShops | null>(null)
   const [loading, setLoading] = useState(true)
   const [connectingPlatform, setConnectingPlatform] = useState<'SHOPEE' | 'TIKTOK' | null>(null)
   const [reconnecting, setReconnecting] = useState<string | null>(null)
@@ -55,8 +77,28 @@ export default function StoresPage() {
     }
   }
 
+  /**
+   * Ask Shopee which shops have authorized this app.
+   *
+   * Failure is deliberately quiet: the panel just does not render. An admin who
+   * came here to connect a shop should not be met with a red box about a
+   * comparison that is only ever advisory.
+   */
+  const fetchAuthorized = async () => {
+    try {
+      const res = await api.get<any>('/stores/authorized')
+      setAuthorized(res.data?.data || res.data || null)
+    } catch {
+      setAuthorized(null)
+    }
+  }
+
+  const refreshAll = async () => {
+    await Promise.all([fetchStores(), fetchAuthorized()])
+  }
+
   useEffect(() => {
-    fetchStores().finally(() => setLoading(false))
+    Promise.all([fetchStores(), fetchAuthorized()]).finally(() => setLoading(false))
 
     const params = new URLSearchParams(window.location.search)
     const connected = params.get('connected')
@@ -100,7 +142,7 @@ export default function StoresPage() {
     setReconnecting(storeId)
     try {
       await api.post(`/stores/${storeId}/reconnect`)
-      await fetchStores()
+      await refreshAll()
     } catch (err) {
       console.error('Reconnect failed', err)
     } finally {
@@ -219,11 +261,105 @@ export default function StoresPage() {
         </p>
       </div>
 
+      {/* Shopee's authorization list against ours.
+          A shop that authorized us but was never added here is invisible
+          everywhere else in the app: its orders never arrive and nothing says
+          they are missing. This is the only screen that can name them. */}
+      {authorized?.supported && (
+        (authorized.unlinked?.length ?? 0) > 0 || (authorized.revoked?.length ?? 0) > 0 ? (
+          <div className="rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 p-4 space-y-3">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-amber-900 dark:text-amber-200">
+                  {authorized.linkedCount} dari {authorized.authorizedCount} toko Shopee yang mengotorisasi aplikasi ini sudah tersambung
+                </p>
+                <p className="text-xs text-amber-800 dark:text-amber-300">
+                  Pesanan dari toko yang belum tersambung tidak pernah masuk ke OrderPro — dan tidak muncul sebagai kekurangan di layar mana pun.
+                </p>
+              </div>
+            </div>
+
+            {(authorized.unlinked?.length ?? 0) > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-amber-900 dark:text-amber-200">
+                  Belum tersambung ({authorized.unlinked!.length}):
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {authorized.unlinked!.map((shop) => (
+                    <span
+                      key={shop.shopId}
+                      className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-xs ${
+                        shop.expired
+                          ? 'border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300'
+                          : 'border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-800 text-amber-900 dark:text-amber-200'
+                      }`}
+                      title={
+                        shop.authTime
+                          ? `Diotorisasi ${new Date(shop.authTime * 1000).toLocaleDateString('id-ID')}`
+                          : undefined
+                      }
+                    >
+                      {shop.shopId}
+                      {shop.expired && <span className="not-italic">· otorisasi habis</span>}
+                    </span>
+                  ))}
+                </div>
+                <button
+                  onClick={() => handle1ClickConnect('SHOPEE')}
+                  disabled={connectingPlatform === 'SHOPEE'}
+                  className="inline-flex items-center gap-2 rounded-lg bg-orange-600 hover:bg-orange-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+                >
+                  {connectingPlatform === 'SHOPEE' ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Zap className="w-3.5 h-3.5" />
+                  )}
+                  Hubungkan toko berikutnya
+                </button>
+                {/* Shopee's authorization page has the merchant pick the shop
+                    themselves — we cannot preselect one — so the ids above are
+                    the checklist to work through. */}
+                <p className="text-xs text-amber-800 dark:text-amber-300">
+                  Shopee meminta kamu memilih sendiri tokonya saat otorisasi. Ulangi tombol di atas untuk tiap Shop ID di daftar.
+                </p>
+              </div>
+            )}
+
+            {(authorized.revoked?.length ?? 0) > 0 && (
+              <div className="space-y-1.5 border-t border-amber-200 dark:border-amber-800 pt-3">
+                <p className="text-xs font-medium text-amber-900 dark:text-amber-200">
+                  Masih aktif di sini tapi tidak lagi terdaftar di Shopee ({authorized.revoked!.length}) — pesanannya sudah berhenti masuk:
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {authorized.revoked!.map((store) => (
+                    <span
+                      key={store.id}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-2 py-1 text-xs text-red-700 dark:text-red-300"
+                    >
+                      <Unlink className="w-3 h-3" />
+                      {store.name} <span className="font-mono opacity-70">({store.shopId})</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/30 px-4 py-3 flex items-center gap-3">
+            <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <p className="text-sm text-emerald-900 dark:text-emerald-200">
+              Semua {authorized.authorizedCount} toko Shopee yang mengotorisasi aplikasi ini sudah tersambung.
+            </p>
+          </div>
+        )
+      )}
+
       {/* Connected Stores Table */}
       <div className="card overflow-hidden">
         <div className="px-6 py-4 border-b border-gray-200 dark:border-slate-700 flex items-center justify-between">
           <h2 className="font-semibold text-gray-900 dark:text-slate-100">Daftar Toko Terhubung ({stores.length})</h2>
-          <button onClick={fetchStores} className="btn-ghost p-1.5 text-xs text-gray-500 flex items-center gap-1">
+          <button onClick={refreshAll} className="btn-ghost p-1.5 text-xs text-gray-500 flex items-center gap-1">
             <RefreshCw className="w-3.5 h-3.5" />
             Refresh
           </button>
@@ -264,7 +400,17 @@ export default function StoresPage() {
                           <div className="w-9 h-9 rounded-lg bg-gray-100 dark:bg-slate-700 flex items-center justify-center">
                             <Store className="w-4 h-4 text-gray-500 dark:text-slate-300" />
                           </div>
-                          <span>{store.name}</span>
+                          <div className="min-w-0">
+                            <span>{store.name}</span>
+                            {/* Recorded by every failed sync but never shown, so
+                                a shop that stopped pulling orders looked the
+                                same as one with nothing to pull. */}
+                            {store.status === 'SYNC_ERROR' && store.lastSyncError && (
+                              <p className="text-xs font-normal text-red-600 dark:text-red-400 truncate max-w-[260px]" title={store.lastSyncError}>
+                                {store.lastSyncError}
+                              </p>
+                            )}
+                          </div>
                         </div>
                       </td>
                       <td className="table-cell">
@@ -292,7 +438,24 @@ export default function StoresPage() {
                       </td>
                       <td className="table-cell text-right">
                         <div className="flex items-center justify-end gap-1">
-                          {store.status !== 'ACTIVE' && (
+                          {/* A store the platform told us to re-authorize
+                              cannot be repaired by refreshing the token — that
+                              is precisely the call that failed. Sending the
+                              admin through the login flow is the only fix. */}
+                          {store.status === 'NEEDS_RECONNECT' ? (
+                            <button
+                              onClick={() => handle1ClickConnect(store.platform)}
+                              disabled={connectingPlatform === store.platform}
+                              className="btn-ghost p-2 text-orange-600 dark:text-orange-400"
+                              title="Otorisasi ulang lewat login toko"
+                            >
+                              {connectingPlatform === store.platform ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                              ) : (
+                                <Zap className="w-4 h-4" />
+                              )}
+                            </button>
+                          ) : store.status !== 'ACTIVE' ? (
                             <button
                               onClick={() => handleReconnect(store.id)}
                               disabled={reconnecting === store.id}
@@ -305,7 +468,7 @@ export default function StoresPage() {
                                 <LinkIcon className="w-4 h-4" />
                               )}
                             </button>
-                          )}
+                          ) : null}
                         </div>
                       </td>
                     </tr>

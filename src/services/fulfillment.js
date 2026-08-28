@@ -20,6 +20,7 @@ const { PDFDocument } = require('pdf-lib');
 const prisma        = require('../prisma/client.js');
 const shopeeService = require('./shopee.js');
 const { ensureFreshToken, expandShopeeOrderToPackages } = require('./syncDirect.js');
+const { isDropoffOnlyCourier, modePreferenceFor } = require('../utils/couriers.js');
 
 const config = require('../config/index.js');
 
@@ -290,11 +291,23 @@ async function getShippingOptions(orderRowId) {
   // shows every mode greyed out with nothing to explain why Shopee offered none.
   console.log(`[fulfillment] Shipping options ${ctx.order.orderId} pkg=${pkgNumber || '(default)'} courier=${ctx.order.shippingCourier || '-'} info_needed=${JSON.stringify(infoNeeded)}`);
 
+  // Pos and JNE do not collect (see utils/couriers.js), yet Shopee lists
+  // `pickup` for them all the same and it is the first mode returned — so the
+  // old `available[0]` suggested a collection that would never happen.
+  const dropoffOnly = isDropoffOnlyCourier(ctx.order.shippingCourier);
+  const preference  = modePreferenceFor(ctx.order.shippingCourier);
+  const suggestedMode = preference.find((m) => available.includes(m)) || available[0] || null;
+
   return {
     orderStatus:     live.orderStatus,
     logisticsStatus: live.logisticsStatus,
     availableModes:  available,
-    suggestedMode:   available[0] || null,
+    suggestedMode,
+    // Advisory, not a veto: the courier's own name is the only evidence, and a
+    // shop with a collection agreement we do not know about should still be
+    // able to choose pickup deliberately.
+    dropoffOnly,
+    courier:         ctx.order.shippingCourier || null,
     infoNeeded,
     pickup:          resp.response?.pickup || null,
     dropoff:         resp.response?.dropoff || null,
@@ -359,7 +372,11 @@ async function arrangeShipment(orderRowId, options = {}) {
     ctx.accessToken, ctx.store.shopId, ctx.order.orderId, pkgNumber);
 
   const infoNeeded = paramResp.response?.info_needed || {};
-  const mode = options.mode || shopeeService.pickShippingMode(infoNeeded);
+  // Only consulted when the caller did not choose: an explicit pickup on a
+  // Pos/JNE order is left to stand, because the rule is the operators' own and
+  // not something Shopee enforces.
+  const mode = options.mode
+    || shopeeService.pickShippingMode(infoNeeded, modePreferenceFor(ctx.order.shippingCourier));
 
   if (!Object.prototype.hasOwnProperty.call(infoNeeded, mode)) {
     throw fail(400, `Channel does not accept mode "${mode}" (accepts: ${Object.keys(infoNeeded).join(', ') || 'none'})`);
@@ -496,6 +513,9 @@ async function getMassShippingOptions(orderRowIds) {
         ...group,
         availableModes: options.availableModes,
         suggestedMode:  options.suggestedMode,
+        // Taken from the group's own courier rather than the sampled order, so
+        // it holds even when that one order could not be read.
+        dropoffOnly:    isDropoffOnlyCourier(group.courier),
         infoNeeded:     options.infoNeeded,
         pickup:         options.pickup,
         dropoff:        options.dropoff,
@@ -507,6 +527,7 @@ async function getMassShippingOptions(orderRowIds) {
         ...group,
         availableModes: [],
         suggestedMode:  null,
+        dropoffOnly:    isDropoffOnlyCourier(group.courier),
         error:          groupError?.message || 'Tidak bisa mengambil opsi pengiriman',
       });
   }

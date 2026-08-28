@@ -5,7 +5,7 @@ const { syncQueue, isRedisReady, hasQueueWorkers } = require('../services/queue.
 const { authenticate } = require('../middleware/auth.js');
 const pdfService = require('../services/pdf.js');
 const fulfillmentService = require('../services/fulfillment.js');
-const { orderDateRange } = require('../utils/dateRange.js');
+const { orderDateRange, endOfBusinessToday } = require('../utils/dateRange.js');
 const {
   ORDER_TABS,
   ORDER_SUB_TABS,
@@ -18,6 +18,31 @@ const scheduler = require('../services/scheduler.js');
 
 // All order routes require auth
 router.use(authenticate);
+
+/**
+ * Orders still counting down to Shopee's shipping deadline.
+ *
+ * Once a parcel is handed over the deadline is history, so the urgency counts
+ * below would otherwise keep flashing red about orders that were shipped days
+ * ago.
+ */
+const AWAITING_SHIPMENT = ['READY_TO_SHIP', 'RETRY_SHIP', 'PROCESSED'];
+
+/**
+ * How the list is ordered.
+ *
+ * `deadline` is the order the work actually has to be done in: an order due
+ * today outranks one that arrived earlier but is due on Friday. Nulls go last
+ * because a missing deadline means "unknown", not "urgent" — floating those to
+ * the top would bury the rows that genuinely are running out of time. Orders
+ * sharing a deadline fall back to newest-first, so the sort is stable enough to
+ * page through.
+ */
+const SORT_ORDERS = {
+  newest:   { createdAt: 'desc' },
+  deadline: [{ shipByDate: { sort: 'asc', nulls: 'last' } }, { createdAt: 'desc' }],
+};
+const DEFAULT_SORT = 'newest';
 
 
 /**
@@ -42,7 +67,10 @@ router.get('/', async (req, res) => {
       printFilter = 'unprinted',
       tab = 'toShip',
       subTab = 'all',
+      sort = DEFAULT_SORT,
     } = req.query;
+
+    const activeSort = Object.prototype.hasOwnProperty.call(SORT_ORDERS, sort) ? sort : DEFAULT_SORT;
 
     const activeTab = resolveTab(tab);
     const activeSubTab = resolveSubTab(subTab);
@@ -120,7 +148,7 @@ router.get('/', async (req, res) => {
         include: {
           store: { select: { id: true, name: true, platform: true } },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: SORT_ORDERS[activeSort],
         skip,
         take: limitNum,
       }),
@@ -141,11 +169,30 @@ router.get('/', async (req, res) => {
     // from a snapshot before those were applied, every tab would ignore them.
     const { status: _ignoredStatus, ...tabAgnosticWhere } = where;
 
-    const [statusRows, unprintedCount, printedCount, awaitingTrackingCount] = await Promise.all([
+    // Deadline pressure, counted across the tab-agnostic filter so the warning
+    // does not vanish just because the operator is looking at another tab —
+    // an order running out of time is worth knowing about from anywhere.
+    //
+    // "Today" has to be the seller's day, not the container's: nothing sets TZ,
+    // so a server-local midnight would put the boundary at 07:00 WIB and count
+    // tomorrow morning's deadlines as due today.
+    const endOfToday = endOfBusinessToday();
+
+    const [statusRows, unprintedCount, printedCount, awaitingTrackingCount, overdueCount, dueTodayCount] = await Promise.all([
       prisma.order.groupBy({ by: ['status'], where: tabAgnosticWhere, _count: { _all: true } }),
       prisma.order.count({ where: { ...where, printedAt: null } }),
       prisma.order.count({ where: { ...where, printedAt: { not: null } } }),
       prisma.order.count({ where: { ...where, printedAt: null, trackingNumber: null } }),
+      prisma.order.count({
+        where: { ...tabAgnosticWhere, status: { in: AWAITING_SHIPMENT }, shipByDate: { lt: new Date() } },
+      }),
+      prisma.order.count({
+        where: {
+          ...tabAgnosticWhere,
+          status: { in: AWAITING_SHIPMENT },
+          shipByDate: { gte: new Date(), lte: endOfToday },
+        },
+      }),
     ]);
 
     const byStatus = Object.fromEntries(statusRows.map((r) => [r.status, r._count._all]));
@@ -160,6 +207,7 @@ router.get('/', async (req, res) => {
         limit: limitNum,
         tab: activeTab,
         subTab: activeSubTab,
+        sort: activeSort,
         tabCounts: {
           all:     sumOf(null),
           unpaid:  sumOf(ORDER_TABS.unpaid),
@@ -178,6 +226,10 @@ router.get('/', async (req, res) => {
           // Visible but not printable yet — the 3PL has not issued a tracking
           // number, so the UI can explain why they cannot be selected.
           awaitingTracking: awaitingTrackingCount,
+          // Past Shopee's deadline, and due before midnight — the two numbers
+          // that decide what gets worked on first.
+          overdue: overdueCount,
+          dueToday: dueTodayCount,
         },
       },
     });
