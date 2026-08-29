@@ -735,6 +735,9 @@ export default function OrdersPage() {
 
   const shippableSelected = selectedOrders.filter(isShippable)
   const retrySelected = selectedOrders.filter(isRetryable)
+  // Any Shopee row can be re-read, whatever its status — a selection is worth
+  // refreshing precisely when the operator suspects it is behind.
+  const syncSelected = selectedOrders.filter((o) => o.platform === 'SHOPEE')
   const awbSelected = selectedOrders.filter((o) => o.platform === 'SHOPEE' && isPrintable(o))
   // One AWB request covers a single shop, so the button is only meaningful when
   // the selection has not spread across stores.
@@ -873,6 +876,54 @@ export default function OrdersPage() {
 
       setSelected(new Set())
       await fetchOrders()
+    } catch (err) {
+      setBulkMessage({ type: 'error', text: await readError(err) })
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
+  /**
+   * Re-read the ticked orders from Shopee before acting on them.
+   *
+   * The step Komplace puts in front of its bulk actions, and the reason is the
+   * same: the ticks are made against what the table remembers, which can be up
+   * to fifteen minutes behind. Without this the operator only learns which rows
+   * Shopee had already moved on when the bulk action comes back with
+   * rejections.
+   */
+  const handleSyncSelected = async () => {
+    if (syncSelected.length === 0) return
+    setBulkBusy(true)
+    setBulkMessage(null)
+    try {
+      const res = await api.post<any>('/orders/sync-mass', {
+        ids: syncSelected.map((o) => o.id),
+      })
+      const synced = res.data?.synced ?? 0
+      const changed = res.data?.changed || []
+      const missing = res.data?.missing || []
+      const failed = res.data?.failed || []
+
+      const label = (st: string) => STATUS_LABELS[st] || st
+
+      setBulkMessage({
+        type: failed.length > 0 ? 'error' : 'success',
+        text: [
+          `${synced} pesanan dibaca ulang`,
+          // Named one by one while the list is short enough to read: "2 berubah"
+          // would just send the operator hunting for which two.
+          changed.length === 0
+            ? 'semuanya sudah sesuai dengan Shopee'
+            : changed.length <= 5
+              ? changed.map((c: any) => `${c.orderId}: ${label(c.from)} → ${label(c.to)}`).join(', ')
+              : `${changed.length} pesanan berubah status`,
+          missing.length > 0 ? `${missing.length} tidak dikenali Shopee` : null,
+          failed.length > 0 ? failed.map((f: any) => `${f.store}: ${f.message}`).join(', ') : null,
+        ].filter(Boolean).join(' · '),
+      })
+
+      await fetchOrders({ background: true })
     } catch (err) {
       setBulkMessage({ type: 'error', text: await readError(err) })
     } finally {
@@ -1996,6 +2047,18 @@ export default function OrdersPage() {
               )}
             </div>
             <div className="flex items-center gap-3 flex-wrap">
+              {/* First in the row because it comes first in the work: sync the
+                  selection, then act on it. */}
+              {syncSelected.length > 0 && (
+                <button
+                  onClick={handleSyncSelected}
+                  disabled={bulkBusy}
+                  className="btn-secondary flex items-center gap-2"
+                >
+                  {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                  Sinkron ({syncSelected.length})
+                </button>
+              )}
               {shippableSelected.length > 0 && (
                 <button
                   onClick={openMassShip}

@@ -882,6 +882,24 @@ async function resyncOrderPackages(store, orderSn, accessToken) {
   const detail = resp.response?.order_list?.[0];
   if (!detail) return { created: 0, updated: 0, removed: 0 };
 
+  return applyOrderDetail(store, detail);
+}
+
+/**
+ * Write one already-fetched order detail onto its local package rows.
+ *
+ * Split out from the fetch so a bulk sync can pay for one `get_order_detail`
+ * per fifty orders instead of one per order — Shopee accepts fifty order_sns in
+ * a single call, and a fifty-call loop for a selection the operator ticked in
+ * one gesture is exactly the kind of volume this integration has been warned
+ * about before.
+ *
+ * @param {Object} store
+ * @param {Object} detail - One entry from get_order_detail's order_list
+ * @returns {Promise<{created: number, updated: number, removed: number}>}
+ */
+async function applyOrderDetail(store, detail) {
+  const orderSn = detail.order_sn;
   const rows = expandShopeeOrderToPackages(detail);
   const existing = await prisma.order.findMany({ where: { storeId: store.id, orderId: orderSn } });
 
@@ -1025,6 +1043,100 @@ async function syncSingleOrder(orderRowId) {
     order: after,
     ...result,
   };
+}
+
+/**
+ * Re-read a whole selection of orders from Shopee in one go.
+ *
+ * The bulk counterpart of syncSingleOrder, and the same habit Komplace built
+ * its print step around: sync the selection, then act on it. Without it the
+ * operator ticks rows based on what the table happens to remember, and only
+ * finds out which of them Shopee had already moved on when the bulk action
+ * comes back with rejections.
+ *
+ * Batched deliberately: `get_order_detail` takes fifty order_sns at a time, so
+ * a fifty-order selection costs one call rather than fifty. Grouped by store
+ * first, since the token and shop id differ per store.
+ *
+ * Tracking numbers are *not* chased here — that is what "Ambil semua nomor
+ * resi" is for, and folding it in would turn one call back into fifty.
+ *
+ * @param {string[]} orderRowIds
+ * @returns {Promise<{ synced: number, changed: Object[], missing: string[], failed: Object[] }>}
+ */
+async function massSyncOrders(orderRowIds) {
+  if (!Array.isArray(orderRowIds) || orderRowIds.length === 0) {
+    throw fail(400, 'orderRowIds must be a non-empty array');
+  }
+  if (orderRowIds.length > 200) {
+    throw fail(400, 'At most 200 orders can be synced in one request');
+  }
+
+  const rows = await prisma.order.findMany({
+    where: { id: { in: orderRowIds } },
+    include: { store: true },
+  });
+  if (rows.length === 0) throw fail(404, 'No orders found');
+
+  // Status before the read, so the reply can name what actually moved rather
+  // than reporting a bare success the operator has to verify by eye.
+  const statusBefore = new Map(rows.map((r) => [r.orderId, r.status]));
+
+  const byStore = new Map();
+  for (const row of rows) {
+    if (row.store?.platform !== 'SHOPEE') continue;
+    if (!byStore.has(row.storeId)) byStore.set(row.storeId, { store: row.store, orderSns: new Set() });
+    byStore.get(row.storeId).orderSns.add(row.orderId);
+  }
+
+  const changed = [];
+  const failed = [];
+  const missing = [];
+  let synced = 0;
+
+  for (const { store, orderSns } of byStore.values()) {
+    let accessToken;
+    try {
+      accessToken = await ensureFreshToken(store);
+    } catch (err) {
+      failed.push({ store: store.name, message: `Token toko bermasalah: ${err.message}` });
+      continue;
+    }
+
+    const list = [...orderSns];
+    for (let i = 0; i < list.length; i += 50) {
+      const chunk = list.slice(i, i + 50);
+      try {
+        const resp = await shopeeService.getOrderDetail(accessToken, store.shopId, chunk);
+        const details = resp.response?.order_list || [];
+        const returned = new Set(details.map((d) => d.order_sn));
+
+        // An order Shopee will not hand back is worth naming: it usually means
+        // the row is for a shop this token no longer covers, and silently
+        // counting it as synced would hide exactly that.
+        for (const sn of chunk) if (!returned.has(sn)) missing.push(sn);
+
+        for (const detail of details) {
+          await applyOrderDetail(store, detail);
+          synced++;
+
+          const before = statusBefore.get(detail.order_sn);
+          const after = detail.order_status;
+          if (after && before && before !== after) {
+            changed.push({ orderId: detail.order_sn, from: before, to: after });
+          }
+        }
+      } catch (err) {
+        // Best effort per chunk: one rejected batch must not discard the
+        // batches that already succeeded.
+        console.warn(`[fulfillment] Mass sync chunk of ${chunk.length} failed for ${store.name}: ${err.message}`);
+        failed.push({ store: store.name, count: chunk.length, message: err.message });
+      }
+    }
+  }
+
+  console.log(`[fulfillment] Mass sync: ${synced} order(s) re-read, ${changed.length} changed, ${missing.length} not returned, ${failed.length} chunk failure(s)`);
+  return { synced, changed, missing, failed };
 }
 
 /**
@@ -1754,6 +1866,7 @@ async function fetchAwbDataForRows(rows) {
 
 module.exports = {
   syncSingleOrder,
+  massSyncOrders,
   getRetryShippingOptions,
   getMassRetryOptions,
   massRetryShipment,

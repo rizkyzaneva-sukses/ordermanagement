@@ -974,6 +974,23 @@ router.post('/refresh-tracking-all', fulfillmentRoute('Refresh tracking (semua)'
 }));
 
 /**
+ * POST /sync-mass - Re-read a whole selection from Shopee
+ *
+ * The habit Komplace built its bulk steps around: sync the selection, then act
+ * on it. Body: { ids: string[] }
+ */
+router.post('/sync-mass', fulfillmentRoute('Mass sync', async (req) => {
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) {
+    const err = new Error('ids must be a non-empty array');
+    err.statusCode = 400;
+    throw err;
+  }
+  await assertAccessibleOrders(req.user, ids);
+  return fulfillmentService.massSyncOrders(ids);
+}));
+
+/**
  * POST /:id/sync - Re-read this one order from Shopee
  *
  * The per-order counterpart of the store-wide sync. An order processed in
