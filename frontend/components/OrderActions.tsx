@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
+import { useRouter } from 'next/navigation'
 import api from '@/lib/api'
 import {
   MoreHorizontal,
@@ -16,6 +17,8 @@ import {
   Split,
   Merge,
   FileDown,
+  RefreshCcw,
+  Printer,
 } from 'lucide-react'
 
 export interface ActionableOrder {
@@ -27,6 +30,7 @@ export interface ActionableOrder {
   logisticsStatus?: string | null
   trackingNumber?: string | null
   awbFetchedAt?: string | null
+  printed?: boolean
 }
 
 interface SplitItem {
@@ -78,6 +82,24 @@ interface TrackingEvent {
 
 type Modal = 'ship' | 'retry' | 'cancel' | 'tracking' | 'split' | null
 
+/**
+ * Plain names for the statuses a sync can report moving between.
+ *
+ * The raw enum is what Shopee speaks; nobody re-arranging pickups thinks in
+ * READY_TO_SHIP.
+ */
+const STATUS_NAMES: Record<string, string> = {
+  UNPAID: 'Belum Bayar',
+  READY_TO_SHIP: 'Perlu Diproses',
+  RETRY_SHIP: 'Pickup Gagal',
+  PROCESSED: 'Telah Diproses',
+  SHIPPED: 'Dikirim',
+  TO_CONFIRM_RECEIVE: 'Menunggu Diterima',
+  COMPLETED: 'Selesai',
+  IN_CANCEL: 'Minta Batal',
+  CANCELLED: 'Dibatalkan',
+}
+
 const MODE_LABELS: Record<string, string> = {
   pickup: 'Dijemput kurir (pickup)',
   dropoff: 'Antar sendiri (dropoff)',
@@ -103,6 +125,7 @@ export default function OrderActions({
   order: ActionableOrder
   onDone: () => void
 }) {
+  const router = useRouter()
   const [menuOpen, setMenuOpen] = useState(false)
   const [modal, setModal] = useState<Modal>(null)
   const [busy, setBusy] = useState(false)
@@ -173,6 +196,8 @@ export default function OrderActions({
   }, [menuOpen])
 
   const isShopee = order.platform === 'SHOPEE'
+  // Printable means the waybill exists and has not been printed from here yet.
+  const canPrint = Boolean(order.trackingNumber) && !order.printed
   const canShip = isShopee && ['READY_TO_SHIP', 'RETRY_SHIP'].includes(order.status)
   const canRetry = isShopee && (order.status === 'RETRY_SHIP' || order.logisticsStatus === 'LOGISTICS_PICKUP_RETRY')
   const canCancel = isShopee && ['UNPAID', 'READY_TO_SHIP', 'PROCESSED'].includes(order.status)
@@ -444,6 +469,49 @@ export default function OrderActions({
     }
   }
 
+  /**
+   * Re-read this one order from Shopee.
+   *
+   * The gap that made this necessary: an order processed in Seller Centre or
+   * Komplace stays stale here until the next 15-minute run, and the operator
+   * could see it was wrong with nothing to do but wait. "Ambil nomor resi" was
+   * the closest thing available and never touched the status.
+   */
+  const syncOrder = async () => {
+    setMenuOpen(false)
+    setBusy(true)
+    setError('')
+    try {
+      const res = await api.post<any>(`/orders/${order.id}/sync`)
+      const changes = res.data?.changes || []
+
+      // Naming the change is the point of the click. "Berhasil" would leave the
+      // operator re-reading the row to work out whether anything moved.
+      const statusChange = changes.find((c: any) => c.field === 'status')
+      const trackingChange = changes.find((c: any) => c.field === 'trackingNumber')
+
+      setNotice(
+        changes.length === 0
+          ? 'Sudah sesuai dengan Shopee — tidak ada yang berubah.'
+          : [
+            statusChange
+              ? `Status: ${STATUS_NAMES[statusChange.from] || statusChange.from} → ${STATUS_NAMES[statusChange.to] || statusChange.to}`
+              : null,
+            trackingChange?.to ? `Nomor resi: ${trackingChange.to}` : null,
+            changes.some((c: any) => c.field === 'packages') ? 'Jumlah paket berubah' : null,
+            !statusChange && !trackingChange?.to && !changes.some((c: any) => c.field === 'packages')
+              ? 'Data pengiriman diperbarui'
+              : null,
+          ].filter(Boolean).join(' · ')
+      )
+      onDone()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const refreshTracking = async () => {
     setMenuOpen(false)
     setBusy(true)
@@ -513,9 +581,28 @@ export default function OrderActions({
               visibility: menuPos ? 'visible' : 'hidden',
             }}
             className="fixed w-56 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg z-[61] py-1 text-sm">
+            {/* First, and available whatever the status: this is the action
+                for "the row looks wrong", so it has to be reachable exactly
+                when nothing else in this menu applies. */}
+            {isShopee && (
+              <>
+                <button onClick={syncOrder} className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2">
+                  <RefreshCcw className="w-4 h-4" /> Sinkron pesanan
+                </button>
+                <div className="border-t border-gray-100 dark:border-slate-700 my-1" />
+              </>
+            )}
             {canShip && (
               <button onClick={() => openShippingModal('ship')} className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2">
                 <Truck className="w-4 h-4" /> Atur pengiriman
+              </button>
+            )}
+            {canPrint && (
+              <button
+                onClick={() => { setMenuOpen(false); router.push(`/print?ids=${order.id}`) }}
+                className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2"
+              >
+                <Printer className="w-4 h-4" /> Cetak resi
               </button>
             )}
             {canRetry && (

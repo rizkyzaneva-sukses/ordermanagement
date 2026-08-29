@@ -893,12 +893,19 @@ async function resyncOrderPackages(store, orderSn, accessToken) {
     const match = existing.find(e => e.packageNumber === packageNumber);
 
     const data = {
-      status:             row.status || 'READY_TO_SHIP',
+      // The local row's own status is a better fallback than READY_TO_SHIP:
+      // this runs on settled orders too now, and inventing "siap kirim" for a
+      // delivered parcel would put work back on the operator's list that does
+      // not exist.
+      status:             row.status || match?.status || 'READY_TO_SHIP',
       logisticsStatus:    row.logisticsStatus || null,
       logisticsChannelId: row.logisticsChannelId ?? null,
       shippingCourier:    row.shippingCourier || '',
       shippingService:    row.shippingService || '',
       trackingNumber:     row.trackingNumber || null,
+      // Was missing entirely, so re-syncing an order used to wipe out the
+      // shipping deadline the list sorts by.
+      shipByDate:         row.shipByDate ?? match?.shipByDate ?? null,
       items:              JSON.stringify(row.items || []),
     };
 
@@ -943,6 +950,81 @@ async function resyncOrderPackages(store, orderSn, accessToken) {
 
   console.log(`[fulfillment] Resynced ${orderSn}: ${created} created, ${updated} updated, ${removable.length} removed`);
   return { created, updated, removed: removable.length };
+}
+
+/**
+ * Re-read one order straight from Shopee and rewrite its rows.
+ *
+ * The per-order equivalent of a sync, and the answer to the situation that
+ * prompted it: an order processed elsewhere — Seller Centre, Komplace — stays
+ * stale here until the next scheduled run happens to come round. The operator
+ * could see it was wrong and had nothing to do about it but wait.
+ *
+ * "Ambil nomor resi" was the closest thing available and it only ever fetched
+ * the waybill; it never touched the status, which is exactly the field that
+ * looked wrong.
+ *
+ * Reports what actually changed rather than a bare success: the operator
+ * clicked because they suspected the row was behind, so "Perlu Diproses →
+ * Sudah Diatur" is the answer they came for, and "tidak ada perubahan" is a
+ * real answer too.
+ *
+ * @param {string} orderRowId
+ * @returns {Promise<Object>}
+ */
+async function syncSingleOrder(orderRowId) {
+  const ctx = await loadContext(orderRowId);
+  const before = ctx.order;
+
+  const result = await resyncOrderPackages(ctx.store, ctx.order.orderId, ctx.accessToken);
+
+  // get_order_detail reports the waybill only once the 3PL has issued one, and
+  // for a split order it belongs to a specific package (KB §9). Chased here so
+  // one click really does mean "everything Shopee can tell me about this
+  // order", instead of leaving a second menu item to remember.
+  const rowsAfter = await prisma.order.findMany({
+    where: { storeId: ctx.store.id, orderId: ctx.order.orderId },
+  });
+
+  for (const row of rowsAfter) {
+    if (row.trackingNumber) continue;
+    if (!['PROCESSED', 'RETRY_SHIP', 'SHIPPED'].includes(row.status)) continue;
+    try {
+      await refreshTracking(row.id);
+    } catch (err) {
+      // Not an error worth failing the sync over: the courier commonly has not
+      // issued a number yet, and the status refresh above already succeeded.
+      console.warn(`[fulfillment] Sync ${ctx.order.orderId}: tracking lookup failed (${err.message})`);
+    }
+  }
+
+  const after = await prisma.order.findUnique({ where: { id: orderRowId } })
+    // A split can retire the exact row that was clicked; fall back to the order.
+    || (await prisma.order.findFirst({ where: { storeId: ctx.store.id, orderId: ctx.order.orderId } }));
+
+  const changes = [];
+  if (after && before.status !== after.status) {
+    changes.push({ field: 'status', from: before.status, to: after.status });
+  }
+  if (after && before.logisticsStatus !== after.logisticsStatus) {
+    changes.push({ field: 'logisticsStatus', from: before.logisticsStatus, to: after.logisticsStatus });
+  }
+  if (after && before.trackingNumber !== after.trackingNumber) {
+    changes.push({ field: 'trackingNumber', from: before.trackingNumber, to: after.trackingNumber });
+  }
+  if (result.created > 0 || result.removed > 0) {
+    changes.push({ field: 'packages', from: `${result.created + result.updated + result.removed}`, to: `${rowsAfter.length}` });
+  }
+
+  console.log(`[fulfillment] Synced ${ctx.order.orderId}: ${changes.length} change(s)`);
+
+  return {
+    orderId: ctx.order.orderId,
+    changed: changes.length > 0,
+    changes,
+    order: after,
+    ...result,
+  };
 }
 
 /**
@@ -1671,6 +1753,7 @@ async function fetchAwbDataForRows(rows) {
 }
 
 module.exports = {
+  syncSingleOrder,
   getRetryShippingOptions,
   getMassRetryOptions,
   massRetryShipment,

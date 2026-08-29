@@ -974,6 +974,18 @@ router.post('/refresh-tracking-all', fulfillmentRoute('Refresh tracking (semua)'
 }));
 
 /**
+ * POST /:id/sync - Re-read this one order from Shopee
+ *
+ * The per-order counterpart of the store-wide sync. An order processed in
+ * Seller Centre or Komplace looks stale here until the 15-minute run comes
+ * round, and until now there was nothing to do about it but wait.
+ */
+router.post('/:id/sync', fulfillmentRoute('Sync order', async (req) => {
+  await loadAccessibleOrder(req.user, req.params.id);
+  return fulfillmentService.syncSingleOrder(req.params.id);
+}));
+
+/**
  * GET /:id/shipping-options - Modes, pickup addresses and time slots
  */
 router.get('/:id/shipping-options', fulfillmentRoute('Shipping options', async (req) => {
