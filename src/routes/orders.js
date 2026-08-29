@@ -29,6 +29,18 @@ router.use(authenticate);
 const AWAITING_SHIPMENT = ['READY_TO_SHIP', 'RETRY_SHIP', 'PROCESSED'];
 
 /**
+ * "Belum dicetak" only means something for an order that could still be
+ * printed, and a cancelled one never will be.
+ *
+ * Now that sync pulls cancellations, leaving them in would answer one wrong
+ * number by creating another: the Semua tab would start reporting every
+ * cancelled order of the day as a label waiting to be printed. IN_CANCEL is
+ * deliberately not here — a cancellation the seller rejects goes back to being
+ * shippable, so that label may yet be needed.
+ */
+const NEVER_PRINTED = { AND: [{ status: { not: 'CANCELLED' } }] };
+
+/**
  * How the list is ordered.
  *
  * `deadline` is the order the work actually has to be done in: an order due
@@ -164,6 +176,7 @@ router.get('/', async (req, res) => {
     const listWhere = { ...where };
     if (printFilter === 'unprinted' || printFilter === 'belum') {
       listWhere.printedAt = null;
+      Object.assign(listWhere, NEVER_PRINTED);
     } else if (printFilter === 'printed' || printFilter === 'sudah') {
       listWhere.printedAt = { not: null };
     }
@@ -207,7 +220,7 @@ router.get('/', async (req, res) => {
 
     const [statusRows, unprintedCount, printedCount, awaitingTrackingCount, overdueCount, dueTodayCount] = await Promise.all([
       prisma.order.groupBy({ by: ['status'], where: tabAgnosticWhere, _count: { _all: true } }),
-      prisma.order.count({ where: { ...where, printedAt: null } }),
+      prisma.order.count({ where: { ...where, printedAt: null, ...NEVER_PRINTED } }),
       prisma.order.count({ where: { ...where, printedAt: { not: null } } }),
       // Restricted to orders a waybill can still be issued for, because this
       // number labels the "Ambil semua nomor resi" button — counting an UNPAID

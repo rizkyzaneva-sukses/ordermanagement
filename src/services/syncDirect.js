@@ -339,6 +339,18 @@ async function runStoreSync(storeId) {
       'PROCESSED',       // Seller sudah ship_order, tracking mungkin belum terbit
       'SHIPPED',         // Kurir sudah scan AWB → pasti ada tracking number
       'UNPAID',          // Belum bayar (opsional, untuk monitoring)
+      // An order created and cancelled between two syncs never passed through a
+      // status anything here fetched, so it never got a row at all — which is
+      // why the "Semua" total sat five short of Seller Centre on a day with
+      // seven cancellations. Cheap to add: a cancellation is a small set, and
+      // orderNeedsDetail treats CANCELLED as settled, so each one costs a
+      // single detail read once and is skipped on every run after that.
+      'CANCELLED',
+      // Not merely a counting fix. IN_CANCEL is a buyer asking to cancel, and
+      // it is auto-approved once the window closes (KB §2.2) — so an order
+      // nobody here ever saw is a decision made by default rather than by the
+      // seller.
+      'IN_CANCEL',
     ];
 
     // Pass 0: package numbers for everything still awaiting fulfillment.
@@ -661,7 +673,10 @@ async function upsertOrderRows(storeId, orders) {
 // the order stops appearing in the UNPAID pass — so without reconciliation the
 // row keeps claiming UNPAID forever, inflating the order count and hiding the
 // cancellation.
-const ACTIONABLE_STATUSES = ['UNPAID', 'READY_TO_SHIP', 'RETRY_SHIP', 'PROCESSED'];
+// IN_CANCEL belongs here for the same reason UNPAID does: the moment the buyer
+// withdraws the request or the window closes, Shopee stops listing it and the
+// row would otherwise claim "Minta Batal" forever.
+const ACTIONABLE_STATUSES = ['UNPAID', 'READY_TO_SHIP', 'RETRY_SHIP', 'PROCESSED', 'IN_CANCEL'];
 
 /**
  * Statuses that have stopped being work but have not stopped changing.

@@ -63,3 +63,22 @@ test('an order not in the database yet is fetched', () => {
 test('an unknown status is fetched rather than assumed settled', () => {
   assert.equal(orderNeedsDetail('SOME_NEW_SHOPEE_STATUS', [row('SOME_NEW_SHOPEE_STATUS')]), true);
 });
+
+test('a cancellation reaches the database once, then stops costing anything', () => {
+  // The gap this closed: an order created and cancelled between two syncs never
+  // passed through a status the sync fetched, so it never got a row — which is
+  // why the Semua total sat short of Seller Centre by exactly the day's
+  // cancellations.
+  assert.equal(orderNeedsDetail('CANCELLED', []), true, 'never seen → must be fetched');
+  assert.equal(orderNeedsDetail('CANCELLED', [row('READY_TO_SHIP')]), true, 'row is behind → must be fetched');
+  // And the part that keeps it cheap: once written, it is never read again.
+  assert.equal(orderNeedsDetail('CANCELLED', [row('CANCELLED')]), false);
+});
+
+test("a buyer's pending cancellation is always re-read", () => {
+  // IN_CANCEL is a decision waiting on the seller and auto-approves when the
+  // window closes, so it must never be treated as settled — not even when the
+  // local row already agrees.
+  assert.equal(orderNeedsDetail('IN_CANCEL', [row('IN_CANCEL')]), true);
+  assert.equal(orderNeedsDetail('IN_CANCEL', []), true);
+});
