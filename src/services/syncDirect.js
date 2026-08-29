@@ -663,8 +663,52 @@ async function upsertOrderRows(storeId, orders) {
 // cancellation.
 const ACTIONABLE_STATUSES = ['UNPAID', 'READY_TO_SHIP', 'RETRY_SHIP', 'PROCESSED'];
 
+/**
+ * Statuses that have stopped being work but have not stopped changing.
+ *
+ * A shipped parcel still becomes COMPLETED, or gets cancelled or returned — and
+ * nothing here ever noticed. `SHIPPED` was absent from the list below, so once
+ * a row reached it no sync ever read that order again: it stayed "Dikirim"
+ * forever, months after the buyer received it. Three visible consequences, all
+ * from this one gap — the Dikirim tab grew without bound and could never match
+ * Seller Centre, the dashboard's "Selesai" tile was structurally always zero,
+ * and nothing in the app could tell that a parcel had arrived.
+ *
+ * Kept separate from ACTIONABLE_STATUSES because the two are not equally
+ * urgent: an actionable order drifting means an operator acting on wrong
+ * information, while a shipped one drifting is a number being wrong. When the
+ * budget is tight, the operator wins.
+ */
+const SETTLING_STATUSES = ['SHIPPED', 'TO_CONFIRM_RECEIVE'];
+
 /** Ceiling on re-reads per sync, so reconciliation cannot dominate the run. */
 const RECONCILE_LIMIT = 200;
+
+/**
+ * Split the re-read budget between orders that still need a decision and
+ * orders that are merely settling.
+ *
+ * Actionable orders take the budget first and, when there are more of them
+ * than the ceiling allows, take all of it. Shipped orders are drained with
+ * whatever is left, oldest-untouched first, so a shop with a long history of
+ * stale rows works through it across runs instead of in one enormous sync.
+ *
+ * @param {string[]} actionable - Unseen order_sns still awaiting an operator
+ * @param {string[]} settling - Unseen order_sns already shipped
+ * @param {number} [limit=RECONCILE_LIMIT]
+ * @returns {{ orderSns: string[], deferred: number, fromSettling: number }}
+ */
+function planReconciliation(actionable, settling, limit = RECONCILE_LIMIT) {
+  const orderSns = actionable.slice(0, limit);
+  const room = limit - orderSns.length;
+  const fromSettling = room > 0 ? settling.slice(0, room) : [];
+
+  return {
+    orderSns: [...orderSns, ...fromSettling],
+    deferred: (actionable.length - orderSns.length) + (settling.length - fromSettling.length),
+    fromSettling: fromSettling.length,
+  };
+}
 
 /**
  * Re-read orders that are still actionable locally but did not come back in
@@ -690,23 +734,30 @@ const RECONCILE_LIMIT = 200;
  * @returns {Promise<number>} How many order_sns were re-read
  */
 async function reconcileUnseenShopeeOrders(store, accessToken, seenOrderSns) {
-  const rows = await prisma.order.findMany({
-    where: { storeId: store.id, status: { in: ACTIONABLE_STATUSES } },
-    select: { orderId: true },
-    distinct: ['orderId'],
-    orderBy: { updatedAt: 'asc' },
-  });
+  // Filtered in JS rather than with a `notIn`: the seen set runs to thousands
+  // of order_sns on a busy shop, and that becomes an enormous SQL statement.
+  const unseenIn = async (statuses) => {
+    const rows = await prisma.order.findMany({
+      where: { storeId: store.id, status: { in: statuses } },
+      select: { orderId: true },
+      distinct: ['orderId'],
+      orderBy: { updatedAt: 'asc' },
+    });
+    return rows.map(r => r.orderId).filter(sn => !seenOrderSns.has(sn));
+  };
 
-  // Filtered here rather than with a `notIn`: the seen set runs to thousands of
-  // order_sns on a busy shop, and that becomes an enormous SQL statement.
-  const allUnseen = rows.map(r => r.orderId).filter(sn => !seenOrderSns.has(sn));
-  const unseen = allUnseen.slice(0, RECONCILE_LIMIT);
+  const actionable = await unseenIn(ACTIONABLE_STATUSES);
+  // Only queried when there is budget left for them, so a shop drowning in
+  // actionable drift does not pay for a second scan it cannot act on.
+  const settling = actionable.length >= RECONCILE_LIMIT ? [] : await unseenIn(SETTLING_STATUSES);
+
+  const { orderSns: unseen, deferred, fromSettling } = planReconciliation(actionable, settling);
 
   if (unseen.length === 0) return 0;
 
-  const deferred = allUnseen.length - unseen.length;
-  console.log(`[sync] Reconciling ${unseen.length} order(s) Shopee did not return this run${
-    deferred > 0 ? ` (${deferred} more next run)` : ''}`);
+  console.log(`[sync] Reconciling ${unseen.length} order(s) Shopee did not return this run` +
+    ` (${unseen.length - fromSettling} still actionable, ${fromSettling} already shipped)` +
+    (deferred > 0 ? ` — ${deferred} more next run` : ''));
 
   let reconciled = 0;
 
@@ -717,10 +768,16 @@ async function reconcileUnseenShopeeOrders(store, accessToken, seenOrderSns) {
       const resp = await shopeeService.getOrderDetail(accessToken, store.shopId, chunk);
       const details = resp.response?.order_list || [];
 
-      const refreshed = details.flatMap(o => expandShopeeOrderToPackages(o).map(row => ({
-        ...row,
-        status: row.status || 'READY_TO_SHIP',
-      })));
+      // No invented status here. The old fallback to READY_TO_SHIP was harmless
+      // while only actionable orders were reconciled; now that a delivered
+      // order can pass through, guessing would drag it back into "Perlu
+      // Dikirim" as work nobody has to do. Leaving the row untouched is the
+      // honest answer to a detail call that came back without a status.
+      const refreshed = details.flatMap(o => expandShopeeOrderToPackages(o)).filter((row) => {
+        if (row.status) return true;
+        console.warn(`[sync] Reconciliation: ${row.orderId} returned no order_status — left as it was rather than guessed`);
+        return false;
+      });
 
       await backfillShopeeTracking(accessToken, store.shopId, refreshed);
       await upsertOrderRows(store.id, refreshed);
@@ -837,4 +894,9 @@ module.exports = {
   // Exported for testing: reads a response shape the KB does not document, so
   // its tolerance for variation is worth pinning down.
   extractTrackingResults,
+  // Exported for testing: decides which stale orders a run spends its re-read
+  // budget on, and getting that priority wrong is invisible until an operator
+  // acts on a status that was never refreshed.
+  planReconciliation,
+  SETTLING_STATUSES,
 };
