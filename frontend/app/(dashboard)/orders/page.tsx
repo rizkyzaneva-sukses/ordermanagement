@@ -76,8 +76,14 @@ interface SyncCheck {
     status: string
     /** null when Shopee's pass for this status failed — not zero. */
     shopee: number | null
-    local: number
-    diff: number | null
+    /** Orders whose stored status is consistent with Shopee's bucket. */
+    agreed: number
+    /** Orders whose stored status is behind Shopee's. The number that matters. */
+    behind: number
+    /** Which statuses those behind orders are sitting in. */
+    behindStatuses: Record<string, number>
+    /** Only present for an unanswered status: what we hold, unverified. */
+    local?: number
     unanswered: boolean
   }>
   missingLocally: number
@@ -1273,7 +1279,7 @@ export default function OrdersPage() {
             const check = store.check!
             // Only the rows that say something. A full tally per store buries
             // the one line that matters behind nine that do not.
-            const notable = check.statuses.filter((row) => row.unanswered || row.diff !== 0)
+            const notable = check.statuses.filter((row) => row.unanswered || row.behind > 0)
 
             return (
               <div key={store.id} className="rounded-lg border border-gray-200 dark:border-slate-700 p-3">
@@ -1307,12 +1313,21 @@ export default function OrdersPage() {
                             Shopee tidak menjawab — {row.local} tersimpan, belum terperiksa
                           </span>
                         ) : (
+                          /* Named, not just counted: "1 beda" is a fact, "1
+                             tercatat Sudah Diatur" is something to act on. */
                           <span className="text-gray-600 dark:text-slate-300">
                             Shopee <span className="font-medium">{row.shopee}</span>
-                            {' · '}OrderPro <span className="font-medium">{row.local}</span>
-                            <span className="ml-1.5 font-medium text-amber-700 dark:text-amber-400">
-                              {row.diff! > 0 ? `+${row.diff}` : row.diff}
+                            {' · '}
+                            <span className="font-medium text-amber-700 dark:text-amber-400">
+                              {row.behind} tertinggal
                             </span>
+                            {Object.keys(row.behindStatuses).length > 0 && (
+                              <span className="text-gray-500 dark:text-slate-400">
+                                {' '}(tercatat {Object.entries(row.behindStatuses)
+                                  .map(([st, n]) => `${n} ${STATUS_LABELS[st] || st}`)
+                                  .join(', ')})
+                              </span>
+                            )}
                           </span>
                         )}
                       </div>
@@ -1323,12 +1338,19 @@ export default function OrdersPage() {
                         {check.missingLocally} pesanan disebut Shopee tapi tidak tersimpan di sini.
                       </p>
                     )}
-                    {check.staleCandidates > 0 && (
-                      <p className="text-xs text-gray-500 dark:text-slate-400 pt-1">
-                        {check.staleCandidates} pesanan aktif di sini tidak disebut Shopee — kemungkinan statusnya sudah pindah.
-                      </p>
-                    )}
                   </div>
+                )}
+
+                {/* Shown whether or not the store matched. Shopee not
+                    mentioning an order is not a disagreement — it is usually an
+                    order that aged out of the window, and reconciliation drains
+                    those on its own — so it must not turn the badge amber. But
+                    burying it inside the mismatch branch would hide it exactly
+                    when everything else looks fine. */}
+                {check.staleCandidates > 0 && (
+                  <p className="text-xs text-gray-500 dark:text-slate-400 mt-1.5">
+                    {check.staleCandidates} pesanan aktif di sini tidak disebut Shopee putaran ini — biasanya sudah di luar jendela 15 hari, dan dibaca ulang sendiri oleh rekonsiliasi.
+                  </p>
                 )}
               </div>
             )

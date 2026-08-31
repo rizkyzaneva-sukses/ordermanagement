@@ -23,6 +23,62 @@
 const ACTIVE_STATUSES = new Set(['UNPAID', 'READY_TO_SHIP', 'RETRY_SHIP', 'PROCESSED', 'IN_CANCEL']);
 
 /**
+ * How far along an order is, as a single ordered scale.
+ *
+ * Shopee describes the same order two different ways depending on which
+ * question you ask. `get_order_list` answers with a coarse bucket; the detail
+ * for that very order can come back finer. Real example from a live shop: 498
+ * orders listed under SHIPPED, whose details were SHIPPED (494),
+ * TO_CONFIRM_RECEIVE (3) and TO_RETURN (1). Nothing was wrong — the same
+ * parcels, named two ways.
+ *
+ * Comparing those labels literally reported four missing orders that were never
+ * missing, which is the failure this whole panel exists to avoid: an indicator
+ * built for trust that cries wolf gets ignored, and then it may as well not
+ * exist.
+ *
+ * IN_CANCEL sits deliberately between PROCESSED and SHIPPED. It is not a stage
+ * of its own so much as a request laid over whatever stage the order had
+ * reached, and Shopee keeps listing such an order under its fulfilment status —
+ * which is why "Minta Batal +1 / Sudah Diatur −1" appeared on three shops at
+ * once, always summing to zero.
+ */
+const STAGE = {
+  UNPAID:             0,
+  READY_TO_SHIP:      1,
+  RETRY_SHIP:         1,
+  PROCESSED:          2,
+  IN_CANCEL:          2.5,
+  SHIPPED:            3,
+  TO_CONFIRM_RECEIVE: 3,
+  TO_RETURN:          3,
+  COMPLETED:          4,
+  CANCELLED:          5,
+};
+
+/**
+ * Is what we hold consistent with the bucket Shopee listed the order in?
+ *
+ * Only being *behind* counts as a disagreement. Holding a status further along
+ * than the list said is not an error: the list is a snapshot taken at the start
+ * of the run, and the detail read that followed is by definition newer. Warning
+ * about our own data being more current would be noise.
+ *
+ * An unknown status on either side is treated as a disagreement rather than
+ * waved through — a status nobody here has seen before is exactly the thing
+ * worth looking at.
+ */
+function isConsistent(listStatus, localStatus) {
+  if (listStatus === localStatus) return true;
+
+  const listStage = STAGE[listStatus];
+  const localStage = STAGE[localStatus];
+  if (listStage === undefined || localStage === undefined) return false;
+
+  return localStage >= listStage;
+}
+
+/**
  * Compare what Shopee reported against what is stored.
  *
  * @param {Object} input
@@ -42,7 +98,10 @@ function buildSyncCheck({ shopeeStatuses, localRows, unanswered = [] }) {
   }
 
   const shopee = new Map();
-  const local = new Map();
+  const agreed = new Map();
+  // Which local statuses the disagreeing orders are sitting in, per bucket —
+  // "1 beda" is a fact, "1 tercatat Minta Batal" is something to act on.
+  const behind = new Map();
   let missingLocally = 0;
 
   for (const [orderSn, status] of shopeeStatuses) {
@@ -56,7 +115,14 @@ function buildSyncCheck({ shopeeStatuses, localRows, unanswered = [] }) {
       missingLocally++;
       continue;
     }
-    local.set(localStatus, (local.get(localStatus) || 0) + 1);
+
+    if (isConsistent(status, localStatus)) {
+      agreed.set(status, (agreed.get(status) || 0) + 1);
+    } else {
+      if (!behind.has(status)) behind.set(status, new Map());
+      const perLocal = behind.get(status);
+      perLocal.set(localStatus, (perLocal.get(localStatus) || 0) + 1);
+    }
   }
 
   // Rows we hold in a status that still needs work, which Shopee did not
@@ -80,27 +146,26 @@ function buildSyncCheck({ shopeeStatuses, localRows, unanswered = [] }) {
   // its whole point is telling the operator that this status went unchecked.
   // Leaving it out would render an unverified status identically to a verified
   // one, which is the exact confusion this panel exists to remove.
-  const allStatuses = [...new Set([...shopee.keys(), ...local.keys(), ...unanswered])].sort();
+  const allStatuses = [...new Set([...shopee.keys(), ...unanswered])].sort();
 
   const statuses = allStatuses.map((status) => {
     if (unanswered.includes(status)) {
       // Not zero. Shopee answered nothing, and a null says so.
-      return { status, shopee: null, local: localAll.get(status) || 0, diff: null, unanswered: true };
+      return { status, shopee: null, agreed: 0, behind: 0, behindStatuses: {}, local: localAll.get(status) || 0, unanswered: true };
     }
-    const shopeeCount = shopee.get(status) || 0;
-    const localCount = local.get(status) || 0;
+    const perLocal = behind.get(status) || new Map();
+    const behindCount = [...perLocal.values()].reduce((n, c) => n + c, 0);
     return {
       status,
-      shopee: shopeeCount,
-      local: localCount,
-      // Reported rather than left to the reader to subtract, because this is
-      // the number that decides whether anything is wrong.
-      diff: localCount - shopeeCount,
+      shopee: shopee.get(status) || 0,
+      agreed: agreed.get(status) || 0,
+      behind: behindCount,
+      behindStatuses: Object.fromEntries(perLocal),
       unanswered: false,
     };
   });
 
-  const matched = statuses.every((s) => s.unanswered || s.diff === 0)
+  const matched = statuses.every((s) => s.unanswered || s.behind === 0)
     && missingLocally === 0
     && unanswered.length === 0;
 
@@ -114,4 +179,4 @@ function buildSyncCheck({ shopeeStatuses, localRows, unanswered = [] }) {
   };
 }
 
-module.exports = { ACTIVE_STATUSES, buildSyncCheck };
+module.exports = { ACTIVE_STATUSES, STAGE, isConsistent, buildSyncCheck };
