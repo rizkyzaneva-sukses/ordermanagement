@@ -16,6 +16,7 @@ const shopeeService  = require('./shopee.js');
 const tiktokService  = require('./tiktok.js');
 const { ensureFreshToken, isReconnectError } = require('./tokens.js');
 const { orderNeedsDetail } = require('./orderRefresh.js');
+const { buildSyncCheck } = require('../utils/syncCheck.js');
 
 // ── Shopee helpers ────────────────────────────────────────────────────────────
 
@@ -312,6 +313,10 @@ async function runStoreSync(storeId) {
   // Shopee only: every order_sn the platform mentioned this run, whether or not
   // we went on to fetch its detail.
   let shopeeSeenSns = null;
+  // Kept for the post-run check: what Shopee said sits in each status, which is
+  // the only independent yardstick this app has for its own data.
+  let shopeeStatuses = null;
+  const unansweredStatuses = new Set();
   // A status pass that fails takes every order in that status out of the run,
   // which used to be a console.warn and nothing else — the sync still reported
   // success while rows quietly went stale. Collected here and surfaced by
@@ -379,6 +384,7 @@ async function runStoreSync(storeId) {
       } catch (err) {
         console.warn(`[sync] create_time | Could not fetch status ${orderStatus}: ${err.message}`);
         warnings.push(`create_time/${orderStatus}: ${err.message}`);
+        unansweredStatuses.add(orderStatus);
       }
     }));
 
@@ -404,6 +410,11 @@ async function runStoreSync(storeId) {
       } catch (err) {
         console.warn(`[sync] update_time | Could not fetch status ${orderStatus}: ${err.message}`);
         warnings.push(`update_time/${orderStatus}: ${err.message}`);
+        // Marked unanswered even though the create_time pass may have covered
+        // part of it. A trust indicator should err towards "not verified":
+        // claiming a status was checked when one of its two passes was lost is
+        // the failure mode this whole panel exists to remove.
+        unansweredStatuses.add(orderStatus);
       }
     }));
 
@@ -413,6 +424,7 @@ async function runStoreSync(storeId) {
     // Everything Shopee reported this run, settled ones included — used by the
     // reconciliation pass to tell "not refreshed" from "not mentioned".
     shopeeSeenSns = new Set(discovered);
+    shopeeStatuses = allOrderSns;
 
     // Only orders that can still tell us something get a detail call. On a shop
     // with thousands of orders the old behaviour re-read every one of them
@@ -518,9 +530,37 @@ async function runStoreSync(storeId) {
     reconciled = await reconcileUnseenShopeeOrders(store, accessToken, shopeeSeenSns);
   }
 
+  // Does what we now hold actually agree with what Shopee reported? Asked after
+  // the writes and the reconciliation, so it grades the finished run rather
+  // than its starting point — "sync berhasil" only ever meant the request went
+  // through, which is a different claim entirely.
+  let syncCheck = null;
+  if (store.platform === 'SHOPEE' && shopeeStatuses) {
+    try {
+      const localRows = await prisma.order.findMany({
+        where: { storeId },
+        select: { orderId: true, status: true },
+        distinct: ['orderId'],
+      });
+      syncCheck = buildSyncCheck({
+        shopeeStatuses,
+        localRows,
+        unanswered: [...unansweredStatuses],
+      });
+      console.log(`[sync] Check for store ${storeId}: ${syncCheck.matched ? 'cocok dengan Shopee' : 'ADA SELISIH'}` +
+        (syncCheck.missingLocally ? ` — ${syncCheck.missingLocally} pesanan tidak tersimpan` : ''));
+    } catch (err) {
+      // A diagnostic must never be able to fail the sync it is diagnosing.
+      console.warn(`[sync] Could not build the sync check for store ${storeId}: ${err.message}`);
+    }
+  }
+
   await prisma.store.update({
     where: { id: storeId },
-    data:  { lastSyncAt: new Date() },
+    data:  {
+      lastSyncAt: new Date(),
+      ...(syncCheck ? { lastSyncCounts: JSON.stringify(syncCheck) } : {}),
+    },
   });
 
   console.log(`[sync] Completed sync for store ${storeId}: ${created} created, ${updated} updated, ${reconciled} reconciled`);

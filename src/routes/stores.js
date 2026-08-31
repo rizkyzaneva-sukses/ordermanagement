@@ -29,6 +29,12 @@ function storeStatus(store) {
   if (store.needsReconnect) return 'NEEDS_RECONNECT';
   if (store.tokenExpiry && new Date(store.tokenExpiry) < new Date()) return 'TOKEN_EXPIRED';
   if (store.lastSyncStatus === 'ERROR') return 'SYNC_ERROR';
+  // A run that lost one status pass finished, but not completely: the orders in
+  // that status were never refreshed, and their rows go stale without anything
+  // looking broken. Sync has recorded this all along; this page was showing it
+  // as a healthy "Terhubung", which is how drift stays invisible until someone
+  // compares against Seller Centre by hand.
+  if (store.lastSyncStatus === 'PARTIAL') return 'SYNC_PARTIAL';
   return 'ACTIVE';
 }
 

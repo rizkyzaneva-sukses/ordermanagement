@@ -17,7 +17,7 @@ import {
   Unlink,
 } from 'lucide-react'
 
-type StoreStatus = 'ACTIVE' | 'TOKEN_EXPIRED' | 'NEEDS_RECONNECT' | 'SYNC_ERROR' | 'ERROR'
+type StoreStatus = 'ACTIVE' | 'TOKEN_EXPIRED' | 'NEEDS_RECONNECT' | 'SYNC_PARTIAL' | 'SYNC_ERROR' | 'ERROR'
 
 interface StoreData {
   id: string
@@ -48,6 +48,9 @@ const statusConfig: Record<string, { label: string; class: string; icon: any }> 
   // Re-authorization is the only fix, so this must not look like the expiry
   // above — that one the Reconnect button can still repair on its own.
   NEEDS_RECONNECT: { label: 'Perlu Otorisasi Ulang', class: 'bg-orange-100 text-orange-700 dark:bg-orange-950/60 dark:text-orange-300', icon: Unlink },
+  // Distinct from Sync Gagal on purpose: the run succeeded, it just came back
+  // incomplete — the rows it missed are quietly stale rather than absent.
+  SYNC_PARTIAL: { label: 'Sync Sebagian', class: 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300', icon: AlertTriangle },
   SYNC_ERROR: { label: 'Sync Gagal', class: 'bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300', icon: AlertTriangle },
   ERROR: { label: 'Error', class: 'bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300', icon: AlertCircle },
 }
@@ -405,8 +408,15 @@ export default function StoresPage() {
                             {/* Recorded by every failed sync but never shown, so
                                 a shop that stopped pulling orders looked the
                                 same as one with nothing to pull. */}
-                            {store.status === 'SYNC_ERROR' && store.lastSyncError && (
-                              <p className="text-xs font-normal text-red-600 dark:text-red-400 truncate max-w-[260px]" title={store.lastSyncError}>
+                            {(store.status === 'SYNC_ERROR' || store.status === 'SYNC_PARTIAL') && store.lastSyncError && (
+                              <p
+                                className={`text-xs font-normal truncate max-w-[260px] ${
+                                  store.status === 'SYNC_PARTIAL'
+                                    ? 'text-amber-700 dark:text-amber-400'
+                                    : 'text-red-600 dark:text-red-400'
+                                }`}
+                                title={store.lastSyncError}
+                              >
                                 {store.lastSyncError}
                               </p>
                             )}
@@ -455,7 +465,7 @@ export default function StoresPage() {
                                 <Zap className="w-4 h-4" />
                               )}
                             </button>
-                          ) : store.status !== 'ACTIVE' ? (
+                          ) : store.status !== 'ACTIVE' && store.status !== 'SYNC_PARTIAL' ? (
                             <button
                               onClick={() => handleReconnect(store.id)}
                               disabled={reconnecting === store.id}

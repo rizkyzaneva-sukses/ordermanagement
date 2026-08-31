@@ -45,6 +45,11 @@ model Store {
   // Set when the platform rejected our refresh token — the only fix is for the
   // merchant to re-authorize, so retrying is pointless until they do.
   needsReconnect Boolean @default(false)
+  // What Shopee reported per status on the last run, against what we hold —
+  // JSON, written by the sync itself. Without it "sync berhasil" is the only
+  // signal there is, and that answers "did I reach Shopee", not "is my data
+  // right". Those turned out to be very different questions.
+  lastSyncCounts String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 

@@ -19,6 +19,8 @@ import {
   X,
   Clock,
   RotateCcw,
+  Check,
+  ChevronDown,
 } from 'lucide-react'
 
 interface OrderItem {
@@ -66,6 +68,23 @@ interface Store {
   platform: string
 }
 
+/** How one store's last run compared with what Shopee reported. */
+interface SyncCheck {
+  at: string
+  matched: boolean
+  statuses: Array<{
+    status: string
+    /** null when Shopee's pass for this status failed — not zero. */
+    shopee: number | null
+    local: number
+    diff: number | null
+    unanswered: boolean
+  }>
+  missingLocally: number
+  staleCandidates: number
+  unanswered: string[]
+}
+
 interface SyncStoreState {
   id: string
   name: string
@@ -75,6 +94,7 @@ interface SyncStoreState {
   lastSyncStatus: 'OK' | 'PARTIAL' | 'ERROR' | null
   lastSyncError: string | null
   needsReconnect: boolean
+  check?: SyncCheck | null
 }
 
 interface SyncStatus {
@@ -83,6 +103,8 @@ interface SyncStatus {
   /** Runs that finished but lost a status pass, so some rows went unrefreshed */
   partial: number
   needsReconnect: number
+  /** Summary of the comparison against Shopee across all stores. */
+  check?: { checked: number; matched: number; mismatched: number }
   redisReady: boolean
   workerRunning: boolean
   /** Whether the repeatable sync jobs are registered — a reachable Redis is
@@ -347,6 +369,7 @@ export default function OrdersPage() {
   /** Orders past their deadline, and due before midnight — what to work on first. */
   const [urgency, setUrgency] = useState({ overdue: 0, dueToday: 0 })
   const [sort, setSort] = useState<SortKey>('newest')
+  const [checkOpen, setCheckOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [stores, setStores] = useState<Store[]>([])
@@ -1133,6 +1156,35 @@ export default function OrdersPage() {
               </span>
             </p>
           )}
+
+          {/* Freshness was the only thing this corner reported, and "baru" is
+              not "benar" — every discrepancy chased so far was found by opening
+              Seller Centre in another tab and counting by hand. This says
+              whether the last run's own numbers agreed with Shopee's. */}
+          {syncStatus?.check && syncStatus.check.checked > 0 && (
+            <button
+              type="button"
+              onClick={() => setCheckOpen((v) => !v)}
+              className={`mt-1.5 inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+                syncStatus.check.mismatched > 0
+                  ? 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-950/60'
+                  : 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-950/60'
+              }`}
+            >
+              {syncStatus.check.mismatched > 0 ? (
+                <>
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  {syncStatus.check.mismatched} toko tidak cocok dengan Shopee
+                </>
+              ) : (
+                <>
+                  <Check className="w-3.5 h-3.5" />
+                  Cocok dengan Shopee ({syncStatus.check.matched} toko)
+                </>
+              )}
+              <ChevronDown className={`w-3.5 h-3.5 transition-transform ${checkOpen ? 'rotate-180' : ''}`} />
+            </button>
+          )}
         </div>
         <button onClick={handleSync} disabled={syncing} className="btn-primary self-start sm:self-auto flex items-center gap-2">
           {syncing ? (
@@ -1205,6 +1257,82 @@ export default function OrdersPage() {
             Worker sync tidak berjalan. Sync manual tetap bekerja (dijalankan langsung di server), tapi sync
             otomatis tiap 15 menit tidak akan jalan sampai <code className="font-mono">npm run worker</code> dihidupkan.
           </p>
+        </div>
+      )}
+
+      {/* The comparison itself, opened only when asked for. Per store, per
+          status: what Shopee said against what is stored. */}
+      {checkOpen && (
+        <div className="card p-4 space-y-4">
+          <p className="text-xs text-gray-500 dark:text-slate-400">
+            Angka Shopee diambil dari jawaban sync terakhir, dibandingkan dengan isi OrderPro untuk pesanan yang sama.
+            Hanya status yang ditanyakan sync yang bisa dibandingkan.
+          </p>
+
+          {(syncStatus?.stores || []).filter((st) => st.check).map((store) => {
+            const check = store.check!
+            // Only the rows that say something. A full tally per store buries
+            // the one line that matters behind nine that do not.
+            const notable = check.statuses.filter((row) => row.unanswered || row.diff !== 0)
+
+            return (
+              <div key={store.id} className="rounded-lg border border-gray-200 dark:border-slate-700 p-3">
+                <div className="flex items-center justify-between gap-3 mb-1.5">
+                  <p className="text-sm font-medium text-gray-900 dark:text-slate-100">{store.name}</p>
+                  <span className={`text-xs font-medium ${
+                    check.matched
+                      ? 'text-emerald-700 dark:text-emerald-400'
+                      : 'text-amber-700 dark:text-amber-400'
+                  }`}>
+                    {check.matched ? 'cocok' : 'ada selisih'}
+                  </span>
+                </div>
+
+                {check.matched ? (
+                  <p className="text-xs text-gray-500 dark:text-slate-400">
+                    Semua status yang diperiksa cocok dengan Shopee.
+                  </p>
+                ) : (
+                  <div className="space-y-1">
+                    {notable.map((row) => (
+                      <div key={row.status} className="flex items-center justify-between gap-3 text-xs">
+                        <span className="text-gray-600 dark:text-slate-300">
+                          {STATUS_LABELS[row.status] || row.status}
+                        </span>
+                        {row.unanswered ? (
+                          /* Shopee answered nothing for this status. Printing a
+                             zero here would report a shortfall that does not
+                             exist and send the operator chasing it. */
+                          <span className="text-amber-700 dark:text-amber-400">
+                            Shopee tidak menjawab — {row.local} tersimpan, belum terperiksa
+                          </span>
+                        ) : (
+                          <span className="text-gray-600 dark:text-slate-300">
+                            Shopee <span className="font-medium">{row.shopee}</span>
+                            {' · '}OrderPro <span className="font-medium">{row.local}</span>
+                            <span className="ml-1.5 font-medium text-amber-700 dark:text-amber-400">
+                              {row.diff! > 0 ? `+${row.diff}` : row.diff}
+                            </span>
+                          </span>
+                        )}
+                      </div>
+                    ))}
+
+                    {check.missingLocally > 0 && (
+                      <p className="text-xs text-red-600 dark:text-red-400 pt-1">
+                        {check.missingLocally} pesanan disebut Shopee tapi tidak tersimpan di sini.
+                      </p>
+                    )}
+                    {check.staleCandidates > 0 && (
+                      <p className="text-xs text-gray-500 dark:text-slate-400 pt-1">
+                        {check.staleCandidates} pesanan aktif di sini tidak disebut Shopee — kemungkinan statusnya sudah pindah.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
 

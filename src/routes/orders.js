@@ -495,16 +495,42 @@ router.get('/sync-status', async (req, res) => {
         lastSyncStatus: true,
         lastSyncError: true,
         needsReconnect: true,
+        lastSyncCounts: true,
       },
       orderBy: { name: 'asc' },
     });
+
+    // Written by the sync as JSON. Parsed here rather than handed to the client
+    // raw, and a row that cannot be parsed is dropped rather than thrown: a
+    // diagnostic must never be the reason a page fails to load.
+    const withCheck = stores.map(({ lastSyncCounts, ...store }) => {
+      let check = null;
+      try {
+        check = lastSyncCounts ? JSON.parse(lastSyncCounts) : null;
+      } catch {
+        console.warn(`[orders/sync-status] Unreadable sync check for store ${store.id}`);
+      }
+      return { ...store, check };
+    });
+
+    const checked = withCheck.filter((s) => s.check);
 
     const workerRunning = await hasQueueWorkers(syncQueue);
 
     return res.json({
       success: true,
       data: {
-        stores,
+        stores: withCheck,
+        // How the last run's own numbers compared with Shopee's. Kept as a
+        // summary here so the page can say "cocok" or "ada selisih" without
+        // walking every store, and open the detail only when it matters.
+        check: {
+          // Stores that have never reported one are not counted as matching:
+          // "belum diperiksa" is its own answer.
+          checked: checked.length,
+          matched: checked.filter((s) => s.check.matched).length,
+          mismatched: checked.filter((s) => !s.check.matched).length,
+        },
         failing: stores.filter((s) => s.lastSyncStatus === 'ERROR').length,
         // A pass that fell over means the orders in that status were never
         // refreshed — the run finished, but its result is incomplete.
