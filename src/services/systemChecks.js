@@ -32,6 +32,7 @@ const prisma        = require('../prisma/client.js');
 const config        = require('../config/index.js');
 const shopeeService = require('./shopee.js');
 const { encrypt, decrypt } = require('../utils/crypto.js');
+const { parsePartnerKeyExpiry } = require('../utils/expiry.js');
 const { syncQueue, isRedisReady, hasQueueWorkers } = require('./queue.js');
 const scheduler = require('./scheduler.js');
 
@@ -218,17 +219,22 @@ const CHECKS = [
       if (!raw) {
         return {
           status: 'warn',
-          detail: 'SHOPEE_PARTNER_KEY_EXPIRES belum diisi. Tanggalnya ada di Shopee Open Platform Console, App List, detail app ("Live API Partner Key Expire Time"). Isi dengan format YYYY-MM-DD supaya sisa harinya bisa diawasi.',
+          detail: 'SHOPEE_PARTNER_KEY_EXPIRES belum diisi. Tanggalnya ada di Shopee Open Platform Console, App List, detail app ("Live API Partner Key Expire Time"). Salin apa adanya, misalnya 26/01/27 22:59 (UTC+07:00) — format YYYY-MM-DD juga diterima.',
         };
       }
-      const expires = new Date(raw + 'T23:59:59' + config.business.utcOffset);
-      if (Number.isNaN(expires.getTime())) {
-        return { status: 'fail', detail: 'SHOPEE_PARTNER_KEY_EXPIRES = "' + raw + '" bukan tanggal yang bisa dibaca (harusnya YYYY-MM-DD)' };
+
+      const parsed = parsePartnerKeyExpiry(raw, config.business.utcOffset);
+      if (!parsed) {
+        return { status: 'fail', detail: 'SHOPEE_PARTNER_KEY_EXPIRES = "' + raw + '" tidak bisa dibaca sebagai tanggal. Salin persis dari konsol Shopee (26/01/27 22:59) atau tulis 2027-01-26.' };
       }
-      const days = Math.floor((expires.getTime() - Date.now()) / 86400000);
-      if (days < 0)  return { status: 'fail', detail: 'Partner key sudah kedaluwarsa ' + Math.abs(days) + ' hari lalu — seluruh sync akan berhenti' };
-      if (days < 60) return { status: 'warn', detail: 'Tersisa ' + days + ' hari (' + raw + ') — perpanjang sebelum habis, karena saat habis semua toko berhenti sync bersamaan' };
-      return { status: 'ok', detail: 'Tersisa ' + days + ' hari (' + raw + ')' };
+
+      // The parsed date is always said back in words. Day-first and month-first
+      // look identical for the first twelve days of a month, and a silent
+      // misreading here would report a comfortable margin on the wrong date.
+      const days = Math.floor((parsed.date.getTime() - Date.now()) / 86400000);
+      if (days < 0)  return { status: 'fail', detail: 'Partner key sudah kedaluwarsa sejak ' + parsed.label + ' (' + Math.abs(days) + ' hari lalu) — seluruh sync akan berhenti' };
+      if (days < 60) return { status: 'warn', detail: 'Tersisa ' + days + ' hari — berakhir ' + parsed.label + '. Perpanjang sebelum habis, karena saat habis semua toko berhenti sync bersamaan.' };
+      return { status: 'ok', detail: 'Tersisa ' + days + ' hari — berakhir ' + parsed.label };
     },
   },
   {
