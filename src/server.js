@@ -40,6 +40,7 @@ app.use('/api/orders', require('./routes/orders'));
 app.use('/api/print', require('./routes/print'));
 app.use('/api/sync', require('./routes/sync'));
 app.use('/api/dashboard', require('./routes/dashboard'));
+app.use('/api/system', require('./routes/system'));
 
 // ── Frontend (Next.js static export) ──────────────────
 const frontendPath = path.join(__dirname, '../frontend/out');

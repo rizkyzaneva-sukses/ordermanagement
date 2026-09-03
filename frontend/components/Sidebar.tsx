@@ -15,6 +15,7 @@ import {
   Moon,
   Menu,
   X,
+  Settings,
 } from 'lucide-react'
 import { User, logout } from '@/lib/auth'
 import { useTheme } from './ThemeProvider'
@@ -32,6 +33,7 @@ const navItems = [
 const adminItems = [
   { href: '/admin/users', label: 'Kelola User', icon: Users },
   { href: '/admin/stores', label: 'Kelola Toko', icon: Store },
+  { href: '/admin/settings', label: 'Pengaturan', icon: Settings },
 ]
 
 export default function Sidebar({ user }: SidebarProps) {
