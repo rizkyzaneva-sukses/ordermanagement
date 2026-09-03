@@ -129,16 +129,35 @@ async function fetchLiveState(ctx) {
   // Called for every order with a package number, not just split ones — the
   // number itself is valid either way, it is only ship_order that refuses it
   // for an unsplit order (see packageNumberForLogistics).
-  if (order.packageNumber) {
+  // The package_number this very read just returned from Shopee — not the
+  // locally stored one. They can disagree in the one direction that matters: an
+  // unsplit order is deliberately kept as packageNumber="" locally (schema
+  // comment: "the order's single/default package"), so gating this lookup on
+  // the local column skipped it for the majority of orders and left them
+  // checked only by the coarser, laggier order-level fields. Shopee's own
+  // ship_order compliance guidance names this directly: verify readiness at the
+  // package level via get_package_detail's is_shipment_arranged, not the order
+  // level — a stale fulfillment_status still reporting LOGISTICS_READY on a
+  // package whose shipment was already arranged is a guaranteed rejection, and
+  // those rejections are what count against the ship_order success rate.
+  const livePackageNumber = pkg?.package_number ? String(pkg.package_number) : order.packageNumber;
+
+  // An empty package_list is Shopee's other named cause: "the order is still in
+  // the process of logistics channel allocation". There is no package_number to
+  // look up yet, so this is recorded rather than silently falling through to an
+  // order-level check that would let a ship_order attempt past it.
+  const packageListEmpty = packages.length === 0;
+
+  if (livePackageNumber) {
     try {
-      const pkgResp = await shopeeService.getPackageDetail(accessToken, store.shopId, [order.packageNumber]);
+      const pkgResp = await shopeeService.getPackageDetail(accessToken, store.shopId, [livePackageNumber]);
       const pkgDetail = pkgResp.response?.package_list?.[0] || pkgResp.response?.[0];
 
       // Shopee names it fulfillment_status here and logistics_status elsewhere
       const pkgStatus = pkgDetail?.fulfillment_status || pkgDetail?.logistics_status;
       if (pkgStatus) {
         if (pkgStatus !== logisticsStatus) {
-          console.log(`[fulfillment] ${order.orderId}/${order.packageNumber}: package detail reports ${pkgStatus} (order detail said ${logisticsStatus || 'nothing'})`);
+          console.log(`[fulfillment] ${order.orderId}/${livePackageNumber}: package detail reports ${pkgStatus} (order detail said ${logisticsStatus || 'nothing'})`);
         }
         logisticsStatus = pkgStatus;
       }
@@ -147,7 +166,7 @@ async function fetchLiveState(ctx) {
         isShipmentArranged = pkgDetail.is_shipment_arranged;
       }
     } catch (err) {
-      console.warn(`[fulfillment] get_package_detail unavailable for ${order.packageNumber}, using order detail: ${err.message}`);
+      console.warn(`[fulfillment] get_package_detail unavailable for ${livePackageNumber}, using order detail: ${err.message}`);
     }
   }
 
@@ -156,6 +175,7 @@ async function fetchLiveState(ctx) {
     logisticsStatus,
     // null when Shopee did not tell us — treated as "unknown", never as "false"
     isShipmentArranged,
+    packageListEmpty,
     trackingNumber:  detail.tracking_number || null,
     itemList:        detail.item_list || [],
     packageCount:    packages.length,
@@ -323,8 +343,17 @@ async function getShippingOptions(orderRowId) {
 
   // Same LOGISTICS_READY rule as arrangeShipment, checked here so the dialog
   // explains itself instead of opening a form Shopee will reject.
-  if (live.logisticsStatus && live.logisticsStatus !== 'LOGISTICS_READY') {
-    throw fail(409, `Paket belum siap dikirim (${live.logisticsStatus}) — tunggu sampai Shopee menandainya siap diatur`);
+  //
+  // The `live.logisticsStatus &&` short-circuit that used to guard this let a
+  // null status — package_list still empty, mid-allocation — through untouched,
+  // which is exactly the "order is being allocated" rejection Shopee's own
+  // ship_order diagnosis names. Fails closed now: no confirmed LOGISTICS_READY
+  // means not ready, whether Shopee said something else or said nothing at all.
+  if (live.logisticsStatus !== 'LOGISTICS_READY') {
+    const reason = live.packageListEmpty
+      ? 'Shopee belum melaporkan status paket ini — kemungkinan masih dialokasikan ke kurir'
+      : `Paket belum siap dikirim (${live.logisticsStatus})`;
+    throw fail(409, `${reason} — tunggu sampai Shopee menandainya siap diatur`);
   }
 
   return fetchShippingParameters(ctx, live);
@@ -407,8 +436,17 @@ async function arrangeShipment(orderRowId, options = {}) {
   // package is still LOGISTICS_NOT_START or being allocated comes back as
   // "Package is not ready to ship" / "The order is being allocated" — avoidable
   // rejections that drag down the ship_order success rate Shopee measures us on.
-  if (live.logisticsStatus && live.logisticsStatus !== 'LOGISTICS_READY') {
-    throw fail(409, `Paket belum siap dikirim (${live.logisticsStatus}) — Shopee baru menerima pengaturan pengiriman saat status paket LOGISTICS_READY`);
+  //
+  // Failing closed on a null status too, not only a wrong one: the previous
+  // `live.logisticsStatus &&` guard let an empty package_list (still being
+  // allocated — package_list has nothing to report a status from yet) sail
+  // through to ship_order, which is precisely the rejection Shopee's own
+  // ship_order FAQ names as "The order is being allocated, please wait".
+  if (live.logisticsStatus !== 'LOGISTICS_READY') {
+    const reason = live.packageListEmpty
+      ? 'Shopee belum melaporkan status paket ini — kemungkinan masih dialokasikan ke kurir'
+      : `Paket belum siap dikirim (${live.logisticsStatus})`;
+    throw fail(409, `${reason} — Shopee baru menerima pengaturan pengiriman saat status paket LOGISTICS_READY`);
   }
 
   const paramResp = await shopeeService.getShippingParameter(
