@@ -36,6 +36,27 @@ const ITEM_STATUSES = ['NORMAL', 'UNLIST'];
 const BASE_INFO_CHUNK = 50;
 
 /**
+ * Outcome of the most recent pull, so the UI can say why nothing arrived.
+ *
+ * A pull answers before it finishes, which means a failure — a missing Product
+ * permission being the likeliest one — reaches the operator as an empty table
+ * and nothing else. Held in memory rather than a column because it is a
+ * diagnostic for an operator-initiated job, not a fact about a store: it should
+ * not outlive the process that produced it.
+ */
+let lastPull = null;
+
+/** @returns {Object|null} The last pull's outcome, or null if none has run. */
+function getLastPull() {
+  return lastPull;
+}
+
+function recordPull(outcome) {
+  lastPull = { ...outcome, at: new Date().toISOString() };
+  return lastPull;
+}
+
+/**
  * First price Shopee offers for a listing, in whole currency units.
  *
  * `price_info` is a list because a listing can be priced per region, and the
@@ -149,10 +170,21 @@ async function syncStoreCatalogue(storeId) {
 
   console.log(`[catalogue] Starting catalogue pull for store ${storeId} (${store.name})`);
 
-  const items = await shopeeService.getAllItems(accessToken, shopId, { itemStatus: ITEM_STATUSES });
+  // Not wrapped in a broader try: a failure here is the whole pull failing, and
+  // the caller records it. But it is worth naming, because the likeliest cause
+  // by far is the app lacking the Product permission — an error an operator can
+  // act on, and one that is indistinguishable from "shop has no products" if it
+  // only ever reaches a log file.
+  let items;
+  try {
+    items = await shopeeService.getAllItems(accessToken, shopId, { itemStatus: ITEM_STATUSES });
+  } catch (err) {
+    throw new Error(`get_item_list ditolak Shopee: ${err.message}`);
+  }
+
   if (items.length === 0) {
     console.log(`[catalogue] Store ${storeId}: no items returned`);
-    return { storeId, listings: 0, items: 0, warnings };
+    return { storeId, storeName: store.name, listings: 0, items: 0, warnings };
   }
 
   const idChunks = [];
@@ -203,7 +235,7 @@ async function syncStoreCatalogue(storeId) {
     `in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`
   );
 
-  return { storeId, listings: rows.length, items: baseInfos.length, warnings };
+  return { storeId, storeName: store.name, listings: rows.length, items: baseInfos.length, warnings };
 }
 
 /**
@@ -265,15 +297,35 @@ async function syncAllCatalogues() {
     select: { id: true, name: true },
   });
 
+  if (stores.length === 0) {
+    // Worth distinguishing from "pulled everything and found nothing": there is
+    // no shop to pull from, which is a different problem with a different fix.
+    console.warn('[catalogue] No active Shopee store to pull from');
+    recordPull({ stores: 0, listings: 0, failed: 0, errors: ['Tidak ada toko Shopee aktif yang bisa ditarik'] });
+    return [];
+  }
+
   const results = [];
+  const errors = [];
+
   for (const store of stores) {
     try {
       results.push(await syncStoreCatalogue(store.id));
     } catch (err) {
       console.error(`[catalogue] Store ${store.id} (${store.name}) failed: ${err.message}`);
-      results.push({ storeId: store.id, listings: 0, items: 0, warnings: [err.message] });
+      errors.push(`${store.name}: ${err.message}`);
+      results.push({ storeId: store.id, storeName: store.name, listings: 0, items: 0, warnings: [err.message] });
     }
   }
+
+  recordPull({
+    stores: stores.length,
+    listings: results.reduce((sum, r) => sum + r.listings, 0),
+    failed: errors.length,
+    // Every store usually fails for the same reason (one app, one permission),
+    // so repeating it seven times buries the answer rather than reinforcing it.
+    errors: [...new Set(errors)],
+  });
 
   return results;
 }
@@ -281,6 +333,8 @@ async function syncAllCatalogues() {
 module.exports = {
   syncStoreCatalogue,
   syncAllCatalogues,
+  getLastPull,
+  recordPull,
   // Exported for testing: the row-shaping rules are where a wrong reading of
   // Shopee's response turns into wrong stock on screen, and they can be checked
   // without a database or a live shop.

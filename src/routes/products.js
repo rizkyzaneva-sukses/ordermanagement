@@ -13,7 +13,7 @@ const express = require('express');
 const router = express.Router();
 const prisma = require('../prisma/client');
 const { authenticate } = require('../middleware/auth');
-const { syncAllCatalogues, syncStoreCatalogue } = require('../services/productSync');
+const { syncAllCatalogues, syncStoreCatalogue, getLastPull, recordPull } = require('../services/productSync');
 
 router.use(authenticate);
 
@@ -130,11 +130,16 @@ router.get('/summary', async (req, res) => {
         mapped: total - unmapped,
         masters,
         lastSyncedAt: lastSynced?.lastSyncedAt ?? null,
+        // Why the last pull produced what it did. Without this an operator
+        // staring at an empty catalogue has no way to tell "Shopee refused us"
+        // from "the shop really has nothing" — and the first is far likelier,
+        // because the Product permission has never been confirmed on this app.
+        lastPull: getLastPull(),
       },
     });
   } catch (err) {
     console.error('GET /products/summary error:', err);
-    return res.status(500).json({ success: false, error: 'Gagal memuat ringkasan produk' });
+    return res.status(500).json({ success: false, error: `Gagal memuat ringkasan produk: ${err.message}` });
   }
 });
 
@@ -171,11 +176,18 @@ router.post('/sync', async (req, res) => {
     // catalogue pull is a rare, operator-initiated job, and putting it on the
     // sync queue would let it sit behind order syncs that matter more.
     try {
-      const result = storeId ? [await syncStoreCatalogue(storeId)] : await syncAllCatalogues();
-      const listings = result.reduce((sum, r) => sum + r.listings, 0);
-      console.log(`[catalogue] Pull finished: ${listings} listing(s) across ${result.length} store(s)`);
+      if (storeId) {
+        const one = await syncStoreCatalogue(storeId);
+        recordPull({ stores: 1, listings: one.listings, failed: 0, errors: one.warnings || [] });
+      } else {
+        // syncAllCatalogues records its own outcome per store
+        await syncAllCatalogues();
+      }
+      const done = getLastPull();
+      console.log(`[catalogue] Pull finished: ${done?.listings ?? 0} listing(s), ${done?.failed ?? 0} store(s) failed`);
     } catch (err) {
       console.error('[catalogue] Pull failed:', err.message);
+      recordPull({ stores: storeId ? 1 : 0, listings: 0, failed: 1, errors: [err.message] });
     }
   } catch (err) {
     console.error('POST /products/sync error:', err);

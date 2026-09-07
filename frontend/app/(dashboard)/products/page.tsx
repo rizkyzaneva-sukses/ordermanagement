@@ -27,12 +27,21 @@ interface Listing {
   product: { id: string; masterSku: string; name: string; stock: number } | null
 }
 
+interface LastPull {
+  at: string
+  stores: number
+  listings: number
+  failed: number
+  errors: string[]
+}
+
 interface Summary {
   listings: number
   unmapped: number
   mapped: number
   masters: number
   lastSyncedAt: string | null
+  lastPull: LastPull | null
 }
 
 interface StoreOption {
@@ -84,12 +93,19 @@ export default function ProductsPage() {
   const [status, setStatus] = useState('')
   const [mapped, setMapped] = useState('')
 
+  const [summaryError, setSummaryError] = useState<string | null>(null)
+
   const fetchSummary = useCallback(async () => {
     try {
       const res = await api.get<any>('/products/summary')
       setSummary(res.data?.data ?? null)
-    } catch {
+      setSummaryError(null)
+    } catch (err: any) {
+      // Swallowing this is what made an empty page unreadable: with no summary
+      // the stat cards and the "catalogue is empty" note both vanish, leaving a
+      // blank table that looks like a successful pull of nothing.
       setSummary(null)
+      setSummaryError(err?.response?.data?.error || err?.message || 'Ringkasan produk tidak bisa dimuat')
     }
   }, [])
 
@@ -191,6 +207,38 @@ export default function ProductsPage() {
             : 'border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200'
         }`}>
           {message.text}
+        </div>
+      )}
+
+      {summaryError && (
+        <div className="rounded-lg border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-900/20 px-4 py-3 text-sm text-red-800 dark:text-red-200 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <p><span className="font-semibold">Ringkasan produk gagal dimuat.</span> {summaryError}</p>
+        </div>
+      )}
+
+      {/* Why the last pull ended the way it did. An empty catalogue has two very
+          different causes — Shopee refused us, or the shop really is empty —
+          and only this tells them apart. */}
+      {summary?.lastPull && summary.lastPull.errors.length > 0 && (
+        <div className="rounded-lg border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-900/20 px-4 py-3 text-sm text-red-800 dark:text-red-200">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <div className="space-y-1">
+              <p className="font-semibold">
+                Penarikan katalog terakhir gagal
+                {summary.lastPull.failed > 0 && ` untuk ${summary.lastPull.failed} toko`}.
+              </p>
+              {summary.lastPull.errors.map((e, i) => (
+                <p key={i} className="text-xs break-words [overflow-wrap:anywhere]">{e}</p>
+              ))}
+              <p className="text-xs opacity-80">
+                Kalau pesannya menyebut izin atau <span className="font-mono">no permission</span>,
+                artinya aplikasi ini belum punya izin Product di Shopee Partner Console — itu
+                pengajuan terpisah, bukan masalah kode.
+              </p>
+            </div>
+          </div>
         </div>
       )}
 
