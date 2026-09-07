@@ -28,7 +28,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const prisma = require('../prisma/client.js');
-const { syncQueue, isRedisReady } = require('../services/queue.js');
+const { syncQueue, isRedisReady, hasQueueWorkers } = require('../services/queue.js');
 
 const router = express.Router();
 
@@ -180,6 +180,44 @@ function verifySignature(rawBody, signature) {
 }
 
 /**
+ * Shops with a fallback sync already scheduled, keyed by store id.
+ *
+ * The queue debounces for us through `jobId` + `delay`; running in-process has
+ * to do that itself, or a busy shop pushing a dozen events would start a dozen
+ * overlapping syncs inside the API process.
+ */
+const inlineSyncPending = new Map();
+
+/**
+ * Run a push-triggered sync inside this process, debounced per shop.
+ *
+ * Used only when no worker is consuming. Deliberately fire-and-forget: the
+ * webhook response must not wait for Shopee to answer a sync, and the outcome is
+ * persisted on the store row either way.
+ *
+ * @param {string} storeId
+ */
+function scheduleInlineSync(storeId) {
+  if (inlineSyncPending.has(storeId)) return;
+
+  const timer = setTimeout(async () => {
+    inlineSyncPending.delete(storeId);
+    try {
+      const { syncStore } = require('../services/syncDirect.js');
+      await syncStore(storeId);
+      console.log(`[webhook] In-process push sync finished for store ${storeId}`);
+    } catch (err) {
+      // Already recorded on the store row by syncStore
+      console.error(`[webhook] In-process push sync failed for store ${storeId}: ${err.message}`);
+    }
+  }, PUSH_DEBOUNCE_MS);
+
+  // Never hold the process open just for a pending fallback sync
+  timer.unref?.();
+  inlineSyncPending.set(storeId, timer);
+}
+
+/**
  * Queue a debounced sync for a shop.
  *
  * Never throws: a push must be acknowledged even when the queue is unavailable,
@@ -192,6 +230,17 @@ function verifySignature(rawBody, signature) {
 async function queueSync(storeId, reason) {
   if (!isRedisReady()) {
     console.warn(`[webhook] Redis unavailable — dropping push-triggered sync for store ${storeId}; the scheduled sync will cover it`);
+    return;
+  }
+
+  // Enqueuing with nothing listening is indistinguishable from success here: the
+  // job sits in Redis and the push is lost in practice. That is what the
+  // 5-7 September 2026 outage looked like from this function — thousands of
+  // "Queued sync" lines against a queue no worker was reading. So the presence
+  // of a consumer decides the route, the same way POST /orders/sync decides it.
+  if (!(await hasQueueWorkers(syncQueue))) {
+    console.warn(`[webhook] No sync worker consuming — running push sync in-process for store ${storeId} (${reason})`);
+    scheduleInlineSync(storeId);
     return;
   }
 

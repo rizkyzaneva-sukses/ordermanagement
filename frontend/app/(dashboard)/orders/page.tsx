@@ -441,6 +441,25 @@ export default function OrdersPage() {
   })()
 
   /**
+   * Minutes since the least-fresh shop last synced, or null if none ever has.
+   *
+   * The point of tracking this separately from `workerRunning` is that the two
+   * failures look different: a worker can be registered on the queue and still
+   * make no progress, in which case the only symptom is this number climbing.
+   * Between 5 and 7 September 2026 that number reached two days before anyone
+   * noticed, because nothing on this page ever looked at it.
+   */
+  const minutesSinceSync = lastSyncedAt
+    ? Math.floor((Date.now() - new Date(lastSyncedAt).getTime()) / 60_000)
+    : null
+
+  /**
+   * Automatic sync runs every 15 minutes, so half an hour is two missed rounds —
+   * late enough to mean something is wrong, early enough to still be news.
+   */
+  const syncIsStale = minutesSinceSync !== null && minutesSinceSync >= 30
+
+  /**
    * The filters that decide *which* orders are in scope.
    *
    * Shared by the table and by any bulk action that claims to act on
@@ -1255,14 +1274,44 @@ export default function OrdersPage() {
         </div>
       )}
 
-      {/* Sync runs but nothing consumes the queue */}
-      {syncStatus && syncStatus.redisReady && !syncStatus.workerRunning && (
-        <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 px-4 py-3 text-sm text-blue-800 dark:text-blue-200 flex items-start gap-2">
-          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
-          <p>
-            Worker sync tidak berjalan. Sync manual tetap bekerja (dijalankan langsung di server), tapi sync
-            otomatis tiap 15 menit tidak akan jalan sampai <code className="font-mono">npm run worker</code> dihidupkan.
-          </p>
+      {/* Sync has fallen behind, or nothing is consuming the queue.
+          Kept apart from the amber banner above, and louder than it, because
+          this is the one an operator can fix in a single click — and because the
+          failure it reports is otherwise completely silent: every store stays
+          "Terhubung", and only the "terakhir disinkronkan" stamp moves. */}
+      {syncStatus && (syncIsStale || (syncStatus.redisReady && !syncStatus.workerRunning)) && (
+        <div className="rounded-lg border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-900/20 px-4 py-3">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+            <div className="flex items-start gap-2 text-sm text-red-800 dark:text-red-200 flex-1">
+              <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+              <div className="space-y-1">
+                {syncIsStale && lastSyncedAt && (
+                  <p>
+                    <span className="font-semibold">
+                      Sync terakhir berhasil {relativeTime(lastSyncedAt)}.
+                    </span>{' '}
+                    Pesanan baru kemungkinan belum masuk — tekan tombol di samping untuk menarik sekarang.
+                  </p>
+                )}
+                {syncStatus.redisReady && !syncStatus.workerRunning && (
+                  <p>
+                    <span className="font-semibold">Worker sync tidak berjalan.</span>{' '}
+                    Sync manual tetap bekerja karena dijalankan langsung di server. Worker akan menyalakan
+                    dirinya sendiri dalam beberapa menit; kalau pesan ini bertahan lebih dari 10 menit,
+                    periksa service <span className="font-mono">mporder-worker</span>.
+                  </p>
+                )}
+              </div>
+            </div>
+            <button
+              onClick={handleSync}
+              disabled={syncing}
+              className="btn-primary shrink-0 flex items-center justify-center gap-2"
+            >
+              {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+              <span>Sinkron sekarang</span>
+            </button>
+          </div>
         </div>
       )}
 
