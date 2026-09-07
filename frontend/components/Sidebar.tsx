@@ -27,6 +27,7 @@ interface SidebarProps {
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/orders', label: 'Pesanan', icon: ShoppingBag },
+  { href: '/products', label: 'Produk', icon: Package },
   { href: '/print', label: 'Cetak Resi', icon: Printer },
 ]
 
