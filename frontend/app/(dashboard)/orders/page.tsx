@@ -113,6 +113,8 @@ interface SyncStatus {
   check?: { checked: number; matched: number; mismatched: number }
   redisReady: boolean
   workerRunning: boolean
+  /** A sync job is queued or running right now — survives leaving this page. */
+  syncInFlight?: boolean
   /** Whether the repeatable sync jobs are registered — a reachable Redis is
       not the same thing, and only this says anything is scheduled to run. */
   autoSyncRunning?: boolean
@@ -460,6 +462,16 @@ export default function OrdersPage() {
   const syncIsStale = minutesSinceSync !== null && minutesSinceSync >= 30
 
   /**
+   * Whether to show the sync as running.
+   *
+   * `syncing` only knows about a click made on *this* mount of the page, and a
+   * sync outlives that: navigating to another menu unmounts this component and
+   * takes the flag with it, so coming back showed an idle button over work that
+   * was still going. The server-side answer covers that gap.
+   */
+  const syncBusy = syncing || syncStatus?.syncInFlight === true
+
+  /**
    * The filters that decide *which* orders are in scope.
    *
    * Shared by the table and by any bulk action that claims to act on
@@ -586,10 +598,15 @@ export default function OrdersPage() {
   // lastSyncAt itself (the 15-minute scheduled sync moves it server-side with
   // nothing here to notice). Re-fetching covers both, and a minute is frequent
   // enough for a label that reads in whole minutes.
+  // While a sync is actually running the same poll doubles as the progress
+  // indicator's clock, and a minute of lag there reads as a page that has hung.
+  // Once it settles the interval drops back to the cheap freshness cadence.
+  const syncPollMs = syncStatus?.syncInFlight ? 5_000 : 60_000
+
   useEffect(() => {
-    const id = setInterval(() => { fetchSyncStatus() }, 60_000)
+    const id = setInterval(() => { fetchSyncStatus() }, syncPollMs)
     return () => clearInterval(id)
-  }, [fetchSyncStatus])
+  }, [fetchSyncStatus, syncPollMs])
 
   useEffect(() => {
     fetchOrders()
@@ -625,7 +642,7 @@ export default function OrdersPage() {
       if (res.data?.workerMissing) {
         setBulkMessage({
           type: 'error',
-          text: 'Worker sync tidak berjalan — sync dijalankan langsung di server sebagai cadangan. Jalankan "npm run worker" agar sync terjadwal ikut aktif.',
+          text: 'Worker sync tidak berjalan — sync ini dijalankan langsung di server sebagai cadangan, jadi pesanan tetap masuk. Worker akan menyalakan dirinya sendiri dalam beberapa menit; kalau sync terjadwal masih mati setelah itu, periksa service mporder-worker.',
         })
       }
 
@@ -1211,13 +1228,13 @@ export default function OrdersPage() {
             </button>
           )}
         </div>
-        <button onClick={handleSync} disabled={syncing} className="btn-primary self-start sm:self-auto flex items-center gap-2">
-          {syncing ? (
+        <button onClick={handleSync} disabled={syncBusy} className="btn-primary self-start sm:self-auto flex items-center gap-2">
+          {syncBusy ? (
             <Loader2 className="w-4 h-4 animate-spin" />
           ) : (
             <RefreshCw className="w-4 h-4" />
           )}
-          <span>Sync Pesanan</span>
+          <span>{syncBusy && !syncing ? 'Sync sedang berjalan' : 'Sync Pesanan'}</span>
         </button>
       </div>
 
@@ -1305,10 +1322,10 @@ export default function OrdersPage() {
             </div>
             <button
               onClick={handleSync}
-              disabled={syncing}
+              disabled={syncBusy}
               className="btn-primary shrink-0 flex items-center justify-center gap-2"
             >
-              {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+              {syncBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
               <span>Sinkron sekarang</span>
             </button>
           </div>

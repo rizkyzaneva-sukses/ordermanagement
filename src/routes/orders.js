@@ -517,6 +517,26 @@ router.get('/sync-status', async (req, res) => {
 
     const workerRunning = await hasQueueWorkers(syncQueue);
 
+    // Whether a sync is on the queue right now.
+    //
+    // The store row cannot answer this: it records when an attempt *started*
+    // (lastSyncAttemptAt) but never when one finished, so "started after it last
+    // succeeded" stays true forever once a run fails. The queue knows exactly,
+    // and asking it is what lets the page put its spinner back after the
+    // operator navigated away mid-sync and returned.
+    //
+    // Not covered: the no-worker fallback, where the work happens inline in this
+    // process and never becomes a job. That path already tells the caller so in
+    // its own response.
+    let syncInFlight = false;
+    try {
+      const counts = await syncQueue.getJobCounts('active', 'waiting', 'delayed');
+      syncInFlight = (counts.active || 0) + (counts.waiting || 0) + (counts.delayed || 0) > 0;
+    } catch (err) {
+      // A diagnostic must never be the reason this endpoint fails
+      console.warn(`[orders/sync-status] Could not read queue counts: ${err.message}`);
+    }
+
     return res.json({
       success: true,
       data: {
@@ -538,6 +558,7 @@ router.get('/sync-status', async (req, res) => {
         needsReconnect: stores.filter((s) => s.needsReconnect).length,
         redisReady: isRedisReady(),
         workerRunning,
+        syncInFlight,
         // Registered jobs, not merely a reachable Redis: the two come apart
         // when Redis was down at boot, and only this one says whether anything
         // is actually scheduled to run.
