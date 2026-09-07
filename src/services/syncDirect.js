@@ -18,6 +18,59 @@ const { ensureFreshToken, isReconnectError } = require('./tokens.js');
 const { orderNeedsDetail } = require('./orderRefresh.js');
 const { buildSyncCheck } = require('../utils/syncCheck.js');
 
+// ── Concurrency ───────────────────────────────────────────────────────────────
+
+/**
+ * How many marketplace calls one sync phase may have in flight at once.
+ *
+ * Shopee rate-limits per shop, and a sync already runs alongside up to two
+ * other stores (the worker's concurrency), so an unbounded `Promise.all` over
+ * a few hundred packages would trade a slow sync for a throttled one. Five is
+ * deliberately modest: it turns the worst phase here from minutes into seconds
+ * while leaving plenty of headroom under the limit.
+ */
+const CALL_CONCURRENCY = 5;
+
+/**
+ * Map over items with at most `limit` calls in flight, preserving input order.
+ *
+ * `Promise.all(items.map(...))` starts everything at once, which is exactly what
+ * the rate limit punishes; a `for…of` loop with `await` inside is what made
+ * these phases slow in the first place. This is the middle ground.
+ *
+ * The mapper is expected to handle its own failures — a rejection here aborts
+ * the whole batch, which is almost never what a best-effort sync phase wants.
+ *
+ * @template T, R
+ * @param {T[]} items
+ * @param {number} limit
+ * @param {(item: T, index: number) => Promise<R>} mapper
+ * @returns {Promise<R[]>}
+ */
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+
+  const runners = Array.from(
+    { length: Math.max(1, Math.min(limit, items.length)) },
+    async () => {
+      for (;;) {
+        const index = cursor++;
+        if (index >= items.length) return;
+        results[index] = await mapper(items[index], index);
+      }
+    },
+  );
+
+  await Promise.all(runners);
+  return results;
+}
+
+/** Whole seconds since `startedAt`, for the phase timings in the log. */
+function secondsSince(startedAt) {
+  return ((Date.now() - startedAt) / 1000).toFixed(1);
+}
+
 // ── Shopee helpers ────────────────────────────────────────────────────────────
 
 /**
@@ -169,16 +222,36 @@ async function backfillShopeeTracking(accessToken, shopId, rows) {
 
   if (needsTracking.length === 0) return;
 
+  const startedAt = Date.now();
   console.log(`[sync] Backfilling tracking numbers for ${needsTracking.length} package(s)`);
 
+  const massChunks = [];
   for (let i = 0; i < needsTracking.length; i += 50) {
-    const chunk = needsTracking.slice(i, i + 50);
+    massChunks.push(needsTracking.slice(i, i + 50));
+  }
 
+  await mapWithConcurrency(massChunks, CALL_CONCURRENCY, async (chunk) => {
     try {
       const resp = await shopeeService.getMassTrackingNumber(accessToken, shopId,
         chunk.map(r => ({ order_sn: r.orderId, package_number: r.packageNumber || undefined })));
 
-      for (const result of extractTrackingResults(resp)) {
+      const results = extractTrackingResults(resp);
+
+      // The one-at-a-time fallback below is ~50x the calls, so a mass lookup
+      // that quietly returns nothing is the difference between a sync taking
+      // seconds and taking minutes — and until now it left no trace of *why*.
+      // The field holding the list is undocumented, so the response shape is
+      // printed once per empty chunk: that is what turns this from a guess into
+      // a one-line fix.
+      if (results.length === 0) {
+        console.warn(
+          `[sync] Mass tracking returned no usable rows for ${chunk.length} package(s). ` +
+          `Response keys: ${JSON.stringify(Object.keys(resp?.response || {}))} — ` +
+          `sample: ${JSON.stringify(resp?.response).slice(0, 500)}`
+        );
+      }
+
+      for (const result of results) {
         const row = chunk.find(r =>
           r.orderId === result.order_sn &&
           (r.packageNumber || '') === String(result.package_number || ''));
@@ -187,7 +260,7 @@ async function backfillShopeeTracking(accessToken, shopId, rows) {
     } catch (err) {
       console.warn(`[sync] Mass tracking lookup failed for ${chunk.length} package(s): ${err.message}`);
     }
-  }
+  });
 
   // Anything the batch call did not resolve is retried one at a time. The
   // single-package endpoint has a simpler, better-known response shape, so this
@@ -197,7 +270,10 @@ async function backfillShopeeTracking(accessToken, shopId, rows) {
   if (stillMissing.length > 0) {
     console.warn(`[sync] Mass lookup resolved ${needsTracking.length - stillMissing.length}/${needsTracking.length} — retrying ${stillMissing.length} individually`);
 
-    for (const row of stillMissing) {
+    // Sequentially this was the single slowest phase of a sync: each call costs
+    // roughly a quarter-second against Shopee, so a shop with forty unresolved
+    // packages spent ten seconds here doing nothing but waiting.
+    await mapWithConcurrency(stillMissing, CALL_CONCURRENCY, async (row) => {
       try {
         const resp = await shopeeService.getTrackingNumber(
           accessToken, shopId, row.orderId, row.packageNumber || undefined);
@@ -206,11 +282,11 @@ async function backfillShopeeTracking(accessToken, shopId, rows) {
       } catch (err) {
         console.warn(`[sync] Tracking lookup failed for ${row.orderId}: ${err.message}`);
       }
-    }
+    });
   }
 
   const resolved = needsTracking.filter(r => r.trackingNumber).length;
-  console.log(`[sync] Tracking backfill: ${resolved}/${needsTracking.length} resolved`);
+  console.log(`[sync] Tracking backfill: ${resolved}/${needsTracking.length} resolved in ${secondsSince(startedAt)}s`);
 
   // A shipped package always has a tracking number upstream, so leaving one
   // unresolved means our request or our reading of the response is wrong —
@@ -299,6 +375,7 @@ async function filterOrdersNeedingDetail(storeId, discovered, listStatuses) {
  * @returns {Promise<{ storeId, total, created, updated }>}
  */
 async function runStoreSync(storeId) {
+  const runStartedAt = Date.now();
   console.log(`[sync] Starting sync for store ${storeId}`);
 
   const store = await prisma.store.findUnique({ where: { id: storeId } });
@@ -361,10 +438,16 @@ async function runStoreSync(storeId) {
     // Pass 0: package numbers for everything still awaiting fulfillment.
     // get_order_list is kept alongside it because search_package_list only
     // covers pre-shipment packages — SHIPPED/UNPAID orders never appear there.
+    const packagesStartedAt = Date.now();
     const packageIndex = await fetchShopeePackageIndex(accessToken, shopId, warnings);
+    console.log(`[sync] Package index: ${packageIndex.size} order(s) in ${secondsSince(packagesStartedAt)}s`);
 
     const allOrderSns = new Map(); // order_sn → order_status
     packageIndex.forEach((_pkgs, orderSn) => allOrderSns.set(orderSn, null));
+
+    // Where the list passes begin, so the log can attribute time to a phase
+    // rather than leaving the whole run as one opaque number.
+    const listStartedAt = Date.now();
 
     // Pass 1: fetch by create_time (orders created in last 15 days)
     //
@@ -419,7 +502,7 @@ async function runStoreSync(storeId) {
     }));
 
     const discovered = [...allOrderSns.keys()];
-    console.log(`[sync] Total unique orders across all passes: ${discovered.length}`);
+    console.log(`[sync] Total unique orders across all passes: ${discovered.length} in ${secondsSince(listStartedAt)}s`);
 
     // Everything Shopee reported this run, settled ones included — used by the
     // reconciliation pass to tell "not refreshed" from "not mentioned".
@@ -443,13 +526,15 @@ async function runStoreSync(storeId) {
         chunks.push(orderSns.slice(i, i + 50));
       }
 
-      const allDetails = [];
-      for (const chunk of chunks) {
+      const detailStartedAt = Date.now();
+      const perChunk = await mapWithConcurrency(chunks, CALL_CONCURRENCY, async (chunk) => {
         const detailResp = await shopeeService.getOrderDetail(accessToken, shopId, chunk);
         const list = detailResp.response?.order_list || [];
         console.log(`[sync] getOrderDetail chunk: ${list.length} orders returned`);
-        allDetails.push(...list);
-      }
+        return list;
+      });
+      const allDetails = perChunk.flat();
+      console.log(`[sync] getOrderDetail: ${allDetails.length} order(s) in ${secondsSince(detailStartedAt)}s`);
 
       // One row per package, not per order (KB §1)
       orders = allDetails.flatMap(o => {
@@ -563,7 +648,7 @@ async function runStoreSync(storeId) {
     },
   });
 
-  console.log(`[sync] Completed sync for store ${storeId}: ${created} created, ${updated} updated, ${reconciled} reconciled`);
+  console.log(`[sync] Completed sync for store ${storeId}: ${created} created, ${updated} updated, ${reconciled} reconciled in ${secondsSince(runStartedAt)}s`);
   return { storeId, total: orders.length, created, updated, reconciled, warnings };
 }
 
@@ -814,8 +899,13 @@ async function reconcileUnseenShopeeOrders(store, accessToken, seenOrderSns) {
     ` (${unseen.length - fromSettling} still actionable, ${fromSettling} already shipped)` +
     (deferred > 0 ? ` — ${deferred} more next run` : ''));
 
+  const reconcileStartedAt = Date.now();
   let reconciled = 0;
 
+  // Left sequential on purpose: each chunk writes rows for this store, and
+  // overlapping upserts on the same shop buy little (the pass is capped at
+  // RECONCILE_LIMIT) for a real risk of contending on the same rows. The
+  // expensive part inside it — the tracking backfill — is already concurrent.
   for (let i = 0; i < unseen.length; i += 50) {
     const chunk = unseen.slice(i, i + 50);
 
@@ -845,7 +935,7 @@ async function reconcileUnseenShopeeOrders(store, accessToken, seenOrderSns) {
     }
   }
 
-  console.log(`[sync] Reconciled ${reconciled}/${unseen.length} order(s)`);
+  console.log(`[sync] Reconciled ${reconciled}/${unseen.length} order(s) in ${secondsSince(reconcileStartedAt)}s`);
   return reconciled;
 }
 
@@ -949,6 +1039,11 @@ module.exports = {
   // Exported for testing: reads a response shape the KB does not document, so
   // its tolerance for variation is worth pinning down.
   extractTrackingResults,
+  // Exported for testing: every concurrent phase of a sync runs through this, so
+  // a bug in it (dropped item, lost order, ignored limit) would corrupt results
+  // quietly rather than fail loudly.
+  mapWithConcurrency,
+  CALL_CONCURRENCY,
   // Exported for testing: decides which stale orders a run spends its re-read
   // budget on, and getting that priority wrong is invisible until an operator
   // acts on a status that was never refreshed.
