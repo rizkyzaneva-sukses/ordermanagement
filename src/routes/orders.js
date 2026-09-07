@@ -528,10 +528,16 @@ router.get('/sync-status', async (req, res) => {
     // Not covered: the no-worker fallback, where the work happens inline in this
     // process and never becomes a job. That path already tells the caller so in
     // its own response.
+    // Only `active` and `waiting`. Never `delayed`: BullMQ implements a
+    // repeatable job by parking its next occurrence in the delayed set, so with
+    // the 15-minute sync registered per store that count is permanently equal to
+    // the number of stores — which pinned the page's spinner on forever. The
+    // webhook's 8-second debounce is delayed too, and missing those few seconds
+    // is the right trade for a flag that can actually turn off.
     let syncInFlight = false;
     try {
-      const counts = await syncQueue.getJobCounts('active', 'waiting', 'delayed');
-      syncInFlight = (counts.active || 0) + (counts.waiting || 0) + (counts.delayed || 0) > 0;
+      const counts = await syncQueue.getJobCounts('active', 'waiting');
+      syncInFlight = (counts.active || 0) + (counts.waiting || 0) > 0;
     } catch (err) {
       // A diagnostic must never be the reason this endpoint fails
       console.warn(`[orders/sync-status] Could not read queue counts: ${err.message}`);
