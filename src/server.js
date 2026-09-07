@@ -37,6 +37,7 @@ app.use('/api/oauth', require('./routes/oauth'));
 app.use('/api/users', require('./routes/users'));
 app.use('/api/stores', require('./routes/stores'));
 app.use('/api/orders', require('./routes/orders'));
+app.use('/api/products', require('./routes/products'));
 app.use('/api/print', require('./routes/print'));
 app.use('/api/sync', require('./routes/sync'));
 app.use('/api/dashboard', require('./routes/dashboard'));

@@ -84,7 +84,21 @@ class ShopeeService {
     if (shopId) url.searchParams.set('shop_id', String(shopId));
 
     Object.entries(params).forEach(([k, v]) => {
-      if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+      if (v === undefined || v === null) return;
+
+      // Multi-value parameters have to be repeated keys, not one comma-joined
+      // value: `get_item_list` answers "item_status is invalid" to the latter.
+      // `String(['A','B'])` produces exactly that joined form, so an array left
+      // to the default path fails in a way that reads like a permissions
+      // problem. Callers that genuinely want a joined list (order_sn_list,
+      // item_id_list) join it themselves and arrive here as a string.
+      if (Array.isArray(v)) {
+        v.filter(x => x !== undefined && x !== null)
+          .forEach(x => url.searchParams.append(k, String(x)));
+        return;
+      }
+
+      url.searchParams.set(k, String(v));
     });
 
     return url.toString();
@@ -1480,6 +1494,139 @@ class ShopeeService {
   async getAllOrderSns(accessToken, shopId, options = {}) {
     const orders = await this.getAllOrders(accessToken, shopId, options);
     return orders.map(o => o.order_sn);
+  }
+
+  // ─── Product catalogue (read-only) ──────────────────────────────────────────
+  //
+  // Everything below only reads. Writing to the catalogue — stock, price,
+  // creating a listing — needs a separate Product permission on the app, which
+  // has not been confirmed for this partner yet, so no write endpoint is
+  // implemented here on purpose: a method that cannot work is worse than one
+  // that does not exist.
+
+  /**
+   * List item ids in a shop, one page at a time.
+   *
+   * Returns identifiers and status only — names, prices and images come from
+   * `getItemBaseInfo`. That split is Shopee's, not ours, and it is why pulling a
+   * catalogue always costs at least two round trips per 50 items.
+   *
+   * @param {string}        accessToken
+   * @param {string|number} shopId
+   * @param {Object}  [options]
+   * @param {number}  [options.offset=0]
+   * @param {number}  [options.pageSize=100]  - Shopee's maximum for this call
+   * @param {string[]} [options.itemStatus]   - NORMAL | BANNED | UNLIST | REVIEWING
+   * @returns {Promise<Object>} `{ response: { item, total_count, has_next_page, next_offset } }`
+   */
+  async getItemList(accessToken, shopId, options = {}) {
+    const {
+      offset = 0,
+      pageSize = 100,
+      itemStatus = ['NORMAL'],
+    } = options;
+
+    if (pageSize > 100) {
+      console.error(`[ShopeeService.getItemList] WARN: page_size ${pageSize} exceeds Shopee's max of 100, clamping`);
+    }
+
+    const params = {
+      offset,
+      page_size: Math.min(pageSize, 100),
+      // Passed as an array on purpose — _buildUrl turns it into repeated keys,
+      // which is what this endpoint wants. A comma-joined string is rejected.
+      item_status: itemStatus,
+    };
+
+    console.error(`[ShopeeService.getItemList] shop=${shopId} offset=${offset} status=${itemStatus.join(',')}`);
+
+    return this._request('GET', '/api/v2/product/get_item_list', params, null, accessToken, String(shopId));
+  }
+
+  /**
+   * Walk `get_item_list` to the end and return every item id.
+   *
+   * @param {string}        accessToken
+   * @param {string|number} shopId
+   * @param {Object}  [options]      - Same as `getItemList`, minus offset
+   * @param {number}  [maxPages=200] - Safety valve against a cursor that never ends
+   * @returns {Promise<Array<{ item_id: number, item_status: string, update_time: number }>>}
+   */
+  async getAllItems(accessToken, shopId, options = {}, maxPages = 200) {
+    const all = [];
+    let offset = 0;
+    let page = 0;
+
+    for (;;) {
+      page++;
+      const result = await this.getItemList(accessToken, shopId, { ...options, offset });
+      const data = result.response || {};
+      const list = data.item || [];
+
+      all.push(...list);
+      console.error(`[ShopeeService.getAllItems] Page ${page}: ${list.length} item(s) (total ${all.length})`);
+
+      if (!data.has_next_page || list.length === 0) break;
+
+      // next_offset is what Shopee wants echoed back; falling back to a running
+      // count keeps paging alive if the field is ever absent, rather than
+      // silently stopping at page one with a partial catalogue.
+      const nextOffset = data.next_offset ?? (offset + list.length);
+      if (nextOffset <= offset) break;
+      offset = nextOffset;
+
+      if (page >= maxPages) {
+        console.error(`[ShopeeService.getAllItems] WARNING: stopped at the ${maxPages}-page cap with more results pending`);
+        break;
+      }
+    }
+
+    return all;
+  }
+
+  /**
+   * Names, prices, images and stock for up to 50 items.
+   *
+   * @param {string}          accessToken
+   * @param {string|number}   shopId
+   * @param {Array<string|number>} itemIdList - Max 50 per call
+   * @returns {Promise<Object>} `{ response: { item_list: [...] } }`
+   */
+  async getItemBaseInfo(accessToken, shopId, itemIdList) {
+    if (!Array.isArray(itemIdList) || itemIdList.length === 0) {
+      throw new Error('itemIdList must be a non-empty array');
+    }
+    if (itemIdList.length > 50) {
+      throw new Error('itemIdList supports a maximum of 50 ids per request');
+    }
+
+    console.error(`[ShopeeService.getItemBaseInfo] shop=${shopId} items=${itemIdList.length}`);
+
+    return this._request('GET', '/api/v2/product/get_item_base_info', {
+      item_id_list: itemIdList.join(','),
+    }, null, accessToken, String(shopId));
+  }
+
+  /**
+   * Variations of one item, each with its own SKU, price and stock.
+   *
+   * An item with variations sells through its models, not through itself, so a
+   * catalogue that stops at `getItemBaseInfo` has the wrong stock for every
+   * multi-variant listing — which is most of them on a fashion shop.
+   *
+   * @param {string}        accessToken
+   * @param {string|number} shopId
+   * @param {string|number} itemId
+   * @returns {Promise<Object>} `{ response: { tier_variation: [...], model: [...] } }`
+   */
+  async getModelList(accessToken, shopId, itemId) {
+    if (!itemId) throw new Error('itemId is required');
+
+    console.error(`[ShopeeService.getModelList] shop=${shopId} item=${itemId}`);
+
+    return this._request('GET', '/api/v2/product/get_model_list', {
+      item_id: itemId,
+    }, null, accessToken, String(shopId));
   }
 
 }

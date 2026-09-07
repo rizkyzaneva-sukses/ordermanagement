@@ -10,54 +10,127 @@ datasource db {
 }
 
 model User {
-  id          String   @id @default(cuid())
-  email       String   @unique
-  password    String
-  name        String
-  role        String   @default("STAFF")
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  name      String
+  role      String   @default("STAFF")
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  storeAccess StoreAccess[]
-  processedOrders Order[]   @relation("ProcessedBy")
-  printedOrders   Order[]   @relation("PrintedBy")
+  storeAccess     StoreAccess[]
+  processedOrders Order[]       @relation("ProcessedBy")
+  printedOrders   Order[]       @relation("PrintedBy")
   printBatches    PrintBatch[]
 
   @@map("users")
 }
 
 model Store {
-  id            String   @id @default(cuid())
-  name          String
-  platform      String
-  shopId        String
-  accessToken   String
-  refreshToken  String
-  tokenExpiry   DateTime
-  isActive      Boolean  @default(true)
-  lastSyncAt    DateTime?
+  id                String    @id @default(cuid())
+  name              String
+  platform          String
+  shopId            String
+  accessToken       String
+  refreshToken      String
+  tokenExpiry       DateTime
+  isActive          Boolean   @default(true)
+  lastSyncAt        DateTime?
   // Outcome of the most recent sync attempt. Without this a failed sync is only
   // visible in worker logs, so the UI cannot tell "no orders" from "sync broke".
-  lastSyncStatus String?  // OK | ERROR
-  lastSyncError  String?
+  lastSyncStatus    String? // OK | ERROR
+  lastSyncError     String?
   lastSyncAttemptAt DateTime?
   // Set when the platform rejected our refresh token — the only fix is for the
   // merchant to re-authorize, so retrying is pointless until they do.
-  needsReconnect Boolean @default(false)
+  needsReconnect    Boolean   @default(false)
   // What Shopee reported per status on the last run, against what we hold —
   // JSON, written by the sync itself. Without it "sync berhasil" is the only
   // signal there is, and that answers "did I reach Shopee", not "is my data
   // right". Those turned out to be very different questions.
-  lastSyncCounts String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  lastSyncCounts    String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
-  orders       Order[]
-  access       StoreAccess[]
+  orders   Order[]
+  access   StoreAccess[]
+  listings ProductListing[]
 
   @@unique([platform, shopId])
   @@map("stores")
+}
+
+// One physical product, however many shops list it.
+//
+// Deliberately flat: one master = one SKU, the same shape Komplace has. A
+// bundle ("adrea + goldie") therefore cannot be a master. That was decided
+// knowing the consequence — selling adrea on its own does not move a bundle's
+// stock, so bundles stay a manual job outside this app.
+model Product {
+  id        String   @id @default(cuid())
+  // The name operators key everything off, taken from the Zaneva listing
+  // (PROSES KOMPLACE). Unique because it *is* the identity of the master.
+  masterSku String   @unique
+  name      String
+  // Typed by an operator. Nothing decrements this automatically: automatic
+  // deduction has to be right about returns, cancellations and warehouse drift,
+  // and being wrong oversells every shop at once.
+  stock     Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  listings ProductListing[]
+
+  @@map("products")
+}
+
+// One sellable row on one marketplace: an item, or a single variation of one.
+//
+// Platform-neutral on purpose. TikTok is out of scope until its Shop
+// credentials exist, but nothing here is Shopee-shaped, so adding it later is
+// an adapter rather than a migration.
+model ProductListing {
+  id           String    @id @default(cuid())
+  storeId      String
+  // Null until an operator maps it to a master, which is how every row starts:
+  // the catalogue is pulled first and matched afterwards.
+  productId    String?
+  platform     String
+  // Shopee item_id / TikTok product_id.
+  itemId       String
+  // Shopee model_id — one variation of an item. Empty string rather than NULL
+  // for a listing without variations, for the same reason Order.packageNumber
+  // is: Postgres treats NULLs as distinct and would let duplicates straight
+  // through the unique constraint below.
+  modelId      String    @default("")
+  // Seller SKU as typed on the marketplace. This is what a master is matched
+  // against, and it is regularly absent — sellers are not obliged to set one.
+  sku          String?
+  name         String
+  // NORMAL | UNLIST | BANNED | DELETED, as the platform reports it.
+  status       String
+  // Display cache of the marketplace's current price. Never used for
+  // arithmetic; money that has to add up lives on the order.
+  price        Float?
+  // What the platform says it holds, as of lastSyncedAt. Deliberately distinct
+  // from Product.stock, which is what we intend it to be — the gap between the
+  // two is the whole point of a stock sync.
+  stock        Int?
+  imageUrl     String?
+  lastSyncedAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  store   Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@unique([storeId, itemId, modelId])
+  @@index([productId])
+  @@index([storeId, status])
+  @@index([sku])
+  @@map("product_listings")
 }
 
 model StoreAccess {
@@ -73,33 +146,33 @@ model StoreAccess {
 }
 
 model Order {
-  id               String      @id @default(cuid())
-  orderId          String
-  storeId          String
+  id                 String    @id @default(cuid())
+  orderId            String
+  storeId            String
   // Shipping unit identifier. A Shopee order can be split into several packages
   // and each is shipped, tracked and labelled independently (KB §1), so a row
   // here is really one package. Empty string = the order's single/default
   // package; kept non-null because Postgres treats NULLs as distinct and would
   // let duplicates through the unique constraint below.
-  packageNumber    String      @default("")
-  buyerName        String
-  buyerAddress     String
-  buyerPhone       String?
-  buyerCity        String?
-  buyerProvince    String?
-  buyerPostalCode  String?
-  buyerNote        String?     // Catatan buyer ke seller (dari field "note" Shopee API)
-  paymentMethod    String?     // COD / NON_COD — penting untuk operasional
-  items            String      @default("[]")
-  shippingCourier  String
-  shippingService  String
-  trackingNumber   String?
-  shippingLabelUrl String?
-  status           String      @default("PENDING")
+  packageNumber      String    @default("")
+  buyerName          String
+  buyerAddress       String
+  buyerPhone         String?
+  buyerCity          String?
+  buyerProvince      String?
+  buyerPostalCode    String?
+  buyerNote          String? // Catatan buyer ke seller (dari field "note" Shopee API)
+  paymentMethod      String? // COD / NON_COD — penting untuk operasional
+  items              String    @default("[]")
+  shippingCourier    String
+  shippingService    String
+  trackingNumber     String?
+  shippingLabelUrl   String?
+  status             String    @default("PENDING")
   // Fulfillment status from Shopee (KB §3.2). Distinct from `status`: it is what
   // decides whether an AWB may still be printed — printing is only allowed
   // before LOGISTICS_PICKUP_DONE (KB §7.3).
-  logisticsStatus  String?
+  logisticsStatus    String?
   // Shopee logistics channel. mass_ship_order only accepts a batch sharing one
   // channel (KB §4.2), so it has to be known before batching.
   logisticsChannelId Int?
@@ -108,27 +181,27 @@ model Order {
   // earlier but is due in three days — and it is the one thing Komplace shows
   // that no screen here could. Nullable: Shopee omits it for orders that are
   // not awaiting shipment, and older rows predate this column.
-  shipByDate       DateTime?
-  cancelReason     String?     // Reason recorded when the order was cancelled
-  awbPath          String?     // Local path of the downloaded Shopee AWB
-  awbFormat        String?     // pdf | html | zip — Shopee varies by market (KB §7.2)
-  awbDocumentType  String?     // e.g. NORMAL_AIR_WAYBILL (KB §7.1)
-  awbFetchedAt     DateTime?
-  isBatchSelected  Boolean     @default(false)
-  batchId          String?
-  orderDate        DateTime
-  processedAt      DateTime?
-  processedById    String?
-  printedAt        DateTime?
-  printedById      String?
-  printBatchId     String?
-  reprintCount     Int         @default(0)
-  createdAt        DateTime    @default(now())
-  updatedAt        DateTime    @updatedAt
+  shipByDate         DateTime?
+  cancelReason       String? // Reason recorded when the order was cancelled
+  awbPath            String? // Local path of the downloaded Shopee AWB
+  awbFormat          String? // pdf | html | zip — Shopee varies by market (KB §7.2)
+  awbDocumentType    String? // e.g. NORMAL_AIR_WAYBILL (KB §7.1)
+  awbFetchedAt       DateTime?
+  isBatchSelected    Boolean   @default(false)
+  batchId            String?
+  orderDate          DateTime
+  processedAt        DateTime?
+  processedById      String?
+  printedAt          DateTime?
+  printedById        String?
+  printBatchId       String?
+  reprintCount       Int       @default(0)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
-  store         Store  @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  processedBy   User?  @relation("ProcessedBy", fields: [processedById], references: [id], onDelete: SetNull)
-  printedBy     User?  @relation("PrintedBy", fields: [printedById], references: [id], onDelete: SetNull)
+  store       Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  processedBy User? @relation("ProcessedBy", fields: [processedById], references: [id], onDelete: SetNull)
+  printedBy   User? @relation("PrintedBy", fields: [printedById], references: [id], onDelete: SetNull)
 
   @@unique([storeId, orderId, packageNumber])
   @@index([storeId, status])
@@ -141,14 +214,14 @@ model Order {
 }
 
 model PrintBatch {
-  id          String            @id @default(cuid())
+  id          String    @id @default(cuid())
   userId      String
   platform    String
-  storeIds    String            @default("[]")
+  storeIds    String    @default("[]")
   orderCount  Int
-  status      String            @default("PENDING")
+  status      String    @default("PENDING")
   pdfUrl      String?
-  createdAt   DateTime          @default(now())
+  createdAt   DateTime  @default(now())
   completedAt DateTime?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
