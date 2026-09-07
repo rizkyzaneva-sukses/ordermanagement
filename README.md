@@ -15,7 +15,7 @@
 | Auth         | JWT (bcryptjs for password hashing)         |
 | PDF          | pdfmake                                     |
 | Frontend     | React 18 + Tailwind CSS (separate repo)     |
-| Deployment   | Docker Compose, PM2, Nginx                  |
+| Deployment   | Docker Compose (EasyPanel in production)    |
 
 ---
 
@@ -86,13 +86,16 @@ docker compose down
 
 ### Services
 
-| Container  | Port  | Description                |
-| ---------- | ----- | -------------------------- |
-| `postgres` | 5432  | PostgreSQL database        |
-| `redis`    | 6379  | Redis cache & queue        |
-| `api`      | 3000  | Express API server         |
-| `frontend` | 3001  | React frontend             |
-| `nginx`    | 80    | Reverse proxy              |
+| Container | Port | Description                                       |
+| --------- | ---- | ------------------------------------------------- |
+| `db`      | 5432 | PostgreSQL database                               |
+| `redis`   | 6379 | Redis cache & queue                               |
+| `app`     | 3000 | Migrations, Express API, and the Next.js frontend |
+| `worker`  | —    | BullMQ queue consumers only, no HTTP              |
+
+Both `app` and `worker` are built from the same image; `PROCESS_ROLE` decides
+which one a container becomes. There is no reverse proxy in this repo — in
+production EasyPanel terminates TLS and routes to `app` itself.
 
 ### First Run (Docker)
 
@@ -208,9 +211,6 @@ orderpro/
 ├── package.json
 ├── .env.example
 ├── README.md
-│
-├── nginx/
-│   └── default.conf            # Nginx reverse proxy config
 │
 ├── prisma/
 │   ├── schema.prisma           # Database schema
