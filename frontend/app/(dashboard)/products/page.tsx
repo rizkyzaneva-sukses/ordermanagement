@@ -98,7 +98,9 @@ export default function ProductsPage() {
   const fetchSummary = useCallback(async () => {
     try {
       const res = await api.get<any>('/products/summary')
-      setSummary(res.data?.data ?? null)
+      // The axios interceptor in lib/api already unwraps { success, data } — reading
+      // .data.data again lands on undefined, which showed a full catalogue as 0.
+      setSummary(res.data ?? null)
       setSummaryError(null)
     } catch (err: any) {
       // Swallowing this is what made an empty page unreadable: with no summary
@@ -119,7 +121,7 @@ export default function ProductsPage() {
       if (mapped) params.mapped = mapped
 
       const res = await api.get<any>('/products/listings', { params })
-      const data = res.data?.data
+      const data = res.data
       setListings(data?.listings ?? [])
       setTotalPages(data?.totalPages ?? 1)
       setTotal(data?.total ?? 0)
