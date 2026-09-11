@@ -35,6 +35,15 @@ interface LastPull {
   errors: string[]
 }
 
+interface StockSync {
+  at: string
+  stores: number
+  checked: number
+  updated: number
+  failed: number
+  errors: string[]
+}
+
 interface Summary {
   listings: number
   unmapped: number
@@ -42,6 +51,7 @@ interface Summary {
   masters: number
   lastSyncedAt: string | null
   lastPull: LastPull | null
+  lastStockSync: StockSync | null
 }
 
 interface StoreOption {
@@ -82,6 +92,7 @@ export default function ProductsPage() {
   const [stores, setStores] = useState<StoreOption[]>([])
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
+  const [syncingStock, setSyncingStock] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   const [page, setPage] = useState(1)
@@ -178,6 +189,38 @@ export default function ProductsPage() {
     }
   }
 
+  // Deliberately not merged with handleSync. They differ in what they cost and
+  // in what they can fix: this one re-reads listings we already hold, so it can
+  // correct a stale number but can never find a product that was added since the
+  // last catalogue pull.
+  const handleSyncStock = async () => {
+    setSyncingStock(true)
+    setMessage(null)
+    try {
+      await api.post('/products/sync-stock', storeId ? { storeId } : {})
+      setMessage({
+        type: 'success',
+        text: 'Penyegaran stok dimulai. Angka di kolom Stok akan berubah sendiri begitu Shopee menjawab.',
+      })
+
+      // Same polling shape as the catalogue pull, and shorter: this reads fewer
+      // endpoints, so it has no business holding the button for three minutes.
+      const until = Date.now() + 90_000
+      while (Date.now() < until) {
+        await new Promise((r) => setTimeout(r, 5_000))
+        await fetchSummary()
+        await fetchListings()
+      }
+    } catch (err: any) {
+      setMessage({
+        type: 'error',
+        text: err?.response?.data?.error || 'Gagal memulai penyegaran stok',
+      })
+    } finally {
+      setSyncingStock(false)
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
@@ -191,15 +234,38 @@ export default function ProductsPage() {
               Katalog terakhir ditarik {relativeTime(summary.lastSyncedAt)}
             </p>
           )}
+          {/* How many rows actually moved, not just that something ran — a
+              refresh that changed nothing and a refresh that never reached
+              Shopee look identical without it. */}
+          {summary?.lastStockSync && summary.lastStockSync.errors.length === 0 && (
+            <p className="text-xs text-gray-500 dark:text-slate-400">
+              Stok disegarkan {relativeTime(summary.lastStockSync.at)} —{' '}
+              {summary.lastStockSync.updated.toLocaleString('id-ID')} dari{' '}
+              {summary.lastStockSync.checked.toLocaleString('id-ID')} listing berubah
+            </p>
+          )}
         </div>
-        <button
-          onClick={handleSync}
-          disabled={syncing}
-          className="btn-primary self-start flex items-center gap-2"
-        >
-          {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-          <span>{storeId ? 'Tarik Katalog Toko Ini' : 'Tarik Katalog'}</span>
-        </button>
+        {/* Stock first, and primary, because it is the one an operator presses
+            daily. Pulling the catalogue is for when the shop gains a product —
+            rare, and many times the work. */}
+        <div className="flex flex-wrap gap-2 self-start">
+          <button
+            onClick={handleSyncStock}
+            disabled={syncing || syncingStock}
+            className="btn-primary flex items-center gap-2"
+          >
+            {syncingStock ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            <span>{storeId ? 'Sinkron Stok Toko Ini' : 'Sinkron Stok'}</span>
+          </button>
+          <button
+            onClick={handleSync}
+            disabled={syncing || syncingStock}
+            className="btn-secondary flex items-center gap-2"
+          >
+            {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Package className="w-4 h-4" />}
+            <span>{storeId ? 'Tarik Katalog Toko Ini' : 'Tarik Katalog'}</span>
+          </button>
+        </div>
       </div>
 
       {message && (
@@ -238,6 +304,26 @@ export default function ProductsPage() {
                 Kalau pesannya menyebut izin atau <span className="font-mono">no permission</span>,
                 artinya aplikasi ini belum punya izin Product di Shopee Partner Console — itu
                 pengajuan terpisah, bukan masalah kode.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+{summary?.lastStockSync && summary.lastStockSync.errors.length > 0 && (
+        <div className="rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-4 py-3 text-sm text-amber-900 dark:text-amber-200">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <div className="space-y-1">
+              <p className="font-semibold">
+                Penyegaran stok terakhir tidak lengkap
+                {summary.lastStockSync.failed > 0 && ` untuk ${summary.lastStockSync.failed} toko`}.
+              </p>
+              {summary.lastStockSync.errors.map((e, i) => (
+                <p key={i} className="text-xs break-words [overflow-wrap:anywhere]">{e}</p>
+              ))}
+              <p className="text-xs opacity-80">
+                Angka stok yang tidak terbaca dibiarkan seperti apa adanya — tidak ditulis nol.
               </p>
             </div>
           </div>

@@ -13,7 +13,10 @@ const express = require('express');
 const router = express.Router();
 const prisma = require('../prisma/client');
 const { authenticate } = require('../middleware/auth');
-const { syncAllCatalogues, syncStoreCatalogue, getLastPull, recordPull } = require('../services/productSync');
+const {
+  syncAllCatalogues, syncStoreCatalogue, getLastPull, recordPull,
+  syncAllStock, syncStoreStock, getLastStockSync, recordStockSync,
+} = require('../services/productSync');
 
 router.use(authenticate);
 
@@ -135,6 +138,9 @@ router.get('/summary', async (req, res) => {
         // from "the shop really has nothing" — and the first is far likelier,
         // because the Product permission has never been confirmed on this app.
         lastPull: getLastPull(),
+        // Same idea for the cheaper button: a refresh that Shopee refused looks
+        // exactly like a refresh where nothing sold.
+        lastStockSync: getLastStockSync(),
       },
     });
   } catch (err) {
@@ -193,6 +199,66 @@ router.post('/sync', async (req, res) => {
     console.error('POST /products/sync error:', err);
     if (!res.headersSent) {
       return res.status(500).json({ success: false, error: 'Gagal memulai penarikan katalog' });
+    }
+  }
+});
+
+/**
+ * POST /sync-stock
+ * Re-read stock for listings already held. Body: { storeId? } — omit for all.
+ *
+ * Separate from /sync on purpose. A catalogue pull asks Shopee what exists and
+ * costs a call per item plus the paging to find them; this asks only what the
+ * items it already knows about now hold. Same answer shape, a fraction of the
+ * work, which is what makes it reasonable to press often.
+ *
+ * Answers before the work finishes, like /sync, and for the same reason.
+ */
+router.post('/sync-stock', async (req, res) => {
+  try {
+    const { storeId } = req.body || {};
+
+    if (storeId) {
+      const allowed = await visibleStoreIds(req.user);
+      if (allowed && !allowed.includes(storeId)) {
+        return res.status(403).json({ success: false, error: 'Tidak punya akses ke toko ini' });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        message: storeId
+          ? 'Penyegaran stok untuk toko ini sedang berjalan'
+          : 'Penyegaran stok untuk semua toko sedang berjalan',
+        mode: 'inline',
+      },
+    });
+
+    try {
+      if (storeId) {
+        const one = await syncStoreStock(storeId);
+        recordStockSync({
+          stores: 1,
+          checked: one.checked,
+          updated: one.updated,
+          failed: 0,
+          errors: one.warnings || [],
+        });
+      } else {
+        // syncAllStock records its own outcome across stores
+        await syncAllStock();
+      }
+      const done = getLastStockSync();
+      console.log(`[stock] Refresh finished: ${done?.updated ?? 0} of ${done?.checked ?? 0} listing(s) changed`);
+    } catch (err) {
+      console.error('[stock] Refresh failed:', err.message);
+      recordStockSync({ stores: storeId ? 1 : 0, checked: 0, updated: 0, failed: 1, errors: [err.message] });
+    }
+  } catch (err) {
+    console.error('POST /products/sync-stock error:', err);
+    if (!res.headersSent) {
+      return res.status(500).json({ success: false, error: 'Gagal memulai penyegaran stok' });
     }
   }
 });

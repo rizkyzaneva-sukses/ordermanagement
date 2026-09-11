@@ -330,9 +330,229 @@ async function syncAllCatalogues() {
   return results;
 }
 
+// ── Stock refresh ─────────────────────────────────────────────────────────────
+//
+// A catalogue pull and a stock refresh read the same fields from the same two
+// endpoints, so this could have been a flag on `syncStoreCatalogue`. It is not,
+// because the two answer different questions at different frequencies: the
+// catalogue changes when an operator adds a product, stock changes with every
+// sale. Keeping them apart lets the cheap one run often without dragging the
+// expensive one along.
+
+/**
+ * Outcome of the most recent stock refresh.
+ *
+ * In memory for the same reason `lastPull` is — see the note there. It does not
+ * survive a restart, and it is not meant to.
+ */
+let lastStockSync = null;
+
+/** @returns {Object|null} The last stock refresh's outcome, or null if none has run. */
+function getLastStockSync() {
+  return lastStockSync;
+}
+
+function recordStockSync(outcome) {
+  lastStockSync = { ...outcome, at: new Date().toISOString() };
+  return lastStockSync;
+}
+
+/**
+ * Split the listings we already hold into the two calls that can read stock.
+ *
+ * A catalogue pull has to ask Shopee which items exist (`get_item_list`) and
+ * which of them have variations (`get_item_base_info`). A refresh knows both
+ * already: the rows carry the item ids, and a row with a `modelId` is by
+ * definition a variation. Skipping those two questions is the whole reason this
+ * costs less than pulling the catalogue again.
+ *
+ * An item counts as multi-variant if *any* of its rows has a model, not all of
+ * them — reading a variant item at item level returns the sum across its
+ * variations, and writing that total onto every row would inflate each one.
+ *
+ * @param {Array<{itemId: string, modelId: string}>} listings
+ * @returns {{ withModels: string[], withoutModels: string[] }}
+ */
+function planStockRefresh(listings) {
+  const hasModels = new Map();
+  for (const { itemId, modelId } of listings) {
+    hasModels.set(itemId, (hasModels.get(itemId) || false) || modelId !== '');
+  }
+
+  const withModels = [];
+  const withoutModels = [];
+  for (const [itemId, variant] of hasModels) {
+    (variant ? withModels : withoutModels).push(itemId);
+  }
+  return { withModels, withoutModels };
+}
+
+/**
+ * Re-read stock for every listing this store already has, and write what moved.
+ *
+ * Deliberately blind to listings it has never seen: a refresh can re-read a
+ * product, not discover one. Discovering is what the catalogue pull is for, and
+ * conflating the two would make the cheap button quietly as expensive as the
+ * expensive one.
+ *
+ * @param {string} storeId
+ * @returns {Promise<{ storeId: string, storeName: string, checked: number, updated: number, missing: number, warnings: string[] }>}
+ */
+async function syncStoreStock(storeId) {
+  const startedAt = Date.now();
+  const warnings = [];
+
+  const store = await prisma.store.findUnique({ where: { id: storeId } });
+  if (!store) throw new Error(`Store ${storeId} not found`);
+  if (store.platform !== 'SHOPEE') {
+    return { storeId, storeName: store.name, checked: 0, updated: 0, missing: 0,
+      warnings: [`${store.platform} not supported yet`] };
+  }
+
+  const known = await prisma.productListing.findMany({
+    where: { storeId, status: { in: ITEM_STATUSES } },
+    select: { itemId: true, modelId: true, stock: true },
+  });
+
+  if (known.length === 0) {
+    // Not an error, and worth saying plainly: nothing to refresh here means the
+    // catalogue has never been pulled, which is a different button.
+    return { storeId, storeName: store.name, checked: 0, updated: 0, missing: 0,
+      warnings: ['Katalog toko ini masih kosong — tarik katalog dulu'] };
+  }
+
+  const accessToken = await ensureFreshToken(store);
+  const shopId = store.shopId;
+  const { withModels, withoutModels } = planStockRefresh(known);
+
+  console.log(
+    `[stock] Store ${storeId} (${store.name}): refreshing ${known.length} listing(s) — ` +
+    `${withModels.length} item(s) with variations, ${withoutModels.length} without`
+  );
+
+  /** `${itemId}::${modelId}` → stock as Shopee reports it right now. */
+  const fresh = new Map();
+
+  await mapWithConcurrency(withModels, CALL_CONCURRENCY, async (itemId) => {
+    try {
+      const resp = await shopeeService.getModelList(accessToken, shopId, itemId);
+      for (const model of resp.response?.model || []) {
+        fresh.set(`${itemId}::${model.model_id}`, readStock(model));
+      }
+    } catch (err) {
+      // Best effort per item, as in the catalogue pull: one refused item should
+      // not cost the other eleven thousand their refresh.
+      console.warn(`[stock] Model list failed for item ${itemId}: ${err.message}`);
+      warnings.push(`models(${itemId}): ${err.message}`);
+    }
+  });
+
+  const idChunks = [];
+  for (let i = 0; i < withoutModels.length; i += BASE_INFO_CHUNK) {
+    idChunks.push(withoutModels.slice(i, i + BASE_INFO_CHUNK));
+  }
+
+  await mapWithConcurrency(idChunks, CALL_CONCURRENCY, async (ids) => {
+    try {
+      const resp = await shopeeService.getItemBaseInfo(accessToken, shopId, ids);
+      for (const item of resp.response?.item_list || []) {
+        fresh.set(`${item.item_id}::`, readStock(item));
+      }
+    } catch (err) {
+      console.warn(`[stock] Base info failed for ${ids.length} item(s): ${err.message}`);
+      warnings.push(`base_info(${ids.length}): ${err.message}`);
+    }
+  });
+
+  const now = new Date();
+  let updated = 0;
+  let missing = 0;
+
+  for (const row of known) {
+    const key = `${row.itemId}::${row.modelId}`;
+    if (!fresh.has(key)) {
+      // Held here but not returned by Shopee: usually a variation deleted since
+      // the last catalogue pull. Left exactly as it is — writing zero would read
+      // as sold out, and removing the row is the pull's decision, not this one's.
+      missing++;
+      continue;
+    }
+
+    const next = fresh.get(key);
+    // Most stock does not move between refreshes. Writing every row back to the
+    // value it already held is the one thing that would make this slower than
+    // the catalogue pull it exists to avoid.
+    if (next === row.stock) continue;
+
+    await prisma.productListing.update({
+      where: {
+        storeId_itemId_modelId: { storeId, itemId: row.itemId, modelId: row.modelId },
+      },
+      data: { stock: next, lastSyncedAt: now },
+    });
+    updated++;
+  }
+
+  console.log(
+    `[stock] Completed store ${storeId}: ${updated} of ${known.length} listing(s) changed, ` +
+    `${missing} no longer returned by Shopee, in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`
+  );
+
+  return { storeId, storeName: store.name, checked: known.length, updated, missing, warnings };
+}
+
+/**
+ * Refresh stock for every active Shopee shop, one shop at a time.
+ *
+ * Sequential across shops for the same reason `syncAllCatalogues` is.
+ *
+ * @returns {Promise<Array<Object>>}
+ */
+async function syncAllStock() {
+  const stores = await prisma.store.findMany({
+    where: { isActive: true, platform: 'SHOPEE', needsReconnect: false },
+    select: { id: true, name: true },
+  });
+
+  if (stores.length === 0) {
+    console.warn('[stock] No active Shopee store to refresh');
+    recordStockSync({ stores: 0, checked: 0, updated: 0, failed: 0,
+      errors: ['Tidak ada toko Shopee aktif yang bisa disegarkan'] });
+    return [];
+  }
+
+  const results = [];
+  const errors = [];
+
+  for (const store of stores) {
+    try {
+      results.push(await syncStoreStock(store.id));
+    } catch (err) {
+      console.error(`[stock] Store ${store.id} (${store.name}) failed: ${err.message}`);
+      errors.push(`${store.name}: ${err.message}`);
+      results.push({ storeId: store.id, storeName: store.name, checked: 0, updated: 0,
+        missing: 0, warnings: [err.message] });
+    }
+  }
+
+  recordStockSync({
+    stores: stores.length,
+    checked: results.reduce((sum, r) => sum + r.checked, 0),
+    updated: results.reduce((sum, r) => sum + r.updated, 0),
+    failed: errors.length,
+    errors: [...new Set(errors)],
+  });
+
+  return results;
+}
+
 module.exports = {
   syncStoreCatalogue,
   syncAllCatalogues,
+  syncStoreStock,
+  syncAllStock,
+  getLastStockSync,
+  recordStockSync,
   getLastPull,
   recordPull,
   // Exported for testing: the row-shaping rules are where a wrong reading of
@@ -341,4 +561,7 @@ module.exports = {
   buildListingRows,
   readPrice,
   readStock,
+  // Exported for testing: decides which endpoint reads a given item's stock, and
+  // getting it wrong writes an item-level total onto every variation of it.
+  planStockRefresh,
 };
