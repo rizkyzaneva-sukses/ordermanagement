@@ -13,6 +13,8 @@ const express = require('express');
 const router = express.Router();
 const prisma = require('../prisma/client');
 const { authenticate } = require('../middleware/auth');
+const { requireRole } = require('../middleware/role');
+const { planAutoMap } = require('../services/productMapping');
 const {
   syncAllCatalogues, syncStoreCatalogue, getLastPull, recordPull,
   syncAllStock, syncStoreStock, getLastStockSync, recordStockSync,
@@ -260,6 +262,346 @@ router.post('/sync-stock', async (req, res) => {
     if (!res.headersSent) {
       return res.status(500).json({ success: false, error: 'Gagal memulai penyegaran stok' });
     }
+  }
+});
+
+// ── Masters ───────────────────────────────────────────────────────────────────
+//
+// A master is the thing an operator actually thinks in: "Aylee Set — Khaki",
+// one product, however many shops happen to list it. Mapping listings onto one
+// is what makes a single stock figure meaningful, and per PROSES KOMPLACE it is
+// one master to one SKU — bundles are deliberately not modelled.
+
+/** Nothing here will touch more listings than this in one request. */
+const MAX_BATCH = 1000;
+
+/**
+ * Narrow a caller-supplied list of listing ids to the ones they may act on.
+ *
+ * Ids arrive from the browser, so they are a claim, not a fact: without this a
+ * staff account could map a listing belonging to a shop it cannot even see by
+ * pasting its id. Returns the rows rather than the ids because every caller
+ * needs the store id anyway.
+ *
+ * @returns {Promise<Array<{id: string, storeId: string, sku: string|null}>>}
+ */
+async function scopeListings(user, listingIds) {
+  if (!Array.isArray(listingIds) || listingIds.length === 0) {
+    const err = new Error('listingIds wajib diisi');
+    err.status = 400;
+    throw err;
+  }
+  if (listingIds.length > MAX_BATCH) {
+    const err = new Error(`Maksimal ${MAX_BATCH} listing sekali jalan`);
+    err.status = 400;
+    throw err;
+  }
+
+  const where = { id: { in: listingIds.map(String) } };
+  const allowed = await visibleStoreIds(user);
+  if (allowed) where.storeId = { in: allowed };
+
+  return prisma.productListing.findMany({
+    where,
+    select: { id: true, storeId: true, sku: true },
+  });
+}
+
+/**
+ * GET /masters
+ * The master list, with how many listings each one currently holds.
+ *
+ * Query: page, limit, search
+ */
+router.get('/masters', async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || 20));
+
+    const where = {};
+    if (req.query.search) {
+      const search = String(req.query.search);
+      where.OR = [
+        { masterSku: { contains: search, mode: 'insensitive' } },
+        { name: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
+    const [masters, total] = await Promise.all([
+      prisma.product.findMany({
+        where,
+        include: { _count: { select: { listings: true } } },
+        orderBy: [{ masterSku: 'asc' }],
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.product.count({ where }),
+    ]);
+
+    return res.json({
+      success: true,
+      data: { masters, total, page, limit, totalPages: Math.ceil(total / limit) },
+    });
+  } catch (err) {
+    console.error('GET /products/masters error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal memuat master produk' });
+  }
+});
+
+/**
+ * POST /masters
+ * Create a master, optionally binding listings to it in the same step.
+ *
+ * Body: { masterSku, name, stock?, listingIds?[] }
+ *
+ * Creating and mapping are one request because in the Komplace flow they are one
+ * action ("Jadikan Master"): a master created with nothing attached is a row an
+ * operator has no way to notice they left behind.
+ */
+router.post('/masters', async (req, res) => {
+  try {
+    const masterSku = String(req.body?.masterSku ?? '').trim();
+    const name = String(req.body?.name ?? '').trim() || masterSku;
+    const listingIds = req.body?.listingIds;
+
+    if (!masterSku) {
+      return res.status(400).json({ success: false, error: 'Nama SKU master wajib diisi' });
+    }
+
+    // Typed by an operator, so it is worth saying what is wrong rather than
+    // letting the unique constraint surface as a 500.
+    const clash = await prisma.product.findUnique({ where: { masterSku } });
+    if (clash) {
+      return res.status(409).json({
+        success: false,
+        error: `SKU master "${masterSku}" sudah ada — petakan ke master itu, jangan buat baru`,
+        data: { existingId: clash.id },
+      });
+    }
+
+    // Stock is typed, never derived. See PROSES KOMPLACE: the operator keys it
+    // the same way they do in Komplace, and nothing decrements it automatically.
+    const stock = Number.isFinite(Number(req.body?.stock)) ? Math.trunc(Number(req.body.stock)) : 0;
+
+    let scoped = [];
+    if (listingIds !== undefined) {
+      scoped = await scopeListings(req.user, listingIds);
+    }
+
+    const master = await prisma.$transaction(async (tx) => {
+      const created = await tx.product.create({
+        data: { masterSku, name, stock },
+      });
+
+      if (scoped.length > 0) {
+        await tx.productListing.updateMany({
+          where: { id: { in: scoped.map(l => l.id) } },
+          data: { productId: created.id },
+        });
+      }
+
+      return created;
+    });
+
+    console.log(`[masters] Created "${masterSku}" with ${scoped.length} listing(s) mapped`);
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        master,
+        mapped: scoped.length,
+        // Says plainly when some of what was selected could not be acted on,
+        // rather than reporting a smaller number with no explanation.
+        skipped: Array.isArray(listingIds) ? listingIds.length - scoped.length : 0,
+      },
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ success: false, error: err.message });
+    console.error('POST /products/masters error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal membuat master produk' });
+  }
+});
+
+/**
+ * PATCH /masters/:id
+ * Body: { name?, stock?, isActive? }
+ *
+ * `masterSku` is not editable: it is the identity operators match against, and
+ * renaming it silently re-points every listing bound to it.
+ */
+router.patch('/masters/:id', async (req, res) => {
+  try {
+    const data = {};
+    if (req.body?.name !== undefined) {
+      const name = String(req.body.name).trim();
+      if (!name) return res.status(400).json({ success: false, error: 'Nama tidak boleh kosong' });
+      data.name = name;
+    }
+    if (req.body?.stock !== undefined) {
+      const stock = Number(req.body.stock);
+      if (!Number.isFinite(stock) || stock < 0) {
+        return res.status(400).json({ success: false, error: 'Stok harus angka bulat, minimal 0' });
+      }
+      data.stock = Math.trunc(stock);
+    }
+    if (req.body?.isActive !== undefined) data.isActive = Boolean(req.body.isActive);
+
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ success: false, error: 'Tidak ada yang diubah' });
+    }
+
+    const master = await prisma.product.update({ where: { id: req.params.id }, data });
+    return res.json({ success: true, data: { master } });
+  } catch (err) {
+    if (err.code === 'P2025') {
+      return res.status(404).json({ success: false, error: 'Master produk tidak ditemukan' });
+    }
+    console.error('PATCH /products/masters/:id error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal mengubah master produk' });
+  }
+});
+
+/**
+ * DELETE /masters/:id
+ *
+ * Admin only, and non-destructive to the catalogue: `onDelete: SetNull` returns
+ * every listing bound to it to unmapped rather than deleting it with the master.
+ */
+router.delete('/masters/:id', requireRole('ADMIN'), async (req, res) => {
+  try {
+    const master = await prisma.product.findUnique({
+      where: { id: req.params.id },
+      include: { _count: { select: { listings: true } } },
+    });
+    if (!master) {
+      return res.status(404).json({ success: false, error: 'Master produk tidak ditemukan' });
+    }
+
+    await prisma.product.delete({ where: { id: req.params.id } });
+    console.log(`[masters] Deleted "${master.masterSku}" — ${master._count.listings} listing(s) returned to unmapped`);
+
+    return res.json({ success: true, data: { unmapped: master._count.listings } });
+  } catch (err) {
+    console.error('DELETE /products/masters/:id error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal menghapus master produk' });
+  }
+});
+
+/**
+ * POST /listings/map
+ * Bind existing listings to an existing master. Body: { listingIds[], productId }
+ */
+router.post('/listings/map', async (req, res) => {
+  try {
+    const productId = String(req.body?.productId ?? '').trim();
+    if (!productId) {
+      return res.status(400).json({ success: false, error: 'productId wajib diisi' });
+    }
+
+    const master = await prisma.product.findUnique({ where: { id: productId } });
+    if (!master) {
+      return res.status(404).json({ success: false, error: 'Master produk tidak ditemukan' });
+    }
+
+    const scoped = await scopeListings(req.user, req.body?.listingIds);
+    const result = await prisma.productListing.updateMany({
+      where: { id: { in: scoped.map(l => l.id) } },
+      data: { productId },
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        mapped: result.count,
+        skipped: req.body.listingIds.length - result.count,
+        master: { id: master.id, masterSku: master.masterSku },
+      },
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ success: false, error: err.message });
+    console.error('POST /products/listings/map error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal memetakan listing ke master' });
+  }
+});
+
+/**
+ * POST /listings/unmap
+ * Body: { listingIds[] }
+ */
+router.post('/listings/unmap', async (req, res) => {
+  try {
+    const scoped = await scopeListings(req.user, req.body?.listingIds);
+    const result = await prisma.productListing.updateMany({
+      where: { id: { in: scoped.map(l => l.id) } },
+      data: { productId: null },
+    });
+
+    return res.json({ success: true, data: { unmapped: result.count } });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ success: false, error: err.message });
+    console.error('POST /products/listings/unmap error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal melepas pemetaan' });
+  }
+});
+
+/**
+ * POST /masters/automap
+ * Bind every unmapped listing whose marketplace SKU equals a master's SKU.
+ *
+ * This is the step that makes "the same product in six shops" one product: the
+ * seller SKU is already the same string in every shop, because that is how the
+ * operator types it. Body: { dryRun?: true } to count without writing.
+ *
+ * Only ever fills in blanks — a listing an operator has already mapped by hand
+ * is never re-pointed, however well its SKU matches something else.
+ */
+router.post('/masters/automap', async (req, res) => {
+  try {
+    const dryRun = Boolean(req.body?.dryRun);
+
+    const masters = await prisma.product.findMany({
+      where: { isActive: true },
+      select: { id: true, masterSku: true },
+    });
+    if (masters.length === 0) {
+      return res.json({ success: true, data: { matched: 0, mapped: 0, masters: 0 } });
+    }
+
+    const where = { productId: null, sku: { not: null } };
+    const allowed = await visibleStoreIds(req.user);
+    if (allowed) where.storeId = { in: allowed };
+
+    // productId is selected even though the query already filters on it being
+    // null: planAutoMap re-checks it, and handing it a shape that cannot express
+    // "already mapped" would make that guard untestable.
+    const candidates = await prisma.productListing.findMany({
+      where,
+      select: { id: true, sku: true, productId: true },
+    });
+
+    const { plan, matched } = planAutoMap(masters, candidates);
+    if (dryRun) {
+      return res.json({ success: true, data: { matched, mapped: 0, masters: plan.size, dryRun: true } });
+    }
+
+    let mapped = 0;
+    for (const [productId, ids] of plan) {
+      // Chunked because a popular SKU can carry thousands of ids, and a single
+      // IN list that long is a query planner problem rather than a feature.
+      for (let i = 0; i < ids.length; i += MAX_BATCH) {
+        const result = await prisma.productListing.updateMany({
+          where: { id: { in: ids.slice(i, i + MAX_BATCH) } },
+          data: { productId },
+        });
+        mapped += result.count;
+      }
+    }
+
+    console.log(`[masters] Auto-map bound ${mapped} listing(s) across ${plan.size} master(s)`);
+    return res.json({ success: true, data: { matched, mapped, masters: plan.size } });
+  } catch (err) {
+    console.error('POST /products/masters/automap error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal memetakan otomatis' });
   }
 });
 
