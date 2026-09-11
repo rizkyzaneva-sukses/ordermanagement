@@ -1,13 +1,14 @@
 'use strict';
 
 /**
- * productMapping.js — deciding which listing belongs to which master.
+ * productMapping.js — master-side decisions that can be wrong without failing.
  *
- * Split out from the route because this is the part that can be wrong without
- * failing: a mapping bound to the wrong master shows a plausible SKU next to a
- * plausible product and only surfaces later, as stock that moves on the wrong
- * listing. It is pure, so it can be exercised against the cases that matter
- * without a database or a live shop.
+ * Split out from the route because neither of these fails loudly when it is
+ * wrong. A mapping bound to the wrong master shows a plausible SKU beside a
+ * plausible product and only surfaces later, as stock moving on the wrong
+ * listing; a bulk stock edit that floors at zero looks like it worked. Both are
+ * pure here, so they can be exercised against the cases that matter without a
+ * database or a live shop.
  *
  * One master is one SKU. Bundles (adrea+goldie) are deliberately not modelled —
  * PROSES KOMPLACE works the same way, and matching Komplace was the decision.
@@ -77,7 +78,37 @@ function planAutoMap(masters, listings) {
   return { plan, matched, skipped };
 }
 
+/**
+ * Work out what each master's stock becomes under a bulk edit.
+ *
+ * Floors at zero and says how many rows it had to floor. Silently writing 0 for
+ * an operator who subtracted 50 from a SKU holding 20 hides a counting mistake
+ * exactly where it is cheapest to catch — a bulk edit touches every SKU they
+ * ticked, so one wrong number is never one wrong number.
+ *
+ * @param {Array<{id: string, stock: number}>} masters
+ * @param {'set'|'adjust'} mode
+ * @param {number} amount - For 'adjust', negative subtracts
+ * @returns {{ writes: Array<{id: string, stock: number}>, clamped: number }}
+ */
+function planStockEdit(masters, mode, amount) {
+  const writes = [];
+  let clamped = 0;
+
+  for (const master of masters) {
+    let next = mode === 'set' ? amount : master.stock + amount;
+    if (next < 0) {
+      clamped++;
+      next = 0;
+    }
+    writes.push({ id: master.id, stock: next });
+  }
+
+  return { writes, clamped };
+}
+
 module.exports = {
   normaliseSku,
   planAutoMap,
+  planStockEdit,
 };

@@ -14,7 +14,7 @@ const router = express.Router();
 const prisma = require('../prisma/client');
 const { authenticate } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
-const { planAutoMap } = require('../services/productMapping');
+const { planAutoMap, planStockEdit } = require('../services/productMapping');
 const {
   syncAllCatalogues, syncStoreCatalogue, getLastPull, recordPull,
   syncAllStock, syncStoreStock, getLastStockSync, recordStockSync,
@@ -602,6 +602,79 @@ router.post('/masters/automap', async (req, res) => {
   } catch (err) {
     console.error('POST /products/masters/automap error:', err);
     return res.status(500).json({ success: false, error: 'Gagal memetakan otomatis' });
+  }
+});
+
+/**
+ * POST /masters/stock
+ * Set or adjust stock on many masters at once.
+ *
+ * Body: { productIds[], mode: 'set' | 'adjust', value }
+ *
+ *   set     stock becomes `value`
+ *   adjust  stock becomes `stock + value`, floored at zero
+ *
+ * Adjust exists because the real action is almost never "this SKU now has 40" —
+ * it is "30 more arrived". Making an operator read the current number, add to it
+ * in their head and type the total is how a restock silently overwrites a sale
+ * that landed in between.
+ *
+ * Rows are read and written inside one transaction rather than pushed through a
+ * single `updateMany` with `increment`, because a decrement has to be floored
+ * per row and `increment` would happily write -6.
+ */
+router.post('/masters/stock', async (req, res) => {
+  try {
+    const productIds = req.body?.productIds;
+    const mode = String(req.body?.mode ?? 'set');
+    const value = Number(req.body?.value);
+
+    if (!Array.isArray(productIds) || productIds.length === 0) {
+      return res.status(400).json({ success: false, error: 'Pilih minimal satu master produk' });
+    }
+    if (productIds.length > MAX_BATCH) {
+      return res.status(400).json({ success: false, error: `Maksimal ${MAX_BATCH} master sekali jalan` });
+    }
+    if (!['set', 'adjust'].includes(mode)) {
+      return res.status(400).json({ success: false, error: 'mode harus "set" atau "adjust"' });
+    }
+    if (!Number.isFinite(value)) {
+      return res.status(400).json({ success: false, error: 'Nilai stok harus angka' });
+    }
+    if (mode === 'set' && value < 0) {
+      return res.status(400).json({ success: false, error: 'Stok tidak boleh negatif' });
+    }
+
+    const amount = Math.trunc(value);
+
+    const masters = await prisma.product.findMany({
+      where: { id: { in: productIds.map(String) } },
+      select: { id: true, stock: true },
+    });
+
+    if (masters.length === 0) {
+      return res.status(404).json({ success: false, error: 'Master produk tidak ditemukan' });
+    }
+
+    const { writes, clamped } = planStockEdit(masters, mode, amount);
+
+    await prisma.$transaction(
+      writes.map(w => prisma.product.update({ where: { id: w.id }, data: { stock: w.stock } })),
+    );
+
+    console.log(`[masters] Stock ${mode} ${amount} on ${masters.length} master(s), ${clamped} floored at 0`);
+
+    return res.json({
+      success: true,
+      data: {
+        updated: masters.length,
+        clamped,
+        skipped: productIds.length - masters.length,
+      },
+    });
+  } catch (err) {
+    console.error('POST /products/masters/stock error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal mengubah stok master' });
   }
 });
 

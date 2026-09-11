@@ -11,6 +11,7 @@ import {
   Store,
   LogOut,
   Package,
+  Boxes,
   Sun,
   Moon,
   Menu,
@@ -28,6 +29,7 @@ const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/orders', label: 'Pesanan', icon: ShoppingBag },
   { href: '/products', label: 'Produk', icon: Package },
+  { href: '/stock', label: 'Daftar Stok', icon: Boxes },
   { href: '/print', label: 'Cetak Resi', icon: Printer },
 ]
 
