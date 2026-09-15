@@ -198,10 +198,10 @@ async function refreshExpiringTokens(thresholdMinutes = 90) {
     where: {
       isActive: true,
       needsReconnect: false,
-      OR: [
-        { tokenExpiry: { lt: cutoff } },
-        { tokenExpiry: null },
-      ],
+      // No `tokenExpiry: null` branch: the column is required, and Prisma
+      // rejects a null filter on it outright — which failed this whole sweep
+      // on every run from July to 15 Sep 2026.
+      tokenExpiry: { lt: cutoff },
     },
   });
 
