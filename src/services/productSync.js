@@ -127,6 +127,8 @@ function buildListingRows(item, models = []) {
       modelId: '',
       sku: item.item_sku || null,
       name: item.item_name || `Item ${item.item_id}`,
+      itemName: item.item_name || null,
+      modelName: null,
       price: readPrice(item),
       stock: readStock(item),
     }];
@@ -141,6 +143,8 @@ function buildListingRows(item, models = []) {
     name: model.model_name
       ? `${item.item_name} — ${model.model_name}`
       : (item.item_name || `Item ${item.item_id}`),
+    itemName: item.item_name || null,
+    modelName: model.model_name || null,
     price: readPrice(model),
     stock: readStock(model),
   }));
@@ -256,6 +260,8 @@ async function upsertListings(store, rows) {
       platform: store.platform,
       sku: row.sku,
       name: row.name,
+      itemName: row.itemName,
+      modelName: row.modelName,
       status: row.status,
       price: row.price,
       stock: row.stock,

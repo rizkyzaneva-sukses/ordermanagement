@@ -71,6 +71,40 @@ interface StoreOption {
   name: string
 }
 
+/** One variation row on the "Jadikan Master" form. */
+interface DraftVariant {
+  listingId: string
+  variantName: string | null
+  sku: string | null
+  masterSku: string
+  stock: number | null
+  mappedTo: string | null
+  existingMaster: string | null
+}
+
+/** One Shopee item on the form — becomes one parent Master Produk. */
+interface DraftItem {
+  storeId: string
+  storeName: string
+  itemId: string
+  name: string
+  imageUrl: string | null
+  variants: DraftVariant[]
+}
+
+interface ItemResult {
+  name: string
+  ok: boolean
+  errors?: string[]
+  created?: number
+  bound?: number
+  skipped?: number
+  unreadStock?: number
+}
+
+const sameSku = (a: string | null, b: string | null) =>
+  (a ?? '').trim().toLowerCase() !== '' && (a ?? '').trim().toLowerCase() === (b ?? '').trim().toLowerCase()
+
 const statusLabels: Record<string, string> = {
   NORMAL: 'Aktif',
   UNLIST: 'Diarsipkan',
@@ -113,9 +147,10 @@ export default function ProductsPage() {
   const [modal, setModal] = useState<null | 'create' | 'map'>(null)
   const [busy, setBusy] = useState(false)
 
-  const [newSku, setNewSku] = useState('')
-  const [newName, setNewName] = useState('')
-  const [newStock, setNewStock] = useState('0')
+  const [draft, setDraft] = useState<DraftItem[]>([])
+  // Keyed by storeId:itemId, so a failed item keeps its reason beside it while
+  // the ones that saved drop off the form.
+  const [draftErrors, setDraftErrors] = useState<Record<string, string[]>>({})
 
   const [masterQuery, setMasterQuery] = useState('')
   const [masterResults, setMasterResults] = useState<Master[]>([])
@@ -271,34 +306,77 @@ export default function ProductsPage() {
   }
 
   /**
-   * Open the create-master dialog, pre-filling the SKU from the selection.
+   * Open "Jadikan Master" for every item the selection touches.
    *
-   * PROSES KOMPLACE says the master SKU has to match the Zaneva product name,
-   * and the seller SKU already on the listing is usually exactly that — so it is
-   * offered as a starting point, not written for them.
+   * Works per item, like Komplace: ticking one colour of Belva Vest brings all
+   * five onto the form, each with its own Master SKU pre-filled from the seller
+   * SKU and its starting stock taken from the listing.
    */
-  const openCreateMaster = () => {
-    const first = listings.find((l) => selected.includes(l.id))
-    setNewSku(first?.sku ?? '')
-    setNewName(first?.name ?? '')
-    setNewStock('0')
-    setModal('create')
+  const openCreateMaster = async () => {
+    setBusy(true)
+    setMessage(null)
+    try {
+      const res = await api.post<any>('/products/masters/draft', { listingIds: selected })
+      setDraft(res.data?.items ?? [])
+      setDraftErrors({})
+      setModal('create')
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err?.response?.data?.error || 'Gagal menyiapkan form master produk' })
+    } finally {
+      setBusy(false)
+    }
   }
+
+  const draftKey = (item: DraftItem) => `${item.storeId}:${item.itemId}`
+
+  const updateDraftName = (key: string, name: string) =>
+    setDraft((prev) => prev.map((it) => (draftKey(it) === key ? { ...it, name } : it)))
+
+  const updateDraftSku = (key: string, listingId: string, masterSku: string) =>
+    setDraft((prev) => prev.map((it) => draftKey(it) !== key ? it : {
+      ...it,
+      variants: it.variants.map((v) => (v.listingId === listingId ? { ...v, masterSku } : v)),
+    }))
 
   const handleCreateMaster = async () => {
     setBusy(true)
     try {
-      const res = await api.post<any>('/products/masters', {
-        masterSku: newSku,
-        name: newName,
-        stock: Number(newStock) || 0,
-        listingIds: selected,
+      const sent = draft
+      const res = await api.post<any>('/products/masters/from-items', {
+        items: sent.map((it) => ({
+          name: it.name,
+          // A listing already bound elsewhere is shown for context but not sent
+          // to be re-pointed; the server would skip it anyway.
+          variants: it.variants.filter((v) => !v.mappedTo).map((v) => ({
+            listingId: v.listingId,
+            masterSku: v.masterSku,
+          })),
+        })),
       })
-      const skipped = res.data?.skipped ?? 0
-      await afterMappingChange(
-        `Master "${newSku}" dibuat, ${res.data?.mapped ?? 0} listing terikat` +
-        (skipped > 0 ? ` (${skipped} dilewati — di luar toko yang bisa kamu akses)` : '')
-      )
+
+      const results: ItemResult[] = res.data?.results ?? []
+      const succeeded = res.data?.succeeded ?? 0
+      const failed = res.data?.failed ?? 0
+      const unread = results.reduce((n, r) => n + (r.unreadStock ?? 0), 0)
+
+      const summaryText =
+        `Berhasil: ${succeeded} produk, Gagal: ${failed} produk` +
+        (unread > 0 ? ` — ${unread} varian stoknya tidak terbaca dari Shopee dan diisi 0, cek di Daftar Stok` : '')
+
+      if (failed === 0) {
+        await afterMappingChange(summaryText)
+        return
+      }
+
+      // Results come back in the order items were sent.
+      const errors: Record<string, string[]> = {}
+      sent.forEach((it, i) => {
+        if (results[i] && !results[i].ok) errors[draftKey(it)] = results[i].errors ?? []
+      })
+      setDraft(sent.filter((it) => errors[draftKey(it)]))
+      setDraftErrors(errors)
+      setMessage({ type: 'error', text: summaryText })
+      if (succeeded > 0) await Promise.all([fetchSummary(), fetchListings()])
     } catch (err: any) {
       setMessage({ type: 'error', text: err?.response?.data?.error || 'Gagal membuat master produk' })
     } finally {
@@ -695,12 +773,12 @@ export default function ProductsPage() {
 
       {modal === 'create' && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={() => setModal(null)}>
-          <div className="card w-full max-w-lg p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
+          <div className="card w-full max-w-3xl p-5 space-y-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">Jadikan Master</h2>
                 <p className="text-sm text-gray-500 dark:text-slate-400">
-                  {selected.length} listing akan diikat ke master ini.
+                  {draft.length} produk. Tiap varian jadi satu Master SKU, dengan stok awal dari listing.
                 </p>
               </div>
               <button onClick={() => setModal(null)} className="text-gray-400 hover:text-gray-600">
@@ -708,32 +786,102 @@ export default function ProductsPage() {
               </button>
             </div>
 
-            <div className="space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1">
-                  Nama SKU master
-                </label>
-                <input value={newSku} onChange={(e) => setNewSku(e.target.value)} className="input w-full font-mono text-sm" />
-                <p className="text-xs text-gray-500 dark:text-slate-400 mt-1">
-                  Harus sesuai nama produk Zaneva — ini yang dipakai untuk mencocokkan listing dari toko lain.
-                </p>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1">Nama produk</label>
-                <input value={newName} onChange={(e) => setNewName(e.target.value)} className="input w-full" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-slate-300 mb-1">Stok</label>
-                <input type="number" min={0} value={newStock} onChange={(e) => setNewStock(e.target.value)} className="input w-full" />
-                <p className="text-xs text-gray-500 dark:text-slate-400 mt-1">
-                  Diisi manual, seperti di Komplace. Angka ini tidak berkurang sendiri saat ada pesanan.
-                </p>
-              </div>
-            </div>
+            {draft.map((item) => {
+              const key = draftKey(item)
+              const errors = draftErrors[key]
+              const open = item.variants.filter((v) => !v.mappedTo)
+              const totalStock = open.reduce((n, v) => n + (v.stock ?? 0), 0)
+              return (
+                <div key={key} className={`rounded-lg border p-4 space-y-3 ${
+                  errors ? 'border-red-300 dark:border-red-800' : 'border-gray-200 dark:border-slate-700'
+                }`}>
+                  <div className="flex items-start gap-3">
+                    {item.imageUrl
+                      // eslint-disable-next-line @next/next/no-img-element
+                      ? <img src={item.imageUrl} alt="" className="w-12 h-12 rounded object-cover shrink-0" />
+                      : <div className="w-12 h-12 rounded bg-gray-100 dark:bg-slate-700 shrink-0" />}
+                    <div className="flex-1 min-w-0">
+                      <label className="block text-xs font-medium text-gray-500 dark:text-slate-400 mb-1">
+                        Nama Master Produk
+                      </label>
+                      <input
+                        value={item.name}
+                        onChange={(e) => updateDraftName(key, e.target.value)}
+                        className="input w-full"
+                      />
+                      <p className="text-xs text-gray-500 dark:text-slate-400 mt-1">
+                        {item.storeName} · {item.variants.length} varian · stok awal total {totalStock.toLocaleString('id-ID')}
+                      </p>
+                    </div>
+                  </div>
+
+                  {errors && (
+                    <div className="rounded border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 px-3 py-2 text-xs text-red-800 dark:text-red-200 space-y-0.5">
+                      {errors.map((e, i) => <p key={i}>{e}</p>)}
+                    </div>
+                  )}
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="text-left text-xs uppercase text-gray-500 dark:text-slate-400">
+                        <tr>
+                          <th className="py-2 pr-3">Varian</th>
+                          <th className="py-2 pr-3">SKU Produk</th>
+                          <th className="py-2 pr-3">Master SKU</th>
+                          <th className="py-2 text-right">Stok Awal</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100 dark:divide-slate-700/60">
+                        {item.variants.map((v) => (
+                          <tr key={v.listingId}>
+                            <td className="py-2 pr-3 text-gray-900 dark:text-slate-100">{v.variantName || '—'}</td>
+                            <td className="py-2 pr-3 font-mono text-xs text-gray-500 dark:text-slate-400">{v.sku || '—'}</td>
+                            <td className="py-2 pr-3">
+                              {v.mappedTo ? (
+                                <span className="text-xs text-gray-500 dark:text-slate-400">
+                                  sudah terikat ke <span className="font-mono">{v.mappedTo}</span>
+                                </span>
+                              ) : (
+                                <>
+                                  <input
+                                    value={v.masterSku}
+                                    onChange={(e) => updateDraftSku(key, v.listingId, e.target.value)}
+                                    className="input w-full font-mono text-xs py-1"
+                                  />
+                                  {/* Said before saving, not after: the same variation
+                                      in another shop joins its master rather than
+                                      making a second one with a second stock figure. */}
+                                  {sameSku(v.masterSku, v.existingMaster) && (
+                                    <p className="text-xs text-blue-700 dark:text-blue-300 mt-0.5">
+                                      Master SKU ini sudah ada — listing akan digabung ke sana, stoknya tidak diubah
+                                    </p>
+                                  )}
+                                </>
+                              )}
+                            </td>
+                            <td className="py-2 text-right">
+                              {v.stock === null
+                                ? <span className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400" title="Stok tidak terbaca dari Shopee — akan diisi 0">
+                                    <AlertTriangle className="w-3 h-3" /> 0
+                                  </span>
+                                : <span className="text-gray-900 dark:text-slate-100">{v.stock}</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )
+            })}
+
+            <p className="text-xs text-gray-500 dark:text-slate-400">
+              Stok master tetap diisi manual setelah ini — angkanya tidak berkurang sendiri saat ada pesanan.
+            </p>
 
             <div className="flex justify-end gap-2 pt-1">
               <button onClick={() => setModal(null)} className="btn-secondary">Batal</button>
-              <button onClick={handleCreateMaster} disabled={busy || !newSku.trim()} className="btn-primary flex items-center gap-2">
+              <button onClick={handleCreateMaster} disabled={busy || draft.length === 0} className="btn-primary flex items-center gap-2">
                 {busy && <Loader2 className="w-4 h-4 animate-spin" />}
                 <span>Buat Master Produk</span>
               </button>

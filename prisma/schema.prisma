@@ -61,28 +61,53 @@ model Store {
   @@map("stores")
 }
 
-// One physical product, however many shops list it.
+// The parent an operator sees on the Master Produk list: "Belva Vest", holding
+// one Master SKU per variation (Black, Coffee, Dusty Pink…). This is Komplace's
+// shape, confirmed from a screen recording on 14 Sep 2026 — "Jadikan Master"
+// on one item creates one of these plus a Product per variation.
 //
-// Deliberately flat: one master = one SKU, the same shape Komplace has. A
-// bundle ("adrea + goldie") therefore cannot be a master. That was decided
-// knowing the consequence — selling adrea on its own does not move a bundle's
-// stock, so bundles stay a manual job outside this app.
-model Product {
+// It carries no stock of its own. Stock lives on the variation, and a parent
+// total is only ever a sum, never a number someone types.
+model MasterProduct {
   id        String   @id @default(cuid())
-  // The name operators key everything off, taken from the Zaneva listing
-  // (PROSES KOMPLACE). Unique because it *is* the identity of the master.
-  masterSku String   @unique
   name      String
-  // Typed by an operator. Nothing decrements this automatically: automatic
-  // deduction has to be right about returns, cancellations and warehouse drift,
-  // and being wrong oversells every shop at once.
-  stock     Int      @default(0)
-  isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  listings ProductListing[]
+  variants Product[]
 
+  @@map("master_products")
+}
+
+// One Master SKU — one sellable variation, however many shops list it.
+//
+// A bundle ("adrea + goldie") cannot be a master. That was decided knowing the
+// consequence — selling adrea on its own does not move a bundle's stock, so
+// bundles stay a manual job outside this app.
+model Product {
+  id              String   @id @default(cuid())
+  // Null for masters made before the parent level existed (11–15 Sep 2026).
+  // They still work as flat SKUs; nothing reads the parent to decide stock.
+  masterProductId String?
+  // The variation's own label ("Black"), shown under the parent's name. Null
+  // for an item without variations, where the parent name says it all.
+  variantName     String?
+  // The name operators key everything off, taken from the Zaneva listing
+  // (PROSES KOMPLACE). Unique because it *is* the identity of the master.
+  masterSku       String   @unique
+  name            String
+  // Typed by an operator. Nothing decrements this automatically: automatic
+  // deduction has to be right about returns, cancellations and warehouse drift,
+  // and being wrong oversells every shop at once.
+  stock           Int      @default(0)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  masterProduct MasterProduct?   @relation(fields: [masterProductId], references: [id], onDelete: SetNull)
+  listings      ProductListing[]
+
+  @@index([masterProductId])
   @@map("products")
 }
 
@@ -109,6 +134,12 @@ model ProductListing {
   // against, and it is regularly absent — sellers are not obliged to set one.
   sku          String?
   name         String
+  // The two halves `name` is built from, kept apart so a parent master can be
+  // named after the item and each variation after its option, without guessing
+  // where one ends in "Zaneva Curve — Belva Vest — Black". Null on rows pulled
+  // before these columns existed, until the next catalogue pull.
+  itemName     String?
+  modelName    String?
   // NORMAL | UNLIST | BANNED | DELETED, as the platform reports it.
   status       String
   // Display cache of the marketplace's current price. Never used for

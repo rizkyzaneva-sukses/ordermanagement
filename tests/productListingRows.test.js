@@ -102,3 +102,14 @@ test('a missing name still produces something identifiable', () => {
   const rows = buildListingRows(item({ item_name: undefined }), []);
   assert.equal(rows[0].name, 'Item 111');
 });
+
+test('item and variation names are kept apart for the parent master', () => {
+  const rows = buildListingRows(item({ has_model: true }), [
+    { model_id: 9, model_name: 'XL / Navy', model_sku: 'X' },
+    { model_id: 10, model_sku: 'Y' },
+  ]);
+  assert.equal(rows[0].itemName, 'Zaneva Curve — Sidney Vest Outer');
+  assert.equal(rows[0].modelName, 'XL / Navy');
+  assert.equal(rows[1].modelName, null);
+  assert.equal(buildListingRows(item(), [])[0].modelName, null);
+});

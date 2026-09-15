@@ -14,7 +14,10 @@ const router = express.Router();
 const prisma = require('../prisma/client');
 const { authenticate } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
-const { planAutoMap, planStockEdit } = require('../services/productMapping');
+const {
+  normaliseSku, planAutoMap, planStockEdit,
+  itemNameOf, variantNameOf, planMasterFromItem,
+} = require('../services/productMapping');
 const {
   syncAllCatalogues, syncStoreCatalogue, getLastPull, recordPull,
   syncAllStock, syncStoreStock, getLastStockSync, recordStockSync,
@@ -269,8 +272,9 @@ router.post('/sync-stock', async (req, res) => {
 //
 // A master is the thing an operator actually thinks in: "Aylee Set — Khaki",
 // one product, however many shops happen to list it. Mapping listings onto one
-// is what makes a single stock figure meaningful, and per PROSES KOMPLACE it is
-// one master to one SKU — bundles are deliberately not modelled.
+// is what makes a single stock figure meaningful. As in Komplace, one master SKU
+// is one variation, grouped under a parent Master Produk per item — bundles are
+// deliberately not modelled.
 
 /** Nothing here will touch more listings than this in one request. */
 const MAX_BATCH = 1000;
@@ -330,7 +334,10 @@ router.get('/masters', async (req, res) => {
     const [masters, total] = await Promise.all([
       prisma.product.findMany({
         where,
-        include: { _count: { select: { listings: true } } },
+        include: {
+          _count: { select: { listings: true } },
+          masterProduct: { select: { id: true, name: true } },
+        },
         orderBy: [{ masterSku: 'asc' }],
         skip: (page - 1) * limit,
         take: limit,
@@ -349,75 +356,201 @@ router.get('/masters', async (req, res) => {
 });
 
 /**
- * POST /masters
- * Create a master, optionally binding listings to it in the same step.
+ * POST /masters/draft
+ * Build the "Jadikan Master" form for whatever items the selection touches.
  *
- * Body: { masterSku, name, stock?, listingIds?[] }
+ * Body: { listingIds[] }
  *
- * Creating and mapping are one request because in the Komplace flow they are one
- * action ("Jadikan Master"): a master created with nothing attached is a row an
- * operator has no way to notice they left behind.
+ * Expands to every variation of each selected item, not just the ticked rows —
+ * Komplace shows the whole item on one page, and a master made from two of five
+ * colours leaves the other three to be found later as "belum dipetakan".
+ * Nothing is written.
  */
-router.post('/masters', async (req, res) => {
+router.post('/masters/draft', async (req, res) => {
   try {
-    const masterSku = String(req.body?.masterSku ?? '').trim();
-    const name = String(req.body?.name ?? '').trim() || masterSku;
-    const listingIds = req.body?.listingIds;
-
-    if (!masterSku) {
-      return res.status(400).json({ success: false, error: 'Nama SKU master wajib diisi' });
+    const picked = await scopeListings(req.user, req.body?.listingIds);
+    if (picked.length === 0) {
+      return res.status(404).json({ success: false, error: 'Listing tidak ditemukan' });
     }
 
-    // Typed by an operator, so it is worth saying what is wrong rather than
-    // letting the unique constraint surface as a 500.
-    const clash = await prisma.product.findUnique({ where: { masterSku } });
-    if (clash) {
-      return res.status(409).json({
-        success: false,
-        error: `SKU master "${masterSku}" sudah ada — petakan ke master itu, jangan buat baru`,
-        data: { existingId: clash.id },
-      });
-    }
-
-    // Stock is typed, never derived. See PROSES KOMPLACE: the operator keys it
-    // the same way they do in Komplace, and nothing decrements it automatically.
-    const stock = Number.isFinite(Number(req.body?.stock)) ? Math.trunc(Number(req.body.stock)) : 0;
-
-    let scoped = [];
-    if (listingIds !== undefined) {
-      scoped = await scopeListings(req.user, listingIds);
-    }
-
-    const master = await prisma.$transaction(async (tx) => {
-      const created = await tx.product.create({
-        data: { masterSku, name, stock },
-      });
-
-      if (scoped.length > 0) {
-        await tx.productListing.updateMany({
-          where: { id: { in: scoped.map(l => l.id) } },
-          data: { productId: created.id },
-        });
-      }
-
-      return created;
+    const pairs = await prisma.productListing.findMany({
+      where: { id: { in: picked.map(l => l.id) } },
+      select: { storeId: true, itemId: true },
+      distinct: ['storeId', 'itemId'],
     });
 
-    console.log(`[masters] Created "${masterSku}" with ${scoped.length} listing(s) mapped`);
-
-    return res.status(201).json({
-      success: true,
-      data: {
-        master,
-        mapped: scoped.length,
-        // Says plainly when some of what was selected could not be acted on,
-        // rather than reporting a smaller number with no explanation.
-        skipped: Array.isArray(listingIds) ? listingIds.length - scoped.length : 0,
+    const siblings = await prisma.productListing.findMany({
+      where: { OR: pairs.map(p => ({ storeId: p.storeId, itemId: p.itemId })) },
+      include: {
+        store: { select: { id: true, name: true } },
+        product: { select: { id: true, masterSku: true } },
       },
+      orderBy: [{ storeId: 'asc' }, { itemId: 'asc' }, { name: 'asc' }],
+    });
+
+    const groups = new Map();
+    for (const l of siblings) {
+      const key = `${l.storeId}:${l.itemId}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(l);
+    }
+
+    // Suggestions only: which SKUs already exist, so the form can say "joins the
+    // existing master" before the operator presses the button rather than after.
+    const existingBySku = await existingMastersBySku(
+      prisma, siblings.map(l => l.sku),
+    );
+
+    const items = [...groups.values()].map((rows) => {
+      const itemName = itemNameOf(rows);
+      return {
+        storeId: rows[0].storeId,
+        storeName: rows[0].store?.name ?? '',
+        itemId: rows[0].itemId,
+        name: itemName,
+        imageUrl: rows.find(r => r.imageUrl)?.imageUrl ?? null,
+        variants: rows.map(r => ({
+          listingId: r.id,
+          variantName: variantNameOf(r, itemName),
+          sku: r.sku,
+          masterSku: r.sku ?? '',
+          stock: r.stock,
+          mappedTo: r.product?.masterSku ?? null,
+          existingMaster: existingBySku.get(normaliseSku(r.sku))?.masterSku ?? null,
+        })),
+      };
+    });
+
+    return res.json({ success: true, data: { items } });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ success: false, error: err.message });
+    console.error('POST /products/masters/draft error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal menyiapkan form master produk' });
+  }
+});
+
+/**
+ * Existing masters whose SKU matches any of these, keyed by normaliseSku.
+ *
+ * Case-insensitive on purpose: the unique index is not, so without this
+ * "Belva-Black" and "belva-black" would become two masters for one variation.
+ *
+ * @param {Object} db - prisma, or a transaction client
+ * @param {Array<string|null>} skus
+ * @returns {Promise<Map<string, {id: string, masterSku: string}>>}
+ */
+async function existingMastersBySku(db, skus) {
+  const keys = [...new Set(skus.map(normaliseSku).filter(Boolean))];
+  if (keys.length === 0) return new Map();
+  const found = await db.product.findMany({
+    where: { OR: keys.map(sku => ({ masterSku: { equals: sku, mode: 'insensitive' } })) },
+    select: { id: true, masterSku: true },
+  });
+  return new Map(found.map(p => [normaliseSku(p.masterSku), p]));
+}
+
+/**
+ * POST /masters/from-items
+ * "Jadikan Master": one parent per item, one Master SKU per variation.
+ *
+ * Body: { items: [{ name, variants: [{ listingId, masterSku }] }] }
+ *
+ * Each item is its own transaction and its own verdict, reported the way
+ * Komplace reports it ("Berhasil: 4, Gagal: 1"). One item with a blank SKU
+ * should not throw away the four that were filled in correctly.
+ */
+router.post('/masters/from-items', async (req, res) => {
+  try {
+    const items = req.body?.items;
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ success: false, error: 'Pilih minimal satu produk' });
+    }
+
+    const listingIds = items.flatMap(i => (Array.isArray(i?.variants) ? i.variants : []).map(v => v?.listingId));
+    const scoped = await scopeListings(req.user, listingIds);
+
+    const results = [];
+    for (const item of items) {
+      const label = String(item?.name ?? '').trim() || '(tanpa nama)';
+      try {
+        const outcome = await prisma.$transaction(async (tx) => {
+          // Read inside the transaction and per item: an earlier item in this
+          // same request may have just created the SKU, or mapped the listing,
+          // that this one would otherwise act on from a stale copy.
+          const rows = await tx.productListing.findMany({
+            where: { id: { in: scoped.map(l => l.id) } },
+            select: {
+              id: true, name: true, itemId: true, modelId: true,
+              itemName: true, modelName: true, stock: true, productId: true,
+            },
+          });
+          const listingsById = new Map(rows.map(l => [l.id, l]));
+          const existingBySku = await existingMastersBySku(
+            tx, (item?.variants || []).map(v => v?.masterSku),
+          );
+
+          const plan = planMasterFromItem(item, listingsById, existingBySku);
+          if (!plan.ok) return plan;
+
+          let parent = null;
+          if (plan.creates.length > 0) {
+            parent = await tx.masterProduct.create({ data: { name: plan.name } });
+            for (const c of plan.creates) {
+              const product = await tx.product.create({
+                data: {
+                  masterProductId: parent.id,
+                  masterSku: c.masterSku,
+                  variantName: c.variantName,
+                  name: c.variantName ? `${plan.name} — ${c.variantName}` : plan.name,
+                  // The recording's Daftar Stok summed to exactly Shopee's figure:
+                  // the listing's stock is where a master starts, not zero.
+                  stock: c.stock,
+                },
+              });
+              await tx.productListing.update({ where: { id: c.listingId }, data: { productId: product.id } });
+            }
+          }
+          for (const b of plan.binds) {
+            await tx.productListing.update({ where: { id: b.listingId }, data: { productId: b.productId } });
+          }
+
+          return { ...plan, parentId: parent?.id ?? null };
+        });
+
+        if (!outcome.ok) {
+          results.push({ name: label, ok: false, errors: outcome.errors });
+          continue;
+        }
+        results.push({
+          name: outcome.name,
+          ok: true,
+          masterProductId: outcome.parentId,
+          created: outcome.creates.length,
+          bound: outcome.binds.length,
+          skipped: outcome.skipped.length,
+          unreadStock: outcome.unreadStock,
+        });
+      } catch (err) {
+        // The unique index still has the last word if two operators race.
+        if (err.code === 'P2002') {
+          results.push({ name: label, ok: false, errors: ['Master SKU bentrok dengan master yang baru saja dibuat — muat ulang lalu coba lagi'] });
+        } else {
+          console.error(`[masters] Jadikan Master "${label}" failed:`, err);
+          results.push({ name: label, ok: false, errors: ['Gagal menyimpan produk ini'] });
+        }
+      }
+    }
+
+    const succeeded = results.filter(r => r.ok).length;
+    console.log(`[masters] Jadikan Master: ${succeeded} berhasil, ${results.length - succeeded} gagal`);
+
+    return res.json({
+      success: true,
+      data: { succeeded, failed: results.length - succeeded, results },
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ success: false, error: err.message });
-    console.error('POST /products/masters error:', err);
+    console.error('POST /products/masters/from-items error:', err);
     return res.status(500).json({ success: false, error: 'Gagal membuat master produk' });
   }
 });
