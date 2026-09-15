@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
 import api from '@/lib/api'
+import Pagination from '@/components/Pagination'
 import {
   Boxes,
   Search,
@@ -36,6 +37,7 @@ export default function StockPage() {
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   const [page, setPage] = useState(1)
+  const [limit, setLimit] = useState(20)
   const [totalPages, setTotalPages] = useState(1)
   const [total, setTotal] = useState(0)
   const [search, setSearch] = useState('')
@@ -57,7 +59,7 @@ export default function StockPage() {
   const fetchMasters = useCallback(async () => {
     setLoading(true)
     try {
-      const params: Record<string, string | number> = { page, limit: 20 }
+      const params: Record<string, string | number> = { page, limit }
       if (search) params.search = search
 
       const res = await api.get<any>('/products/masters', { params })
@@ -73,12 +75,12 @@ export default function StockPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, search])
+  }, [page, limit, search])
 
   useEffect(() => { fetchMasters() }, [fetchMasters])
 
   // Ticks belonged to rows that are no longer on screen.
-  useEffect(() => { setSelected([]) }, [page, search])
+  useEffect(() => { setSelected([]) }, [page, limit, search])
 
   const toggleRow = (id: string) =>
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
@@ -239,9 +241,16 @@ export default function StockPage() {
       )}
 
       <div className="card overflow-hidden">
-        <div className="px-4 py-3 border-b border-gray-200 dark:border-slate-700 text-sm text-gray-500 dark:text-slate-400">
-          {loading ? 'Memuat…' : `${total.toLocaleString('id-ID')} master produk`}
-        </div>
+        <Pagination
+          page={page}
+          totalPages={totalPages}
+          total={total}
+          limit={limit}
+          loading={loading}
+          unit="master produk"
+          onPageChange={setPage}
+          onLimitChange={(n) => { setLimit(n); setPage(1) }}
+        />
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-gray-50 dark:bg-slate-800/60 text-left text-xs uppercase text-gray-500 dark:text-slate-400">
@@ -350,17 +359,20 @@ export default function StockPage() {
           </table>
         </div>
 
+        {/* Repeated below the rows: at 100+ a page the bar above is a long
+            scroll back up. */}
         {totalPages > 1 && (
-          <div className="px-4 py-3 border-t border-gray-200 dark:border-slate-700 flex items-center justify-between text-sm">
-            <span className="text-gray-500 dark:text-slate-400">Halaman {page} dari {totalPages}</span>
-            <div className="flex gap-2">
-              <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1} className="btn-secondary">
-                Sebelumnya
-              </button>
-              <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages} className="btn-secondary">
-                Berikutnya
-              </button>
-            </div>
+          <div className="[&>div]:border-b-0 border-t border-gray-200 dark:border-slate-700">
+            <Pagination
+              page={page}
+              totalPages={totalPages}
+              total={total}
+              limit={limit}
+              loading={loading}
+              unit="master produk"
+              onPageChange={(p) => { setPage(p); window.scrollTo({ top: 0 }) }}
+              onLimitChange={(n) => { setLimit(n); setPage(1) }}
+            />
           </div>
         )}
       </div>

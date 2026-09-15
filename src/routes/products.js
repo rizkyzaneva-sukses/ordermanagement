@@ -26,7 +26,7 @@ const {
 router.use(authenticate);
 
 /** Page size ceiling, so a stray ?limit=100000 cannot pull 1300 rows at once. */
-const MAX_LIMIT = 100;
+const MAX_LIMIT = 500;
 
 /**
  * Stores this user may see.

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import api from '@/lib/api'
+import Pagination from '@/components/Pagination'
 import {
   Package,
   RefreshCw,
@@ -157,6 +158,7 @@ export default function ProductsPage() {
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   const [page, setPage] = useState(1)
+  const [limit, setLimit] = useState(20)
   const [totalPages, setTotalPages] = useState(1)
   const [total, setTotal] = useState(0)
   const [search, setSearch] = useState('')
@@ -186,7 +188,7 @@ export default function ProductsPage() {
   const fetchListings = useCallback(async () => {
     setLoading(true)
     try {
-      const params: Record<string, string | number> = { page, limit: 20 }
+      const params: Record<string, string | number> = { page, limit }
       if (search) params.search = search
       if (storeId) params.storeId = storeId
       if (status) params.status = status
@@ -203,7 +205,7 @@ export default function ProductsPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, search, storeId, status, mapped])
+  }, [page, limit, search, storeId, status, mapped])
 
   useEffect(() => {
     api.get<any>('/stores')
@@ -220,11 +222,11 @@ export default function ProductsPage() {
   // Any filter change invalidates the current page number — page 7 of an
   // unfiltered catalogue is usually past the end of a filtered one, which shows
   // an empty table that reads as "no results".
-  useEffect(() => { setPage(1) }, [search, storeId, status, mapped])
+  useEffect(() => { setPage(1) }, [limit, search, storeId, status, mapped])
 
   // Whatever was ticked belonged to the rows that were on screen; those rows are
   // gone now.
-  useEffect(() => { setSelected([]) }, [page, search, storeId, status, mapped])
+  useEffect(() => { setSelected([]) }, [page, limit, search, storeId, status, mapped])
 
   const handleSync = async () => {
     setSyncing(true)
@@ -663,15 +665,21 @@ export default function ProductsPage() {
       )}
 
       <div className="card overflow-hidden">
-        <div className="px-4 py-3 border-b border-gray-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-2">
-          <span className="text-sm text-gray-500 dark:text-slate-400">
-            {loading ? 'Memuat…' : `${total.toLocaleString('id-ID')} listing`}
-          </span>
+        <Pagination
+          page={page}
+          totalPages={totalPages}
+          total={total}
+          limit={limit}
+          loading={loading}
+          unit="listing"
+          onPageChange={setPage}
+          onLimitChange={(n) => { setLimit(n); setPage(1) }}
+        >
           <button onClick={handleAutomap} disabled={busy} className="btn-secondary flex items-center gap-2 text-sm">
             <Wand2 className="w-4 h-4" />
             <span>Petakan Otomatis dari SKU</span>
           </button>
-        </div>
+        </Pagination>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-gray-50 dark:bg-slate-800/60 text-left text-xs uppercase text-gray-500 dark:text-slate-400">
@@ -756,17 +764,20 @@ export default function ProductsPage() {
           </table>
         </div>
 
+        {/* Repeated below the rows: at 100+ a page the bar above is a long
+            scroll back up. */}
         {totalPages > 1 && (
-          <div className="px-4 py-3 border-t border-gray-200 dark:border-slate-700 flex items-center justify-between text-sm">
-            <span className="text-gray-500 dark:text-slate-400">Halaman {page} dari {totalPages}</span>
-            <div className="flex gap-2">
-              <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1} className="btn-secondary">
-                Sebelumnya
-              </button>
-              <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages} className="btn-secondary">
-                Berikutnya
-              </button>
-            </div>
+          <div className="[&>div]:border-b-0 border-t border-gray-200 dark:border-slate-700">
+            <Pagination
+              page={page}
+              totalPages={totalPages}
+              total={total}
+              limit={limit}
+              loading={loading}
+              unit="listing"
+              onPageChange={(p) => { setPage(p); window.scrollTo({ top: 0 }) }}
+              onLimitChange={(n) => { setLimit(n); setPage(1) }}
+            />
           </div>
         )}
       </div>
