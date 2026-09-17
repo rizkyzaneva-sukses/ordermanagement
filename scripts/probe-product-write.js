@@ -136,11 +136,14 @@ async function main() {
   // ── 2. What a copy can carry over ───────────────────────────────────────────
   heading('2. Source item — fields get_item_base_info returns');
 
-  const listing = await prisma.productListing.findFirst({
-    where: { storeId: store.id, status: 'NORMAL' },
+  // A product with variations shows more of what a copy has to carry over, so
+  // one is preferred; a shop that has none still gets probed with what it has.
+  const pick = (extra) => prisma.productListing.findFirst({
+    where: { storeId: store.id, status: 'NORMAL', ...extra },
     orderBy: { lastSyncedAt: 'desc' },
     select: { itemId: true, itemName: true, name: true },
   });
+  const listing = (await pick({ modelId: { not: '' } })) ?? (await pick({}));
 
   let categoryId = null;
   if (!listing) {
@@ -179,14 +182,46 @@ async function main() {
         console.log(`  ${k.padEnd(22)} ${present(v)}`);
       }
       console.log(`\n  all keys: ${Object.keys(item).join(', ')}`);
+      console.log(`  description_type: ${item.description_type ?? '(absent)'}`);
+      console.log(`  logistic_info: ${JSON.stringify(item.logistic_info ?? null)}`);
+
+      // Whether a variation can carry its own weight and size decides if the
+      // "Berbeda tiap varian" toggle on the edit form is buildable at all.
+      if (item.has_model) {
+        const models = await call({
+          path: '/api/v2/product/get_model_list',
+          params: { item_id: listing.itemId },
+        }, store, accessToken);
+        const model = models.body?.response?.model?.[0];
+        if (model) {
+          console.log(`\n  model[0] keys: ${Object.keys(model).join(', ')}`);
+          console.log(`  model[0] weight: ${JSON.stringify(model.weight ?? null)}  dimension: ${JSON.stringify(model.dimension ?? null)}`);
+          const tier = models.body.response.tier_variation?.[0];
+          console.log(`  tier_variation[0] keys: ${tier ? Object.keys(tier).join(', ') : '(none)'}`);
+          const opt = tier?.option_list?.[0];
+          console.log(`  option_list[0] keys: ${opt ? Object.keys(opt).join(', ') : '(none)'}`);
+        } else {
+          report('get_model_list', models);
+        }
+      }
     }
   }
 
   // ── 3. Lookups the edit form needs ──────────────────────────────────────────
   heading('3. Lookup endpoints the edit form would use');
 
+  // Printed in full rather than as keys: how Shopee groups "Reguler (Cashless)"
+  // over the couriers inside it decides the shape of the Jasa Kirim list, and
+  // which of the two ids add_item expects.
+  const channels = await call({ path: '/api/v2/logistics/get_channel_list' }, store, accessToken);
+  report('logistics/get_channel_list', channels);
+  for (const c of channels.body?.response?.logistics_channel_list ?? []) {
+    console.log(`    ${String(c.logistics_channel_id).padEnd(8)} ${c.enabled ? 'ON ' : 'off'} mask=${c.mask_channel_id ?? '-'} `
+      + `weight_limit=${JSON.stringify(c.weight_limit ?? null)} ${c.logistics_channel_name}`);
+  }
+  console.log('');
+
   const lookups = [
-    { label: 'logistics/get_channel_list', path: '/api/v2/logistics/get_channel_list' },
     { label: 'product/get_item_limit', path: '/api/v2/product/get_item_limit', params: categoryId ? { category_id: categoryId } : {} },
   ];
   if (categoryId) {
@@ -194,11 +229,17 @@ async function main() {
       { label: 'product/get_attribute_tree', path: '/api/v2/product/get_attribute_tree', params: { category_id_list: String(categoryId), language: 'id' } },
       { label: 'product/get_attributes (older name)', path: '/api/v2/product/get_attributes', params: { category_id: categoryId, language: 'id' } },
       { label: 'product/get_brand_list', path: '/api/v2/product/get_brand_list', params: { category_id: categoryId, status: 1, offset: 0, page_size: 5, language: 'id' } },
+      { label: 'product/support_size_chart', path: '/api/v2/product/support_size_chart', params: { category_id: categoryId } },
     );
   }
 
   for (const l of lookups) {
-    report(l.label, await call(l, store, accessToken));
+    const result = await call(l, store, accessToken);
+    report(l.label, result);
+    // Small answers that are the result themselves, not just evidence of access
+    if (/get_item_limit|support_size_chart/.test(l.label) && result.body?.response) {
+      console.log(`  response: ${JSON.stringify(result.body.response)}`);
+    }
     console.log('');
   }
 
