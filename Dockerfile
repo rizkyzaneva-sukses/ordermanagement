@@ -46,6 +46,8 @@ COPY package.json ./
 COPY prisma ./prisma/
 COPY src ./src/
 COPY scripts/docker-entrypoint.sh ./scripts/docker-entrypoint.sh
+# Read-only diagnostics, run by hand with `node scripts/<name>.js` in the container
+COPY scripts/probe-product-write.js ./scripts/probe-product-write.js
 RUN chmod +x ./scripts/docker-entrypoint.sh
 
 # Create the storage tree *inside the image*, before ownership is fixed below.
