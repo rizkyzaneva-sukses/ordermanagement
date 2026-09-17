@@ -233,7 +233,15 @@ class ShopeeService {
           continue;
         }
 
-        throw new Error(errMsg);
+        // Shopee's own fields ride along on the error, so a caller that shows the
+        // failure to an operator can quote Shopee exactly rather than re-parsing
+        // this formatted string.
+        const apiErr = new Error(errMsg);
+        apiErr.shopeeError = data.error;
+        apiErr.shopeeMessage = data.message || null;
+        apiErr.requestId = data.request_id || null;
+        apiErr.path = path;
+        throw apiErr;
       }
 
       console.error(`[ShopeeService._request] Success for ${path} (attempt ${attempt})`);
@@ -1627,6 +1635,163 @@ class ShopeeService {
     return this._request('GET', '/api/v2/product/get_model_list', {
       item_id: itemId,
     }, null, accessToken, String(shopId));
+  }
+
+  // ──────────────────────────────────────────────
+  // Product write & lookups (Salin Produk)
+  //
+  // Write access for add_item, init_tier_variation, update_stock and
+  // media_space/upload_image was confirmed on 17 Sep 2026 with
+  // scripts/probe-product-write.js. get_attributes and support_size_chart
+  // answer `api_suspended` — get_attribute_tree and get_item_limit replace them.
+  // ──────────────────────────────────────────────
+
+  /**
+   * Create an item. Returns `{ response: { item_id, ... } }`.
+   *
+   * @param {Object} body - add_item request body, built by productCopy.buildAddItemBody
+   */
+  async addItem(accessToken, shopId, body) {
+    console.error(`[ShopeeService.addItem] shop=${shopId} category=${body?.category_id}`);
+    return this._request('POST', '/api/v2/product/add_item', {}, body, accessToken, String(shopId));
+  }
+
+  /**
+   * Give an item its variations and one model per combination.
+   *
+   * @param {Object} body - `{ item_id, tier_variation, model }`
+   */
+  async initTierVariation(accessToken, shopId, body) {
+    console.error(`[ShopeeService.initTierVariation] shop=${shopId} item=${body?.item_id} models=${body?.model?.length ?? 0}`);
+    return this._request('POST', '/api/v2/product/init_tier_variation', {}, body, accessToken, String(shopId));
+  }
+
+  /**
+   * Change an existing item's own fields (not its variations).
+   *
+   * @param {Object} body - add_item-shaped fields plus `item_id`
+   */
+  async updateItem(accessToken, shopId, body) {
+    console.error(`[ShopeeService.updateItem] shop=${shopId} item=${body?.item_id}`);
+    return this._request('POST', '/api/v2/product/update_item', {}, body, accessToken, String(shopId));
+  }
+
+  /**
+   * List or unlist items. `unlist: false` puts an item on sale.
+   *
+   * @param {Array<{item_id: number, unlist: boolean}>} itemList
+   */
+  async unlistItem(accessToken, shopId, itemList) {
+    console.error(`[ShopeeService.unlistItem] shop=${shopId} items=${itemList.length}`);
+    return this._request('POST', '/api/v2/product/unlist_item', {}, { item_list: itemList }, accessToken, String(shopId));
+  }
+
+  /** Name/description/image/price limits for a category in this shop. */
+  async getItemLimit(accessToken, shopId, categoryId) {
+    return this._request('GET', '/api/v2/product/get_item_limit',
+      categoryId ? { category_id: categoryId } : {}, null, accessToken, String(shopId));
+  }
+
+  /** Attributes (and their allowed values) for one or more categories. */
+  async getAttributeTree(accessToken, shopId, categoryIds, language = 'id') {
+    return this._request('GET', '/api/v2/product/get_attribute_tree', {
+      category_id_list: [].concat(categoryIds).join(','),
+      language,
+    }, null, accessToken, String(shopId));
+  }
+
+  /** One page of brands allowed in a category (max 100 per page). */
+  async getBrandList(accessToken, shopId, { categoryId, offset = 0, pageSize = 100, language = 'id' }) {
+    return this._request('GET', '/api/v2/product/get_brand_list', {
+      category_id: categoryId,
+      status: 1,
+      offset,
+      page_size: Math.min(pageSize, 100),
+      language,
+    }, null, accessToken, String(shopId));
+  }
+
+  /** Every logistics channel the shop knows of, enabled or not. */
+  async getChannelList(accessToken, shopId) {
+    return this._request('GET', '/api/v2/logistics/get_channel_list', {}, null, accessToken, String(shopId));
+  }
+
+  /**
+   * Upload one image to media space and return its id and URL.
+   *
+   * Signed as a public call (no token, no shop) — how Shopee documents it; the
+   * probe showed the endpoint answers either way. `scene` is `normal` for
+   * product photos (Shopee squares them) and `desc` for description images and
+   * size charts, which must keep their own proportions.
+   *
+   * Retries network failures and 5xx only: a rejected image (too small, wrong
+   * format) will be rejected again.
+   *
+   * @param {Buffer} buffer
+   * @param {Object} [opts]
+   * @param {string} [opts.filename]
+   * @param {string} [opts.contentType]
+   * @param {'normal'|'desc'} [opts.scene]
+   * @returns {Promise<{ imageId: string, url: string|null }>}
+   */
+  async uploadImage(buffer, { filename = 'image.jpg', contentType = 'image/jpeg', scene = 'normal' } = {}) {
+    const path = '/api/v2/media_space/upload_image';
+    const MAX_ATTEMPTS = 3;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const form = new FormData();
+      form.append('image', new Blob([buffer], { type: contentType }), filename);
+      form.append('scene', scene);
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 60_000);
+      let response;
+      try {
+        response = await fetch(this._buildUrl(path), { method: 'POST', body: form, signal: controller.signal });
+      } catch (err) {
+        if (attempt === MAX_ATTEMPTS) throw new Error(`Shopee API: upload_image gagal terhubung – ${err.message}`);
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+        continue;
+      } finally {
+        clearTimeout(timer);
+      }
+
+      if (response.status >= 500 && attempt < MAX_ATTEMPTS) {
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+
+      const raw = await response.text();
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        throw new Error(`Shopee API: upload_image mengembalikan respons tidak terbaca (HTTP ${response.status})`);
+      }
+
+      if (data.error) {
+        const err = new Error(`Shopee API Error: ${data.error} – ${data.message || 'no message'} (request_id=${data.request_id || 'n/a'})`);
+        err.shopeeError = data.error;
+        err.shopeeMessage = data.message || null;
+        err.requestId = data.request_id || null;
+        err.path = path;
+        throw err;
+      }
+
+      // Older answers carry one image_info, newer ones a list of them.
+      const info = data.response?.image_info
+        ?? data.response?.image_info_list?.[0]?.image_info
+        ?? data.response?.image_info_list?.[0];
+      const imageId = info?.image_id;
+      if (!imageId) {
+        throw new Error(`Shopee API: upload_image tidak mengembalikan image_id (${raw.slice(0, 200)})`);
+      }
+      const urls = info.image_url_list || [];
+      const url = (urls.find(u => u.image_url_region === 'ID') || urls[0])?.image_url ?? null;
+      return { imageId: String(imageId), url };
+    }
+
+    throw new Error('Shopee API: upload_image gagal setelah beberapa percobaan');
   }
 
 }

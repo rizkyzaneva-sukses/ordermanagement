@@ -147,5 +147,8 @@ connect();
 
 const syncQueue  = new Queue('order-sync',  { connection });
 const printQueue = new Queue('print-batch', { connection });
+// Salin Produk → Publish. Its own queue so a slow photo upload never holds up
+// an order sync, and an order sync never delays an operator watching a draft.
+const productPublishQueue = new Queue('product-publish', { connection });
 
-module.exports = { syncQueue, printQueue, connection, isRedisReady, hasQueueWorkers, connect };
+module.exports = { syncQueue, printQueue, productPublishQueue, connection, isRedisReady, hasQueueWorkers, connect };

@@ -2,6 +2,7 @@ const { Worker } = require('bullmq');
 const { handleSync }      = require('./services/syncDirect.js');
 const pdfService          = require('./services/pdf.js');
 const fulfillmentService  = require('./services/fulfillment.js');
+const { runPublish }      = require('./services/productPublish.js');
 const prisma              = require('./prisma/client.js');
 const { connection, syncQueue, isRedisReady, hasQueueWorkers } = require('./services/queue.js');
 const config              = require('./config/index.js');
@@ -112,6 +113,22 @@ const printWorker = new Worker('print-batch', handlePrintBatch, {
   concurrency: 2,
 });
 
+// Salin Produk → Publish. Low concurrency: each job already uploads photos in
+// parallel, and several drafts at once for one shop only invite rate limits.
+const productPublishWorker = new Worker('product-publish', async (job) => {
+  await runPublish(job.data.draftId);
+}, {
+  connection,
+  concurrency: 2,
+  // A publish with many photos can run for minutes; the default 30 s lock would
+  // let BullMQ hand the same draft to a second consumer mid-upload.
+  lockDuration: 10 * 60 * 1000,
+});
+
+productPublishWorker.on('failed', (job, err) => {
+  console.error(`[product-publish] Job ${job?.id} failed:`, err.message);
+});
+
 syncWorker.on('completed', (job) => {
   console.log(`[sync] Job ${job.id} completed`);
 });
@@ -215,4 +232,4 @@ setTimeout(() => {
 
 console.log('[worker] OrderPro workers started');
 
-module.exports = { syncWorker, printWorker, handleSync, handlePrintBatch };
+module.exports = { syncWorker, printWorker, productPublishWorker, handleSync, handlePrintBatch };

@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import api from '@/lib/api'
 import Pagination from '@/components/Pagination'
+import CopyProductModal, { type CopyResult } from '@/components/products/CopyProductModal'
+import DraftsTab from '@/components/products/DraftsTab'
 import {
   Package,
   RefreshCw,
@@ -13,6 +15,7 @@ import {
   Link2,
   Wand2,
   X,
+  Copy,
 } from 'lucide-react'
 
 interface Listing {
@@ -22,6 +25,7 @@ interface Listing {
   modelId: string
   sku: string | null
   name: string
+  itemName?: string | null
   status: string
   price: number | null
   stock: number | null
@@ -169,6 +173,35 @@ export default function ProductsPage() {
 
   const [summaryError, setSummaryError] = useState<string | null>(null)
 
+  // Aktif | Draf, as Komplace's Produk Saya. Kept in the URL so Edit Produk can
+  // send the operator back to the tab they came from.
+  const [tab, setTab] = useState<'active' | 'drafts'>('active')
+  const [draftCount, setDraftCount] = useState<number | null>(null)
+  const [copyOpen, setCopyOpen] = useState(false)
+
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('tab') === 'drafts') setTab('drafts')
+  }, [])
+
+  const switchTab = (next: 'active' | 'drafts') => {
+    setTab(next)
+    const url = new URL(window.location.href)
+    if (next === 'drafts') url.searchParams.set('tab', 'drafts')
+    else url.searchParams.delete('tab')
+    window.history.replaceState(null, '', url.toString())
+  }
+
+  const fetchDraftCount = useCallback(async () => {
+    try {
+      const res = await api.get<any>('/products/drafts/summary', { params: storeId ? { storeId } : {} })
+      setDraftCount(res.data?.open ?? 0)
+    } catch {
+      setDraftCount(null)
+    }
+  }, [storeId])
+
+  useEffect(() => { fetchDraftCount() }, [fetchDraftCount])
+
   const fetchSummary = useCallback(async () => {
     try {
       const res = await api.get<any>('/products/summary')
@@ -286,6 +319,23 @@ export default function ProductsPage() {
     } finally {
       setSyncingStock(false)
     }
+  }
+
+  const selectedListings = listings.filter((l) => selected.includes(l.id))
+  const selectedItems = new Set(selectedListings.map((l) => `${l.store?.id}:${l.itemId}`))
+  const copyTarget = selectedItems.size === 1 && selectedListings.length === selected.length
+    ? selectedListings[0]
+    : null
+
+  const handleCopied = async (result: CopyResult) => {
+    setCopyOpen(false)
+    setSelected([])
+    const names = result.drafts.map((d) => d.targetStoreName).filter(Boolean).join(', ')
+    const dup = result.duplicates.length > 0
+      ? ` Catatan: produk ini sudah punya draf yang belum terbit di ${[...new Set(result.duplicates.map((d) => d.targetStoreName))].join(', ')}.`
+      : ''
+    setMessage({ type: 'success', text: `${result.drafts.length} draf dibuat di ${names}. Buka tab Draf untuk mengedit dan Publish.${dup}` })
+    await fetchDraftCount()
   }
 
   const toggleRow = (id: string) =>
@@ -628,6 +678,7 @@ export default function ProductsPage() {
             <option value="">Semua Toko</option>
             {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
+          {tab === 'active' && <>
           <select value={status} onChange={(e) => setStatus(e.target.value)} className="input">
             <option value="">Semua Status</option>
             <option value="NORMAL">Aktif</option>
@@ -638,10 +689,31 @@ export default function ProductsPage() {
             <option value="no">Belum punya master</option>
             <option value="yes">Sudah punya master</option>
           </select>
+          </>}
         </div>
       </div>
 
-      {selected.length > 0 && (
+      <div className="flex gap-1 border-b border-gray-200 dark:border-slate-700">
+        {([['active', 'Aktif'], ['drafts', `Draf${draftCount !== null ? ` (${draftCount})` : ''}`]] as const).map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => switchTab(key)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px ${
+              tab === key
+                ? 'border-primary-600 text-primary-700 dark:text-primary-300'
+                : 'border-transparent text-gray-500 dark:text-slate-400 hover:text-gray-700 dark:hover:text-slate-200'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'drafts' && (
+        <DraftsTab storeId={storeId} search={search} onChanged={fetchDraftCount} />
+      )}
+
+      {tab === 'active' && selected.length > 0 && (
         <div className="card p-3 flex flex-wrap items-center gap-2 border-blue-300 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20">
           <span className="text-sm font-medium text-blue-900 dark:text-blue-200 mr-1">
             {selected.length} listing dipilih
@@ -658,13 +730,22 @@ export default function ProductsPage() {
             <Link2Off className="w-4 h-4" />
             <span>Lepas Pemetaan</span>
           </button>
+          <button
+            onClick={() => setCopyOpen(true)}
+            disabled={busy || !copyTarget}
+            title={copyTarget ? undefined : 'Salin Produk hanya untuk varian dari satu produk'}
+            className="btn-secondary flex items-center gap-2"
+          >
+            <Copy className="w-4 h-4" />
+            <span>Salin Produk</span>
+          </button>
           <button onClick={() => setSelected([])} className="text-sm text-blue-800 dark:text-blue-300 underline ml-auto">
             Batal pilih
           </button>
         </div>
       )}
 
-      <div className="card overflow-hidden">
+      {tab === 'active' && <div className="card overflow-hidden">
         <Pagination
           page={page}
           totalPages={totalPages}
@@ -780,7 +861,17 @@ export default function ProductsPage() {
             />
           </div>
         )}
-      </div>
+      </div>}
+
+      {copyOpen && copyTarget && (
+        <CopyProductModal
+          listingIds={selected}
+          sourceStoreId={copyTarget.store.id}
+          productName={copyTarget.itemName || copyTarget.name}
+          onClose={() => setCopyOpen(false)}
+          onCopied={handleCopied}
+        />
+      )}
 
       {modal === 'create' && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={() => setModal(null)}>

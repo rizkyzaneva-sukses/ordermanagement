@@ -19,7 +19,7 @@ Fitur ini meniru alur tersebut untuk **Shopee ke Shopee saja**. TikTok, Tokopedi
 - **Data input:** snapshot dari Shopee API (`get_item_base_info`, `get_model_list`), diedit manual di form draf, plus foto yang diunggah operator
 - **Export:** tidak ada
 - **Constraint khusus:**
-  - **Izin API tulis belum terverifikasi.** Implementasi baru dimulai setelah `scripts/probe-product-write.js` menunjukkan `add_item` dan `upload_image` diizinkan (lihat §8)
+  - Izin API tulis (`add_item`, `init_tier_variation`, `upload_image`) **sudah terverifikasi** 17 Sep 2026 (lihat §8)
   - Hanya toko Shopee yang aktif dan tidak `needsReconnect`
   - Satu produk per sekali salin, bisa ke **beberapa toko tujuan** (satu draf per toko)
 
@@ -59,9 +59,11 @@ Urutan bagian dan isinya mengikuti form Komplace. Semua field sudah terisi dari 
 
 **Informasi Dasar**
 - Toko: tujuan, tidak bisa diubah
-- Nama Produk, dengan penghitung `121/255`
-- Deskripsi, dengan penghitung `2679/5000`
-- Kategori: ditampilkan sebagai jalur ("Olahraga & Outdoor > Aksesoris … > Topi …"). **Tidak bisa diubah di versi pertama** (§3.7)
+- Nama Produk, dengan penghitung `121/255` (minimal 10 karakter)
+- Deskripsi, dengan penghitung `2679/5000` (minimal 50 karakter). Shopee punya dua jenis deskripsi, dan keduanya didukung:
+  - **Biasa:** satu kotak teks
+  - **Deskripsi bergambar** (*extended*, dipakai produk contoh di Zaneva Official Shop): isinya urutan blok teks dan blok gambar. Form menampilkan blok-blok itu sesuai urutan. Teks bisa diedit, gambar bisa dihapus atau diganti, dan blok bisa ditambah. Batas: teks 50–5000 karakter, gambar 1–12 dengan lebar minimal 700px. Gambar deskripsi ikut diunggah ulang ke toko tujuan saat Publish
+- Kategori: versi pertama menampilkan ID kategori Shopee, bukan jalurnya ("Olahraga & Outdoor > …"), karena membaca jalur butuh pohon kategori lengkap. **Tidak bisa diubah di versi pertama** (§3.7)
 
 **Atribut Produk**
 - Atribut **wajib** selalu tampil (di contoh: Merk, Jenis Kelamin, Asal Produk)
@@ -73,29 +75,33 @@ Urutan bagian dan isinya mengikuti form Komplace. Semua field sudah terisi dari 
   - Ganti nama pilihan, hapus pilihan (ikon tong sampah), **Tambah Pilihan**, hapus seluruh variasi (×)
   - Kalau bentuk variasi berubah, tabel varian di bawah menyesuaikan. Varian lama yang masih ada tetap menyimpan harga/stok/SKU-nya
 - **Terapkan ke semua**: isi Harga, Stok, dan/atau SKU sekali lalu tekan **Terapkan ke Semua** untuk mengisi semua varian. Kolom yang dibiarkan kosong tidak mengubah apa-apa
-- **Tabel varian**: satu baris per kombinasi, kolom Harga (Rp), Stok (pcs), SKU. Bisa digeser ke samping di layar sempit
-- **Berat dan ukuran berbeda tiap varian**: toggle. Kalau aktif, tabel mendapat kolom berat dan ukuran per varian. *Tergantung dukungan API, lihat §8*
+- **Tabel varian**: satu baris per kombinasi, kolom Harga (Rp, minimal Rp 99), Stok (pcs), SKU. Bisa digeser ke samping di layar sempit
+- **Berat dan ukuran berbeda tiap varian**: toggle. Kalau aktif, tabel mendapat kolom berat (gr) dan ukuran (cm) per varian. Didukung API (varian punya `weight` dan `dimension` sendiri). Toggle langsung aktif kalau produk asal memang berbeda per varian
 
 **Media**
-- **Foto Produk**: maksimal 9 (Foto Utama + Foto 1–8). Urutan bisa diubah dengan drag and drop. Menu ⋮ per foto: Jadikan Foto Utama, Ganti, Hapus. Slot kosong untuk **unggah foto baru**
+- **Foto Produk**: **minimal 3**, maksimal 9 (Foto Utama + Foto 1–8). Urutan bisa diubah dengan drag and drop. Menu ⋮ per foto: Jadikan Foto Utama, Ganti, Hapus. Slot kosong untuk **unggah foto baru**
 - **Foto Variasi**: satu foto per pilihan Variasi 1, bisa diganti. Pilihan baru dari Tambah Pilihan wajib diberi foto kalau pilihan lain punya foto (aturan Shopee)
-- **Bagan Ukuran**: disalin dari produk asal kalau ada. Bisa diunggah atau diganti (JPG/PNG). **Wajib** kalau kategori toko tujuan mewajibkannya, dan tanda * mengikuti kategori
+- **Bagan Ukuran**: tanda * muncul kalau kategori mewajibkannya (`get_item_limit` → `size_chart_mandatory`; di kategori produk contoh: **wajib**). Shopee punya dua bentuk:
+  - **Gambar:** disalin dari produk asal (diunggah ulang), atau operator mengunggah JPG/PNG
+  - **Template** buatan toko di Seller Centre: template milik toko asal kemungkinan tidak berlaku di toko tujuan. Operator memilih template toko tujuan atau mengunggah gambar. *Cara membaca daftar template toko tujuan dipastikan saat uji (§8)*
 - **Video Produk**: tidak disalin di versi pertama. Draf Komplace di screenshot juga kosong (§3.7)
 
 **Informasi Pengiriman**
-- Berat (gr), Ukuran Paket P × L × T (cm)
-- **Jasa Kirim**: daftar channel yang **aktif di toko tujuan** (`get_channel_list`), dikelompokkan seperti di Shopee (Hemat Kargo, Instant, Reguler (Cashless), Instant Prioritas, …). Grup bisa dibuka untuk melihat kurir di dalamnya, dan tiap grup punya checkbox. Batas berat channel ditampilkan ("maks 21.000g"). Channel yang tidak sanggup membawa berat produk otomatis nonaktif
-- Channel yang aktif di produk asal dan juga aktif di toko tujuan sudah dicentang
+- Berat (gr, **wajib**), Ukuran Paket P × L × T (cm, opsional). Shopee menyimpan berat dalam kg, jadi dikonversi otomatis
+- **Jasa Kirim**: grup jasa kirim yang **aktif di toko tujuan** (`get_channel_list`, yaitu channel dengan `mask_channel_id = 0`), misalnya Hemat Kargo, Instant, Instant Prioritas, Reguler (Cashless), Next Day, Indopaket, SPX Ambil di Tempat. Grup yang punya kurir di dalamnya bisa dibuka (Reguler (Cashless) → JNE Reguler, SPX Standard, SiCepat REG, …), hanya untuk informasi. Centangnya di tingkat grup, dan ID grup inilah yang dikirim ke Shopee
+- Batas berat ditampilkan kalau Shopee memberinya, misalnya Indopaket "maks 21.000g", SPX Ambil di Tempat "maks 3.000g". Grup yang tidak sanggup membawa berat produk otomatis nonaktif
+- Grup yang aktif di produk asal dan juga aktif di toko tujuan sudah dicentang
 
 **Tombol** (bawah form): **Batal** · **Simpan Draf** (padanan "Update Produk" Komplace) · **Publish Produk**
 
 **Validasi sebelum Publish** (field yang salah ditandai dan halaman menggulir ke sana):
 - Nama wajib diisi dan **tidak boleh sama persis dengan nama produk asal**
-- Panjang nama, deskripsi, nama variasi, dan pilihan sesuai batas
-- Minimal 1 foto produk, maksimal 9. Foto variasi lengkap kalau dipakai
-- Atribut wajib dan bagan ukuran (kalau wajib) terisi
-- Setiap varian: harga > 0, stok ≥ 0. Tidak ada pilihan variasi yang namanya kembar
-- Minimal satu jasa kirim, dan berat tidak melebihi batas channel yang dicentang
+- Panjang nama (10–255), deskripsi (50–5000), nama variasi (≤ 14), dan pilihan (≤ 20) sesuai batas `get_item_limit` toko tujuan
+- Foto produk 3–9. Foto variasi lengkap kalau dipakai. Gambar deskripsi 1–12 kalau memakai deskripsi bergambar
+- Atribut wajib, merek (kalau wajib), dan bagan ukuran (kalau wajib) terisi
+- Setiap varian: harga ≥ Rp 99, stok 0–10.000.000, berat terisi. Tidak ada pilihan variasi yang namanya kembar
+- Minimal satu jasa kirim, dan berat tidak melebihi batas jasa kirim yang dicentang
+- Pre-order: 3–30 hari
 
 ### 3.4 Unggah foto — Must-have
 - Foto yang diunggah operator (foto produk, foto variasi, bagan ukuran) **langsung dikirim ke Shopee** (`media_space/upload_image`). Yang disimpan di draf hanya `image_id` dan URL-nya, jadi OrderPro tidak perlu menyimpan file
@@ -104,7 +110,7 @@ Urutan bagian dan isinya mengikuti form Komplace. Semua field sudah terisi dari 
 ### 3.5 Publish ke Shopee — Must-have
 - Berjalan sebagai **job di worker** (BullMQ), bukan di request HTTP, karena bisa makan puluhan detik (unggah foto satu per satu). Status draf berubah ke *Sedang Publish* dan tab Draf memantaunya
 - Urutan langkah:
-  1. Foto yang masih berasal dari toko asal diunduh lalu diunggah ke `media_space/upload_image` untuk mendapat `image_id`. Ini berlaku untuk foto produk, foto variasi, dan bagan ukuran. Foto yang sudah punya `image_id` dilewati
+  1. Foto yang masih berasal dari toko asal diunduh lalu diunggah ke `media_space/upload_image` untuk mendapat `image_id`. Ini berlaku untuk foto produk, foto variasi, gambar deskripsi, dan bagan ukuran. Foto yang sudah punya `image_id` dilewati
   2. `add_item` dengan status **UNLIST**
   3. Kalau ada variasi: `init_tier_variation` (variasi, pilihan, foto variasi, harga/stok/SKU per varian)
   4. Setelah semua berhasil: ubah status item ke **NORMAL**, sehingga produk tayang
@@ -230,7 +236,7 @@ erDiagram
     }
 ```
 
-Isi `payload`: `name`, `description`, `categoryId`, `categoryPath`, `brand {id, name}`, `attributes[]`, `images[] {imageId?, url}`, `sizeChart {imageId?, url}?`, `tiers[] {name, options[] {name, sourceName?, image?}}`, `models[] {tierIndex[], sourceModelId?, price, stock, sku, weight?, dimension?}`, `weight`, `dimension {length, width, height}`, `perModelShipping` (boolean), `logistics[] {channelId, enabled}`, `condition`, `preOrder {enabled, daysToShip}`.
+Isi `payload`: `name`, `descriptionType` (`normal` | `extended`), `description` (biasa) atau `descriptionBlocks[] {type: text|image, text?, imageId?, url?}` (bergambar), `categoryId`, `categoryPath`, `brand {id, name}`, `attributes[]`, `images[] {imageId?, url}`, `sizeChart {kind: image|template, imageId?, url?, templateId?}?`, `tiers[] {name, options[] {name, sourceName?, image?}}`, `models[] {tierIndex[], sourceModelId?, price, stock, sku, weight?, dimension?}`, `weight`, `dimension {length, width, height}`, `perModelShipping` (boolean), `logistics[] {channelId, enabled}`, `condition`, `preOrder {enabled, daysToShip}`.
 
 | Tabel | Fungsi |
 |-------|--------|
@@ -278,19 +284,28 @@ Index: `(targetStoreId, status)`, `(sourceStoreId, sourceItemId)`.
 
 ---
 
-## 8. Yang harus dipastikan sebelum mulai coding
+## 8. Hasil cek API dan yang tersisa
 
-Belum pernah dicek, dan hasilnya bisa mengubah rencana di atas. Poin 1–7 dijawab `node scripts/probe-product-write.js` di container api:
+`node scripts/probe-product-write.js` dijalankan 17 Sep 2026 di container api, toko Zaneva Official Shop, produk contoh Mirae Crop Outer (bervariasi).
+
+| # | Pertanyaan | Hasil | Dampak ke rencana |
+|---|---|---|---|
+| 1 | Boleh `add_item` / `init_tier_variation`? | **Ya.** Shopee hanya menolak isi yang kosong (`error_param`), bukan izin | Fitur bisa dibangun |
+| 2 | Boleh `media_space/upload_image`? | **Ya**, sama | Foto bisa diunggah ulang |
+| — | Bonus: boleh `update_stock`? | **Ya** | "Push Stock" di Daftar Stok juga bisa dibangun |
+| 3 | Field yang dikembalikan `get_item_base_info` | Kategori, foto, atribut, merek, berat, dimensi, jasa kirim, pre-order, kondisi, bagan ukuran, video: **ada semua** | Draf bisa terisi penuh |
+| 4 | Deskripsi bergambar? | **Ya**, produk contoh memakai `extended` | Deskripsi bergambar didukung penuh (§3.3) |
+| 5 | Berat/ukuran per varian? | **Ya**, varian punya `weight` dan `dimension` | Toggle "Berbeda tiap varian" dibuat |
+| 6 | Pengelompokan jasa kirim | Grup = channel dengan `mask_channel_id = 0`. Produk menyimpan ID grup (8003 Reguler, 8007 Instant, …) | Centang di tingkat grup (§3.3) |
+| 7 | Bagan ukuran wajib? | `support_size_chart` sudah dimatikan Shopee (`api_suspended`), tapi `get_item_limit` memberi `size_chart_mandatory: true` untuk kategori contoh | Tanda * mengikuti `get_item_limit` |
+| — | Batas-batas | Nama 10–255, deskripsi 50–5000, foto 3–9, variasi 14, pilihan 20, harga ≥ 99, pre-order 3–30 hari, berat wajib | Dipakai di validasi (§3.3) |
+
+**Masih harus dipastikan saat uji Publish sungguhan:**
 
 | # | Pertanyaan | Kalau hasilnya buruk |
 |---|---|---|
-| 1 | Apakah app boleh memanggil `add_item` / `init_tier_variation`? | Ajukan izin Product (tulis) di Shopee Open Platform, lalu semua toko diotorisasi ulang. Fitur menunggu |
-| 2 | Apakah app boleh `media_space/upload_image`? | Ajukan izin Media Space |
-| 3 | Apakah `get_item_base_info` mengembalikan deskripsi, atribut, merek, berat, dimensi, jasa kirim, dan bagan ukuran? | Field yang tidak ada harus diisi manual di draf |
-| 4 | Apakah deskripsi toko asal memakai *extended description* (deskripsi bergambar)? | Versi pertama hanya menyalin teksnya, foto di deskripsi tidak ikut |
-| 5 | Apakah varian punya berat/ukuran sendiri di `get_model_list`? | Toggle "Berbeda tiap varian" tidak dibuat, semua varian memakai berat produk |
-| 6 | Bagaimana `get_channel_list` mengelompokkan jasa kirim (grup "Reguler (Cashless)" vs kurir di dalamnya), dan ID mana yang dikirim ke `add_item`? | Menentukan bentuk daftar Jasa Kirim di form |
-| 7 | Apakah kategori contoh mewajibkan bagan ukuran (`support_size_chart`)? | Menentukan kapan tanda * muncul |
-| 8 | Apakah `add_item` menerima `item_status: UNLIST`? Baru terlihat saat uji Publish ke toko uji | Tanpa UNLIST, item langsung tayang sejak langkah 2, jadi risiko item setengah jadi harus diterima atau dicegah dengan cara lain |
+| 8 | Apakah `add_item` menerima `item_status: UNLIST`? | Item langsung tayang sejak langkah 2, jadi risiko item setengah jadi harus dicegah dengan cara lain |
+| 9 | Bagan ukuran produk asal berbentuk gambar atau template, dan bagaimana membaca template toko tujuan? | Versi pertama hanya mendukung bagan ukuran berbentuk gambar. Operator mengunggah gambar kalau asalnya template |
+| 10 | Apakah gambar deskripsi perlu parameter unggah khusus supaya tidak dipotong jadi persegi? | Gambar deskripsi bisa terpotong |
 
-Setelah poin 1–3 aman, saya butuh **satu toko yang boleh dipakai uji Publish sungguhan**. Produk uji akan tayang di Shopee lalu dihapus.
+Untuk itu saya butuh **satu toko yang boleh dipakai uji Publish sungguhan**. Produk uji akan tayang sebentar di Shopee lalu dihapus.

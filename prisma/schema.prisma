@@ -23,6 +23,7 @@ model User {
   processedOrders Order[]       @relation("ProcessedBy")
   printedOrders   Order[]       @relation("PrintedBy")
   printBatches    PrintBatch[]
+  productDrafts   ProductDraft[]
 
   @@map("users")
 }
@@ -56,6 +57,8 @@ model Store {
   orders   Order[]
   access   StoreAccess[]
   listings ProductListing[]
+  draftsFrom ProductDraft[] @relation("DraftSource")
+  draftsTo   ProductDraft[] @relation("DraftTarget")
 
   @@unique([platform, shopId])
   @@map("stores")
@@ -162,6 +165,46 @@ model ProductListing {
   @@index([storeId, status])
   @@index([sku])
   @@map("product_listings")
+}
+
+// A copy of one Shopee item, bound for one other shop, from "Salin Produk" until
+// it is published there. Komplace calls this a Draf, and so does the operator.
+//
+// `payload` is the edit form and the only thing Publish reads. `sourceSnapshot`
+// is Shopee's answer at copy time, kept verbatim so a field that maps wrongly can
+// be traced without copying the product again.
+model ProductDraft {
+  id               String    @id @default(cuid())
+  sourceStoreId    String
+  sourceItemId     String
+  targetStoreId    String
+  // DRAFT | PUBLISHING | PUBLISHED | FAILED
+  status           String    @default("DRAFT")
+  payload          Json
+  sourceSnapshot   Json
+  // Source image URL → image_id in media space. Apart from payload so a retried
+  // Publish skips what already uploaded instead of uploading it again.
+  uploadedImages   Json      @default("{}")
+  // Written the moment add_item succeeds. A retry continues this item rather
+  // than creating a second copy of the product on Shopee.
+  publishedItemId  String?
+  // Which Publish steps are done, so a retry resumes after the last one.
+  publishSteps     Json      @default("{}")
+  lastError        String?
+  lastErrorRaw     Json?
+  publishStartedAt DateTime?
+  publishedAt      DateTime?
+  createdById      String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  sourceStore Store @relation("DraftSource", fields: [sourceStoreId], references: [id], onDelete: Cascade)
+  targetStore Store @relation("DraftTarget", fields: [targetStoreId], references: [id], onDelete: Cascade)
+  createdBy   User? @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([targetStoreId, status])
+  @@index([sourceStoreId, sourceItemId])
+  @@map("product_drafts")
 }
 
 model StoreAccess {

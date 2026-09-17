@@ -561,6 +561,9 @@ module.exports = {
   recordStockSync,
   getLastPull,
   recordPull,
+  // Used by Salin Produk to bring a freshly published item into the catalogue
+  // without pulling the whole shop again.
+  upsertListings,
   // Exported for testing: the row-shaping rules are where a wrong reading of
   // Shopee's response turns into wrong stock on screen, and they can be checked
   // without a database or a live shop.
