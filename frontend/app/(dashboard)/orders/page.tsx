@@ -2323,6 +2323,9 @@ export default function OrdersPage() {
                   Jadwalkan Ulang Pickup ({retrySelected.length})
                 </button>
               )}
+              {/* The courier scans Shopee's own label — sorting codes and all —
+                  so that is what the main button prints. The app-drawn receipt
+                  stays as a fallback for when Shopee will not issue one. */}
               {awbSelected.length > 0 && (
                 <button
                   onClick={handleDownloadAwb}
@@ -2330,18 +2333,22 @@ export default function OrdersPage() {
                   title={
                     awbTooMany
                       ? `Maksimal ${AWB_MAX_PER_DOWNLOAD} paket sekali unduh`
-                      : 'Unduh AWB resmi dari Shopee'
+                      : 'Unduh resi resmi dari Shopee'
                   }
-                  className="btn-secondary"
+                  className="btn bg-shopee text-white hover:bg-orange-600"
                 >
-                  {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}
-                  AWB Shopee ({awbSelected.length})
+                  {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Printer className="w-4 h-4" />}
+                  Cetak Resi Shopee ({awbSelected.length})
                 </button>
               )}
               {shopeeCount > 0 && (
-                <button onClick={() => handlePrint('SHOPEE')} className="btn bg-shopee text-white hover:bg-orange-600">
-                  <Printer className="w-4 h-4" />
-                  Cetak Resi Shopee ({shopeeCount})
+                <button
+                  onClick={() => handlePrint('SHOPEE')}
+                  title="Resi yang digambar oleh app, bukan dari Shopee — pakai hanya kalau resi resmi gagal diunduh"
+                  className="btn-secondary"
+                >
+                  <FileDown className="w-4 h-4" />
+                  Resi Cadangan ({shopeeCount})
                 </button>
               )}
               {tiktokCount > 0 && (
