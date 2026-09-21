@@ -15,7 +15,10 @@ app.use(helmet({
 }));
 app.use(cors({
   origin: process.env.FRONTEND_URL || '*',
-  credentials: true
+  credentials: true,
+  // The AWB download is a file, so its filename and any partial-failure report
+  // travel in headers the browser hides from cross-origin scripts by default.
+  exposedHeaders: ['Content-Disposition', 'X-Awb-Count', 'X-Awb-Failed'],
 }));
 // Marketplace push receivers are mounted ahead of the JSON parser: their
 // signatures are computed over the raw request body, which a parser consumes.

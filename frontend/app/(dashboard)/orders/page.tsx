@@ -804,9 +804,10 @@ export default function OrdersPage() {
   // refreshing precisely when the operator suspects it is behind.
   const syncSelected = selectedOrders.filter((o) => o.platform === 'SHOPEE')
   const awbSelected = selectedOrders.filter((o) => o.platform === 'SHOPEE' && isPrintable(o))
-  // One AWB request covers a single shop, so the button is only meaningful when
-  // the selection has not spread across stores.
-  const awbStoreIds = new Set(awbSelected.map((o) => o.storeId))
+  // Shopee takes 50 packages from one shop per request; the backend splits a
+  // bigger or multi-shop selection itself, up to this many per click.
+  const AWB_MAX_PER_DOWNLOAD = 300
+  const awbTooMany = awbSelected.length > AWB_MAX_PER_DOWNLOAD
 
   const handlePrint = (platformFilter: string) => {
     const ids = selectedOrders
@@ -1129,6 +1130,9 @@ export default function OrdersPage() {
     try {
       const res = await api.post('/print/awb', { ids: awbSelected.map((o) => o.id) }, {
         responseType: 'blob',
+        // Every 50 packages is its own render on Shopee's side, so a full
+        // selection can outlast the client-wide 90s safety net.
+        timeout: 300_000,
       })
 
       // Shopee decides the format — pdf, html or zip (KB §7.2)
@@ -1145,8 +1149,29 @@ export default function OrdersPage() {
       link.remove()
       window.URL.revokeObjectURL(url)
 
-      setBulkMessage({ type: 'success', text: `AWB Shopee untuk ${awbSelected.length} paket berhasil diunduh.` })
-      setSelected(new Set())
+      const downloaded = Number(res.headers?.['x-awb-count']) || awbSelected.length
+      let failed: { store: string; orderIds: string[]; rowIds: string[]; message: string }[] = []
+      try {
+        const raw = res.headers?.['x-awb-failed']
+        if (raw) failed = JSON.parse(decodeURIComponent(raw))
+      } catch {
+        // A garbled report must not hide the labels that did download
+      }
+
+      if (failed.length > 0) {
+        const failedIds = new Set(failed.flatMap((f) => f.rowIds))
+        setBulkMessage({
+          type: 'error',
+          text: `AWB untuk ${downloaded} paket berhasil diunduh, tapi ${failedIds.size} paket gagal: ${
+            failed.map((f) => `${f.store} — ${f.orderIds.join(', ')} (${f.message})`).join('; ')
+          }. Pesanan yang gagal tetap terpilih, klik lagi untuk mencoba ulang.`,
+        })
+        // Keep only the ones that still need a label, so a retry is one click
+        setSelected(failedIds)
+      } else {
+        setBulkMessage({ type: 'success', text: `AWB Shopee untuk ${downloaded} paket berhasil diunduh.` })
+        setSelected(new Set())
+      }
       await fetchOrders()
     } catch (err) {
       setBulkMessage({ type: 'error', text: await readError(err) })
@@ -2301,10 +2326,10 @@ export default function OrdersPage() {
               {awbSelected.length > 0 && (
                 <button
                   onClick={handleDownloadAwb}
-                  disabled={bulkBusy || awbStoreIds.size > 1}
+                  disabled={bulkBusy || awbTooMany}
                   title={
-                    awbStoreIds.size > 1
-                      ? 'Satu permintaan AWB hanya boleh untuk satu toko'
+                    awbTooMany
+                      ? `Maksimal ${AWB_MAX_PER_DOWNLOAD} paket sekali unduh`
                       : 'Unduh AWB resmi dari Shopee'
                   }
                   className="btn-secondary"

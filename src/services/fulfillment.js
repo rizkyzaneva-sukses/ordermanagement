@@ -19,7 +19,7 @@ const { PDFDocument } = require('pdf-lib');
 
 const prisma        = require('../prisma/client.js');
 const shopeeService = require('./shopee.js');
-const { ensureFreshToken, expandShopeeOrderToPackages } = require('./syncDirect.js');
+const { ensureFreshToken, expandShopeeOrderToPackages, mapWithConcurrency, CALL_CONCURRENCY } = require('./syncDirect.js');
 const { isDropoffOnlyCourier, modePreferenceFor } = require('../utils/couriers.js');
 
 const config = require('../config/index.js');
@@ -1586,32 +1586,76 @@ function checkAwbPrintable(order, options = {}) {
   return { ok: true };
 }
 
+/** Shopee generates air waybills at most 50 packages per request (KB §7). */
+const AWB_SHOPEE_BATCH = 50;
+/** What one click may ask for; the service splits it into Shopee-sized requests. */
+const AWB_MAX_PER_DOWNLOAD = 300;
+
+/**
+ * Split a selection into the requests Shopee will accept.
+ *
+ * One request is authenticated per shop, may not mix couriers
+ * ("packages_can_not_download_together … different channel_id") and may hold
+ * at most 50 packages — so rows are grouped by store, then by channel, then cut
+ * into 50s. Rows whose channel was never recorded each get a request of their
+ * own rather than being lumped with a real channel: an unknown is not evidence
+ * of a match, and guessing wrong resurrects the very error the grouping avoids.
+ *
+ * Groups keep the order the rows arrived in, so the merged PDF follows the
+ * operator's selection store by store.
+ *
+ * @param {Array<{ id: string, storeId: string, logisticsChannelId?: number|null }>} rows
+ * @param {number} [batchSize=AWB_SHOPEE_BATCH]
+ * @returns {Array<{ storeId: string, channelKey: string, rows: Object[] }>}
+ */
+function planAwbBatches(rows, batchSize = AWB_SHOPEE_BATCH) {
+  const groups = new Map();
+  for (const r of rows) {
+    const channelKey = r.logisticsChannelId == null ? `unknown:${r.id}` : String(r.logisticsChannelId);
+    const key = `${r.storeId}::${channelKey}`;
+    if (!groups.has(key)) groups.set(key, { storeId: r.storeId, channelKey, rows: [] });
+    groups.get(key).rows.push(r);
+  }
+
+  const batches = [];
+  for (const g of groups.values()) {
+    for (let i = 0; i < g.rows.length; i += batchSize) {
+      batches.push({ storeId: g.storeId, channelKey: g.channelKey, rows: g.rows.slice(i, i + batchSize) });
+    }
+  }
+  return batches;
+}
+
 /**
  * Fetch the official Shopee AWB for a set of order rows.
  *
- * All rows must belong to the same store, because the document request is
- * authenticated per shop. Rows outside the printing window are rejected up
- * front — `download_shipping_document` fails the entire request if even one
- * package is not READY (KB §7.3), so partial batches are not worth attempting.
+ * Shopee caps one document request at 50 packages from one shop and one
+ * courier, which used to leave the operator selecting and downloading in
+ * handfuls. The selection is now split with `planAwbBatches`, each batch is
+ * fetched separately, and the PDFs are stitched back into the single file the
+ * operator asked for.
  *
- * Shopee additionally refuses to put two couriers in one document
- * ("packages_can_not_download_together … different channel_id"), which made a
- * mixed selection unprintable and forced the operator to filter by courier and
- * print each group by hand. So the selection is grouped by logistics channel,
- * fetched one document per group, and the PDFs are stitched back into the
- * single file the operator asked for.
+ * Rows outside the printing window are rejected up front —
+ * `download_shipping_document` fails the entire request if even one package is
+ * not READY (KB §7.3), and a selection with a known-bad row is better fixed
+ * than half printed.
+ *
+ * A batch Shopee rejects later (token trouble, generation timeout) does not
+ * sink the others: the labels that did come back are returned, and the rows
+ * that did not are listed in `failed` so the operator can retry just those.
+ * Only when nothing at all came back is it an error.
  *
  * @param {string[]} orderRowIds
  * @param {Object} [options={}]
  * @param {string} [options.shippingDocumentType]
- * @returns {Promise<{ buffer: Buffer, format: string, documentType: string, filePath: string, orderRowIds: string[], channelCount: number }>}
+ * @returns {Promise<{ buffer: Buffer, format: string, documentType: string, filePath: string, orderRowIds: string[], failed: Array<{ store: string, orderIds: string[], rowIds: string[], message: string }>, batchCount: number }>}
  */
 async function fetchAwb(orderRowIds, options = {}) {
   if (!Array.isArray(orderRowIds) || orderRowIds.length === 0) {
     throw fail(400, 'orderRowIds must be a non-empty array');
   }
-  if (orderRowIds.length > 50) {
-    throw fail(400, 'Shopee accepts at most 50 packages per shipping-document request');
+  if (orderRowIds.length > AWB_MAX_PER_DOWNLOAD) {
+    throw fail(400, `Maksimal ${AWB_MAX_PER_DOWNLOAD} paket per unduhan AWB`);
   }
 
   const rows = await prisma.order.findMany({
@@ -1623,14 +1667,9 @@ async function fetchAwb(orderRowIds, options = {}) {
     throw fail(404, 'Some orders were not found');
   }
 
-  const storeIds = [...new Set(rows.map(r => r.storeId))];
-  if (storeIds.length > 1) {
-    throw fail(400, 'All packages in one AWB request must belong to the same store');
-  }
-
-  const store = rows[0].store;
-  if (store.platform !== 'SHOPEE') {
-    throw fail(400, `Shopee AWBs are not available for ${store.platform} stores`);
+  const notShopee = rows.find(r => r.store.platform !== 'SHOPEE');
+  if (notShopee) {
+    throw fail(400, `Shopee AWBs are not available for ${notShopee.store.platform} stores`);
   }
 
   const blocked = rows
@@ -1642,45 +1681,71 @@ async function fetchAwb(orderRowIds, options = {}) {
     throw fail(409, `${blocked.length} package(s) cannot be printed — ${detail}`);
   }
 
-  const accessToken = await ensureFreshToken(store);
+  // Keep the operator's selection order rather than whatever the DB returned
+  const byId = new Map(rows.map(r => [r.id, r]));
+  const batches = planAwbBatches(orderRowIds.map(id => byId.get(id)));
 
-  // Rows whose channel was never recorded are keyed separately rather than
-  // lumped with a real channel — an unknown is not evidence of a match, and
-  // guessing wrong resurrects the very error this grouping exists to avoid.
-  const byChannel = new Map();
-  for (const r of rows) {
-    const key = r.logisticsChannelId == null ? `unknown:${r.id}` : String(r.logisticsChannelId);
-    if (!byChannel.has(key)) byChannel.set(key, []);
-    byChannel.get(key).push(r);
+  console.log(`[fulfillment] AWB for ${rows.length} package(s) in ${batches.length} request(s)`);
+
+  // One token per store, fetched once; a store whose token fails is recorded
+  // and its batches skipped instead of retried for every chunk.
+  const tokens = new Map();
+  const tokenFor = async (store) => {
+    if (!tokens.has(store.id)) tokens.set(store.id, ensureFreshToken(store));
+    return tokens.get(store.id);
+  };
+
+  // A few at a time: each batch spends most of its time waiting on Shopee to
+  // render, so running them one by one would push 300 packages past the
+  // browser's patience, while firing all at once invites rate limiting.
+  const results = await mapWithConcurrency(batches, CALL_CONCURRENCY, async (batch) => {
+    const store = batch.rows[0].store;
+    try {
+      const accessToken = await tokenFor(store);
+      const doc = await shopeeService.fetchShippingDocument(
+        accessToken,
+        store.shopId,
+        batch.rows.map(r => ({
+          orderSn:        r.orderId,
+          packageNumber:  r.packageNumber || undefined,
+          trackingNumber: r.trackingNumber || undefined,
+        })),
+        { shippingDocumentType: options.shippingDocumentType },
+      );
+      console.log(`[fulfillment] AWB ${store.name} channel ${batch.channelKey}: ${batch.rows.length} package(s) → ${doc.format}`);
+      return { batch, doc };
+    } catch (err) {
+      console.warn(`[fulfillment] AWB ${store.name} channel ${batch.channelKey} failed for ${batch.rows.length} package(s): ${err.message}`);
+      return { batch, error: err };
+    }
+  });
+
+  const succeeded = results.filter(r => r.doc);
+  const failed = results
+    .filter(r => r.error)
+    .map(r => ({
+      store: r.batch.rows[0].store.name,
+      orderIds: r.batch.rows.map(row => row.orderId),
+      rowIds: r.batch.rows.map(row => row.id),
+      message: r.error.message,
+    }));
+
+  if (succeeded.length === 0) {
+    const detail = failed.map(f => `${f.store}: ${f.message}`).join('; ');
+    throw fail(502, `AWB Shopee gagal diunduh — ${detail}`);
   }
 
-  console.log(`[fulfillment] AWB for ${rows.length} package(s) across ${byChannel.size} channel(s)`);
-
-  const docs = [];
-  for (const [key, group] of byChannel) {
-    const doc = await shopeeService.fetchShippingDocument(
-      accessToken,
-      store.shopId,
-      group.map(r => ({
-        orderSn:        r.orderId,
-        packageNumber:  r.packageNumber || undefined,
-        trackingNumber: r.trackingNumber || undefined,
-      })),
-      { shippingDocumentType: options.shippingDocumentType },
-    );
-    console.log(`[fulfillment] AWB channel ${key}: ${group.length} package(s) → ${doc.format}`);
-    docs.push(doc);
-  }
-
+  const docs = succeeded.map(r => r.doc);
   const doc = docs.length === 1 ? docs[0] : await mergeAwbDocuments(docs);
+  const doneIds = succeeded.flatMap(r => r.batch.rows.map(row => row.id));
 
   fs.mkdirSync(AWB_DIR, { recursive: true });
-  const fileName = `awb-${Date.now()}-${rows.length}pkg.${doc.format === 'unknown' ? 'bin' : doc.format}`;
+  const fileName = `awb-${Date.now()}-${doneIds.length}pkg.${doc.format === 'unknown' ? 'bin' : doc.format}`;
   const filePath = path.join(AWB_DIR, fileName);
   fs.writeFileSync(filePath, doc.buffer);
 
   await prisma.order.updateMany({
-    where: { id: { in: orderRowIds } },
+    where: { id: { in: doneIds } },
     data: {
       awbPath:         filePath,
       awbFormat:       doc.format,
@@ -1689,9 +1754,9 @@ async function fetchAwb(orderRowIds, options = {}) {
     },
   });
 
-  console.log(`[fulfillment] Downloaded Shopee AWB for ${rows.length} package(s) → ${filePath} (${doc.format})`);
+  console.log(`[fulfillment] Downloaded Shopee AWB for ${doneIds.length}/${rows.length} package(s) → ${filePath} (${doc.format})`);
 
-  return { ...doc, filePath, orderRowIds, channelCount: byChannel.size };
+  return { ...doc, filePath, orderRowIds: doneIds, failed, batchCount: batches.length };
 }
 
 /**
@@ -1712,8 +1777,10 @@ async function mergeAwbDocuments(docs) {
   if (formats.length > 1 || formats[0] !== 'pdf') {
     throw fail(
       409,
-      `Pesanan terpilih memakai beberapa ekspedisi dan Shopee mengirim formatnya sebagai ${
-        formats.join(' + ')} — hanya PDF yang bisa digabung. Cetak per ekspedisi untuk pesanan ini.`,
+      `Pesanan terpilih perlu diambil dalam beberapa bagian (beda toko/ekspedisi atau lebih dari ${
+        AWB_SHOPEE_BATCH} paket) dan Shopee mengirim formatnya sebagai ${
+        formats.join(' + ')} — hanya PDF yang bisa digabung. Cetak per toko/ekspedisi, maksimal ${
+        AWB_SHOPEE_BATCH} paket sekali unduh.`,
     );
   }
 
@@ -1926,6 +1993,8 @@ module.exports = {
   getTrackingEvents,
   checkAwbPrintable,
   fetchAwb,
+  planAwbBatches,
+  AWB_MAX_PER_DOWNLOAD,
   mergeAwbDocuments,
   readStoredAwb,
   cleanupOldAwbFiles,

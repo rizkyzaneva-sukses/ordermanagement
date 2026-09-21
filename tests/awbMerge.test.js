@@ -75,3 +75,42 @@ test('a mix of PDF and non-PDF is refused', async () => {
     /hanya PDF yang bisa digabung/,
   );
 });
+
+// ── Splitting a selection into requests Shopee will accept ───────────────────
+
+const { planAwbBatches } = require('../src/services/fulfillment.js');
+
+const rowsFor = (count, storeId, logisticsChannelId, prefix = storeId) =>
+  Array.from({ length: count }, (_, i) => ({ id: `${prefix}-${i}`, storeId, logisticsChannelId }));
+
+test('more than 50 packages are cut into Shopee-sized requests, none lost', () => {
+  const rows = rowsFor(180, 's1', 80005);
+  const batches = planAwbBatches(rows);
+
+  assert.deepEqual(batches.map(b => b.rows.length), [50, 50, 50, 30]);
+  assert.deepEqual(batches.flatMap(b => b.rows.map(r => r.id)), rows.map(r => r.id));
+});
+
+test('stores and couriers never share a request', () => {
+  const rows = [
+    ...rowsFor(3, 's1', 80005),
+    ...rowsFor(2, 's2', 80005),
+    ...rowsFor(4, 's1', 80088, 's1b'),
+  ];
+  const batches = planAwbBatches(rows);
+
+  assert.equal(batches.length, 3);
+  for (const b of batches) {
+    assert.equal(new Set(b.rows.map(r => r.storeId)).size, 1);
+    assert.equal(new Set(b.rows.map(r => r.logisticsChannelId)).size, 1);
+  }
+});
+
+test('an unrecorded courier is never lumped with another row', () => {
+  const batches = planAwbBatches([
+    { id: 'a', storeId: 's1', logisticsChannelId: null },
+    { id: 'b', storeId: 's1', logisticsChannelId: null },
+    { id: 'c', storeId: 's1', logisticsChannelId: 80005 },
+  ]);
+  assert.deepEqual(batches.map(b => b.rows.map(r => r.id)), [['a'], ['b'], ['c']]);
+});

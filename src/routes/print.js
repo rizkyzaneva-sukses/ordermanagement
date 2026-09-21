@@ -7,8 +7,9 @@ const { authenticate } = require('../middleware/auth.js');
 const fulfillmentService = require('../services/fulfillment.js');
 
 const MAX_BATCH_SIZE = 300;
-// Shopee generates air waybills 50 packages at a time (KB §7)
-const MAX_AWB_BATCH_SIZE = 50;
+// Shopee takes 50 packages per request (KB §7); the service splits larger
+// selections into several requests and merges the labels back into one file.
+const MAX_AWB_BATCH_SIZE = fulfillmentService.AWB_MAX_PER_DOWNLOAD;
 
 router.use(authenticate);
 
@@ -310,7 +311,7 @@ router.post('/awb', async (req, res) => {
     if (ids.length > MAX_AWB_BATCH_SIZE) {
       return res.status(400).json({
         success: false,
-        error: `Shopee accepts at most ${MAX_AWB_BATCH_SIZE} packages per air waybill request`,
+        error: `Maksimal ${MAX_AWB_BATCH_SIZE} paket per unduhan AWB`,
       });
     }
 
@@ -331,10 +332,17 @@ router.post('/awb', async (req, res) => {
 
     const doc = await fulfillmentService.fetchAwb(ids, { shippingDocumentType });
 
+    // Only the packages whose labels actually came back count as printed; the
+    // rest go back to the operator by name so they can be retried.
     await prisma.order.updateMany({
-      where: { id: { in: ids } },
+      where: { id: { in: doc.orderRowIds } },
       data: { printedAt: new Date(), printedById: req.user.id },
     });
+
+    res.setHeader('X-Awb-Count', String(doc.orderRowIds.length));
+    if (doc.failed.length > 0) {
+      res.setHeader('X-Awb-Failed', encodeURIComponent(JSON.stringify(doc.failed)));
+    }
 
     const extension = doc.format === 'unknown' ? 'bin' : doc.format;
     res.setHeader('Content-Type', AWB_CONTENT_TYPES[doc.format] || 'application/octet-stream');
