@@ -139,7 +139,7 @@ export default function ChatPage() {
   messagesRef.current = messages
 
   useEffect(() => {
-    api.get('/chat/stores').then((r) => setStores(r.data?.data || [])).catch(() => {})
+    api.get('/chat/stores').then((r) => setStores(r.data || [])).catch(() => {})
   }, [])
 
   // ── Conversation list ──────────────────────────────────────────────────────
@@ -149,7 +149,7 @@ export default function ChatPage() {
       const res = await api.get('/chat/conversations', {
         params: { storeId: storeFilter || undefined, type: listType },
       })
-      const data = res.data?.data
+      const data = res.data
       const fresh: Conversation[] = data?.conversations || []
       if (opts.background) {
         // A refresh only brings back the newest page; older pages the operator
@@ -189,7 +189,7 @@ export default function ChatPage() {
       const res = await api.get('/chat/conversations', {
         params: { storeId: storeFilter || undefined, type: listType, cursor },
       })
-      const data = res.data?.data
+      const data = res.data
       setConversations((prev) => {
         const seen = new Set(prev.map((c) => `${c.storeId}:${c.id}`))
         return [...prev, ...(data?.conversations || []).filter((c: Conversation) => !seen.has(`${c.storeId}:${c.id}`))]
@@ -223,7 +223,7 @@ export default function ChatPage() {
     try {
       const res = await api.get(`/chat/conversations/${conv.id}/messages`, { params: { storeId: conv.storeId } })
       if (activeRef.current?.id !== conv.id) return
-      const data = res.data?.data
+      const data = res.data
       const incoming: Message[] = data?.messages || []
       const prev = opts.background ? messagesRef.current : []
       const merged = mergeMessages(prev, incoming)
@@ -272,7 +272,7 @@ export default function ChatPage() {
       const res = await api.get(`/chat/conversations/${active.id}/messages`, {
         params: { storeId: active.storeId, offset: olderOffset },
       })
-      const data = res.data?.data
+      const data = res.data
       setMessages((prev) => mergeMessages(prev, data?.messages || []))
       setOlderOffset(data?.nextOffset || null)
     } catch (err) {
@@ -296,7 +296,7 @@ export default function ChatPage() {
     api.get('/chat/buyer-orders', {
       params: { storeId: active.storeId, buyerId: active.buyerId, orderSns: mentionedKey || undefined },
     })
-      .then((r) => { if (!cancelled) setOrders(r.data?.data?.orders || []) })
+      .then((r) => { if (!cancelled) setOrders(r.data?.orders || []) })
       .catch(() => { if (!cancelled) setOrders([]) })
       .finally(() => { if (!cancelled) setOrdersLoading(false) })
     return () => { cancelled = true }
@@ -325,7 +325,7 @@ export default function ChatPage() {
       const res = await api.post(`/chat/conversations/${active.id}/messages`, {
         storeId: active.storeId, toId: active.buyerId, text,
       })
-      afterSend(res.data?.data?.message)
+      afterSend(res.data?.message)
       setDraft('')
     } catch (err) {
       // The draft stays in the box, so nothing typed is lost to a refusal
@@ -356,7 +356,7 @@ export default function ChatPage() {
         headers: { 'Content-Type': 'multipart/form-data' },
         timeout: 120_000,
       })
-      afterSend(res.data?.data?.message)
+      afterSend(res.data?.message)
     } catch (err) {
       setSendError(readError(err).text)
     } finally {

@@ -251,7 +251,7 @@ function useChatUnread(enabled: boolean): number {
     let cancelled = false
     const load = () => {
       api.get('/chat/unread')
-        .then((r) => { if (!cancelled) setCount(r.data?.data?.total || 0) })
+        .then((r) => { if (!cancelled) setCount(r.data?.total || 0) })
         .catch(() => { if (!cancelled) setCount(0) })
     }
     load()
