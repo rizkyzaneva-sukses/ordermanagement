@@ -206,6 +206,7 @@ async function listConversations(user, { storeId, type = 'all', cursor } = {}) {
         pageSize: 25,
       });
       const page = resp.response?.page_result || {};
+      console.log(`[chat] ${store.name}: ${(resp.response?.conversations || []).length} conversation(s), more=${Boolean(page.more)}, response keys=${Object.keys(resp.response || {}).join(',') || '(none)'}`);
       return {
         store,
         conversations: (resp.response?.conversations || []).map(c => mapConversation(c, store)),

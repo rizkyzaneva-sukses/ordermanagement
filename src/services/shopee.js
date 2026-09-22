@@ -1822,9 +1822,12 @@ class ShopeeService {
     return this._request('GET', '/api/v2/sellerchat/get_conversation_list', {
       direction: 'older',
       type,
-      // Kept as the string Shopee handed out: it is a nanosecond timestamp, far
-      // past the range a JavaScript number holds exactly.
-      next_timestamp_nano: nextTimestampNano || undefined,
+      // Kept as a string: a nanosecond timestamp is far past the range a
+      // JavaScript number holds exactly. The first page sends "now" rather
+      // than leaving it out — the docs call an omitted value infinitely
+      // large, but an empty inbox with no error is what omitting it produced
+      // in production, which is what "older than 0" would return.
+      next_timestamp_nano: nextTimestampNano || nowNano(),
       page_size: Math.min(pageSize, 60),
     }, null, accessToken, String(shopId));
   }
@@ -1941,6 +1944,14 @@ class ShopeeService {
     return { url, thumbnail: data.response?.thumbnail || null };
   }
 
+}
+
+/**
+ * The current time as Shopee's nanosecond timestamp, a minute ahead so a
+ * conversation that arrives while our clock lags Shopee's is not cut off.
+ */
+function nowNano() {
+  return String(BigInt(Date.now() + 60_000) * 1_000_000n);
 }
 
 /**
