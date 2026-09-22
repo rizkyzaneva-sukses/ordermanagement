@@ -44,6 +44,9 @@ interface Order {
   logisticsStatus?: string | null
   awbFetchedAt?: string | null
   printed: boolean
+  printedAt?: string | null
+  /** Times printed again after the first — each one may leave an old label behind. */
+  reprintCount?: number
   items: OrderItem[]
   /** Shopee's deadline for handing the parcel over. Null until a sync sees one. */
   shipByDate?: string | null
@@ -314,6 +317,36 @@ function parseItems(raw: unknown): OrderItem[] {
   }
 }
 
+/**
+ * How a printed row tells the warehouse it has been printed before.
+ *
+ * The count is the point: "Dicetak 2×" means an older label for this parcel
+ * exists somewhere, and whether that one was Shopee's or the app-drawn fallback
+ * decides whether the courier will even accept it.
+ */
+function PrintBadge({ order }: { order: Order }) {
+  const times = 1 + (order.reprintCount || 0)
+  const official = Boolean(order.awbFetchedAt)
+  const reprinted = times > 1
+  return (
+    <span
+      title={[
+        official ? 'Resi resmi Shopee' : 'Resi cadangan (buatan app)',
+        order.printedAt ? `terakhir dicetak ${absoluteTime(order.printedAt)}` : null,
+      ].filter(Boolean).join(' · ')}
+      className={`inline-flex items-center gap-1 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+        reprinted
+          ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200'
+          : 'bg-gray-100 text-gray-600 dark:bg-slate-700 dark:text-slate-300'
+      }`}
+    >
+      <Printer className="w-3 h-3" />
+      {reprinted ? `Dicetak ${times}×` : 'Dicetak'}
+      {!official && <span className="font-normal">· cadangan</span>}
+    </span>
+  )
+}
+
 function absoluteTime(iso: string): string {
   return new Date(iso).toLocaleString('id-ID', {
     day: '2-digit',
@@ -533,6 +566,8 @@ export default function OrdersPage() {
         // than letting one bad row blank the column for the whole page.
         items: parseItems(o.items),
         printed: o.printed !== undefined ? o.printed : Boolean(o.printedAt),
+        printedAt: o.printedAt ?? null,
+        reprintCount: o.reprintCount ?? 0,
       }))
 
       setOrders(formattedOrders)
@@ -727,7 +762,9 @@ export default function OrdersPage() {
    * number alone.
    */
   const isPrintable = (order: Order) => {
-    if (order.printed) return false
+    // Already printed does not rule a row out: Shopee re-issues the same label
+    // for as long as the package is inside the printing window, and a lost or
+    // wrong label (an app-drawn one, say) has to be replaceable.
     if (!order.trackingNumber) return false
     if (order.logisticsStatus) return PRINTABLE_LOGISTICS.has(order.logisticsStatus)
     return true
@@ -768,7 +805,8 @@ export default function OrdersPage() {
   const isCheckboxEnabled = (order: Order) => {
     // Keyed on the order, not on which view is open: printed and unprinted rows
     // now sit on the same page, so "which tab am I on" no longer answers this.
-    if (order.printed) return false
+    // A printed row has nothing left to ship — only a reprint.
+    if (order.printed) return isPrintable(order)
     return isPrintable(order) || isShippable(order) || isRetryable(order)
   }
 
@@ -782,7 +820,13 @@ export default function OrdersPage() {
   }
 
   const toggleSelectAll = () => {
-    const enabledOrders = orders.filter(isCheckboxEnabled)
+    // Select-all reaches for fresh work first. Sweeping printed rows in too
+    // would turn a routine "print today's batch" into a silent reprint of
+    // yesterday's; they are only picked up when nothing unprinted is on the
+    // page, i.e. the operator went looking for them.
+    const candidates = orders.filter(isCheckboxEnabled)
+    const unprinted = candidates.filter((o) => !o.printed)
+    const enabledOrders = unprinted.length > 0 ? unprinted : candidates
     if (enabledOrders.length === 0) return
 
     const allSelected = enabledOrders.every((o) => selected.has(o.id))
@@ -795,8 +839,10 @@ export default function OrdersPage() {
 
   const selectedOrders = orders.filter((o) => selected.has(o.id))
   const selectedPlatforms = new Set(selectedOrders.map((o) => o.platform))
-  const shopeeCount = selectedOrders.filter((o) => o.platform === 'SHOPEE' && isPrintable(o)).length
-  const tiktokCount = selectedOrders.filter((o) => o.platform === 'TIKTOK' && isPrintable(o)).length
+  // The app-drawn receipt refuses anything printed before, so those two
+  // buttons only count fresh rows; reprints go through Shopee's own label.
+  const shopeeCount = selectedOrders.filter((o) => o.platform === 'SHOPEE' && !o.printed && isPrintable(o)).length
+  const tiktokCount = selectedOrders.filter((o) => o.platform === 'TIKTOK' && !o.printed && isPrintable(o)).length
 
   const shippableSelected = selectedOrders.filter(isShippable)
   const retrySelected = selectedOrders.filter(isRetryable)
@@ -808,10 +854,12 @@ export default function OrdersPage() {
   // bigger or multi-shop selection itself, up to this many per click.
   const AWB_MAX_PER_DOWNLOAD = 300
   const awbTooMany = awbSelected.length > AWB_MAX_PER_DOWNLOAD
+  const awbReprints = awbSelected.filter((o) => o.printed)
+  const [reprintConfirmOpen, setReprintConfirmOpen] = useState(false)
 
   const handlePrint = (platformFilter: string) => {
     const ids = selectedOrders
-      .filter((o) => o.platform === platformFilter && isPrintable(o))
+      .filter((o) => o.platform === platformFilter && !o.printed && isPrintable(o))
       .map((o) => o.id)
     router.push(`/print?ids=${ids.join(',')}`)
   }
@@ -1125,6 +1173,14 @@ export default function OrdersPage() {
 
   const handleDownloadAwb = async () => {
     if (awbSelected.length === 0) return
+    // A reprint puts a second label with the same tracking number into the
+    // warehouse; stuck on the wrong parcel it ships the wrong goods. Worth one
+    // deliberate click before it happens.
+    if (awbReprints.length > 0 && !reprintConfirmOpen) {
+      setReprintConfirmOpen(true)
+      return
+    }
+    setReprintConfirmOpen(false)
     setBulkBusy(true)
     setBulkMessage(null)
     try {
@@ -1794,17 +1850,7 @@ export default function OrdersPage() {
                   return (
                     <tr key={order.id} className="hover:bg-gray-50 dark:hover:bg-slate-700/40 transition-colors">
                       <td className="table-cell">
-                        {order.printed ? (
-                          <div className="flex flex-col gap-0.5">
-                            <span className="text-xs text-gray-400">Sudah dicetak</span>
-                            <button
-                              onClick={() => router.push(`/print?ids=${order.id}&reprint=true`)}
-                              className="text-xs text-primary-600 hover:text-primary-700 underline"
-                            >
-                              Cetak ulang
-                            </button>
-                          </div>
-                        ) : (
+                        <div className="flex flex-col items-start gap-1">
                           <input
                             type="checkbox"
                             checked={selected.has(order.id)}
@@ -1812,7 +1858,8 @@ export default function OrdersPage() {
                             disabled={!enabled}
                             className="rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:opacity-40"
                           />
-                        )}
+                          {order.printed && <PrintBadge order={order} />}
+                        </div>
                       </td>
                       <td className="table-cell font-mono text-xs font-medium text-gray-900 dark:text-slate-100 break-all">
                         {order.orderId}
@@ -1924,6 +1971,37 @@ export default function OrdersPage() {
           <button onClick={() => setBulkMessage(null)} className="shrink-0">
             <X className="w-4 h-4" />
           </button>
+        </div>
+      )}
+
+      {reprintConfirmOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setReprintConfirmOpen(false)}
+        >
+          <div className="card w-full max-w-md p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4">
+              <h3 className="font-semibold text-gray-900 dark:text-slate-100">Cetak ulang resi?</h3>
+              <button onClick={() => setReprintConfirmOpen(false)} className="btn-ghost p-1">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-sm text-gray-700 dark:text-slate-300">
+              <span className="font-semibold">{awbReprints.length}</span> dari {awbSelected.length} pesanan
+              ini <span className="font-semibold">sudah pernah dicetak</span>. Nomor resinya tetap sama.
+            </p>
+            <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">
+              Buang label lama pesanan ini sebelum menempel yang baru. Dua label dengan resi yang sama
+              bisa tertempel di paket yang salah.
+            </div>
+            <div className="flex justify-end gap-2 pt-1">
+              <button onClick={() => setReprintConfirmOpen(false)} className="btn-secondary">Batal</button>
+              <button onClick={handleDownloadAwb} className="btn bg-shopee text-white hover:bg-orange-600">
+                <Printer className="w-4 h-4" />
+                Ya, cetak {awbSelected.length} resi
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

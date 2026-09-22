@@ -333,7 +333,13 @@ router.post('/awb', async (req, res) => {
     const doc = await fulfillmentService.fetchAwb(ids, { shippingDocumentType });
 
     // Only the packages whose labels actually came back count as printed; the
-    // rest go back to the operator by name so they can be retried.
+    // rest go back to the operator by name so they can be retried. A row that
+    // was printed before is counted as a reprint first, so the list can show
+    // the warehouse that an older label for it may still be lying around.
+    await prisma.order.updateMany({
+      where: { id: { in: doc.orderRowIds }, printedAt: { not: null } },
+      data: { reprintCount: { increment: 1 } },
+    });
     await prisma.order.updateMany({
       where: { id: { in: doc.orderRowIds } },
       data: { printedAt: new Date(), printedById: req.user.id },
