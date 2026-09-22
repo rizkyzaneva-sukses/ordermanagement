@@ -819,22 +819,24 @@ export default function OrdersPage() {
     })
   }
 
-  const toggleSelectAll = () => {
-    // Select-all reaches for fresh work first. Sweeping printed rows in too
-    // would turn a routine "print today's batch" into a silent reprint of
-    // yesterday's; they are only picked up when nothing unprinted is on the
-    // page, i.e. the operator went looking for them.
-    const candidates = orders.filter(isCheckboxEnabled)
-    const unprinted = candidates.filter((o) => !o.printed)
-    const enabledOrders = unprinted.length > 0 ? unprinted : candidates
-    if (enabledOrders.length === 0) return
+  // Two select-alls, one per print state. A single one would either sweep
+  // yesterday's printed rows into today's batch — a silent reprint — or make
+  // a deliberate reprint of many rows impossible without ticking each one.
+  const selectableUnprinted = orders.filter((o) => !o.printed && isCheckboxEnabled(o))
+  const selectablePrinted = orders.filter((o) => o.printed && isCheckboxEnabled(o))
+  const allOf = (group: Order[]) => group.length > 0 && group.every((o) => selected.has(o.id))
 
-    const allSelected = enabledOrders.every((o) => selected.has(o.id))
-    if (allSelected) {
-      setSelected(new Set())
-    } else {
-      setSelected(new Set(enabledOrders.map((o) => o.id)))
-    }
+  const toggleSelectGroup = (group: Order[]) => {
+    if (group.length === 0) return
+    const on = !allOf(group)
+    setSelected((prev) => {
+      const next = new Set(prev)
+      for (const o of group) {
+        if (on) next.add(o.id)
+        else next.delete(o.id)
+      }
+      return next
+    })
   }
 
   const selectedOrders = orders.filter((o) => selected.has(o.id))
@@ -1787,7 +1789,7 @@ export default function OrdersPage() {
         <div className="overflow-x-auto">
           <table className="w-full table-fixed">
             <colgroup>
-              <col className="w-[40px]" />
+              <col className="w-[64px]" />
               <col className="w-[12%]" />
               <col className="w-[10%]" />
               <col className="w-[7%]" />
@@ -1801,16 +1803,35 @@ export default function OrdersPage() {
             </colgroup>
             <thead className="bg-gray-50 dark:bg-slate-800/80 border-b border-gray-200 dark:border-slate-700">
               <tr>
-                <th className="table-header">
-                  <input
-                    type="checkbox"
-                    checked={
-                      orders.filter(isCheckboxEnabled).length > 0 &&
-                      orders.filter(isCheckboxEnabled).every((o) => selected.has(o.id))
-                    }
-                    onChange={toggleSelectAll}
-                    className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-                  />
+                <th className="table-header normal-case tracking-normal">
+                  <div className="flex flex-col gap-1 text-[10px] font-medium">
+                    <label
+                      className="flex items-center gap-1 cursor-pointer"
+                      title="Pilih semua pesanan yang belum dicetak di halaman ini"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={allOf(selectableUnprinted)}
+                        onChange={() => toggleSelectGroup(selectableUnprinted)}
+                        disabled={selectableUnprinted.length === 0}
+                        className="rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:opacity-40"
+                      />
+                      Belum
+                    </label>
+                    <label
+                      className="flex items-center gap-1 cursor-pointer"
+                      title="Pilih semua pesanan yang sudah dicetak di halaman ini (untuk cetak ulang)"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={allOf(selectablePrinted)}
+                        onChange={() => toggleSelectGroup(selectablePrinted)}
+                        disabled={selectablePrinted.length === 0}
+                        className="rounded border-gray-300 text-amber-500 focus:ring-amber-400 disabled:opacity-40"
+                      />
+                      Sudah
+                    </label>
+                  </div>
                 </th>
                 <th className="table-header">Order ID</th>
                 <th className="table-header">Toko</th>
@@ -1850,16 +1871,13 @@ export default function OrdersPage() {
                   return (
                     <tr key={order.id} className="hover:bg-gray-50 dark:hover:bg-slate-700/40 transition-colors">
                       <td className="table-cell">
-                        <div className="flex flex-col items-start gap-1">
-                          <input
-                            type="checkbox"
-                            checked={selected.has(order.id)}
-                            onChange={() => toggleSelect(order.id)}
-                            disabled={!enabled}
-                            className="rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:opacity-40"
-                          />
-                          {order.printed && <PrintBadge order={order} />}
-                        </div>
+                        <input
+                          type="checkbox"
+                          checked={selected.has(order.id)}
+                          onChange={() => toggleSelect(order.id)}
+                          disabled={!enabled}
+                          className="rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:opacity-40"
+                        />
                       </td>
                       <td className="table-cell font-mono text-xs font-medium text-gray-900 dark:text-slate-100 break-all">
                         {order.orderId}
@@ -1867,6 +1885,11 @@ export default function OrdersPage() {
                           <p className="text-[10px] text-gray-400 dark:text-slate-500 break-all" title="Nomor paket">
                             pkg {order.packageNumber}
                           </p>
+                        )}
+                        {order.printed && (
+                          <div className="mt-1 font-sans">
+                            <PrintBadge order={order} />
+                          </div>
                         )}
                       </td>
                       <td className="table-cell text-sm break-words">{order.storeName}</td>
