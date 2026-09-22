@@ -448,7 +448,9 @@ export default function OrdersPage() {
     { all: 0, toProcess: 0, processed: 0 }
   )
   const [page, setPage] = useState(1)
-  const [search, setSearch] = useState('')
+  // Seeded from the URL so other screens (the chat's order panel) can link
+  // straight to one order.
+  const [search, setSearch] = useState(searchParams.get('search') || '')
   const [platform, setPlatform] = useState('')
   const [storeId, setStoreId] = useState('')
   const [status, setStatus] = useState('')

@@ -962,6 +962,7 @@ async function applyOrderDetail(store, detail) {
       // Was missing entirely, so re-syncing an order used to wipe out the
       // shipping deadline the list sorts by.
       shipByDate:         row.shipByDate ?? match?.shipByDate ?? null,
+      buyerUserId:        row.buyerUserId ?? match?.buyerUserId ?? null,
       items:              JSON.stringify(row.items || []),
     };
 

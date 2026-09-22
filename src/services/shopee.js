@@ -115,7 +115,9 @@ class ShopeeService {
    * @param {string} method         - HTTP method (GET | POST)
    * @param {string} path           - API path
    * @param {Object} [params={}]    - Query parameters
-   * @param {Object|null} [body=null] - JSON body (for POST)
+   * @param {Object|string|null} [body=null] - JSON body (for POST). A string is
+   *   sent as-is: the chat endpoints take int64 ids that JSON.stringify would
+   *   round, so their callers serialise the body themselves.
    * @param {string} [accessToken='']
    * @param {string} [shopId='']
    * @returns {Promise<Object>} Parsed JSON response
@@ -146,7 +148,11 @@ class ShopeeService {
     // reconnect by hand. Failing fast keeps the credential intact for the next
     // scheduled attempt.
     const isAuthEndpoint = path.startsWith('/api/v2/auth/');
-    const MAX_RETRIES = isAuthEndpoint ? 1 : 3;
+    // Same reasoning for a chat message: if Shopee delivered it but the answer
+    // was lost, a retry sends the buyer the same text twice — and Shopee counts
+    // repeated content against the shop ("error_business").
+    const isSendOnce = isAuthEndpoint || path === '/api/v2/sellerchat/send_message';
+    const MAX_RETRIES = isSendOnce ? 1 : 3;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       const url = this._buildUrl(path, params, accessToken, shopId);
@@ -160,7 +166,7 @@ class ShopeeService {
         signal: controller.signal,
       };
       if (body) {
-        options.body = JSON.stringify(body);
+        options.body = typeof body === 'string' ? body : JSON.stringify(body);
       }
 
       console.error(`[ShopeeService._request] ${method} ${path} attempt=${attempt}/${MAX_RETRIES}`);
@@ -603,7 +609,7 @@ class ShopeeService {
     return this._request('GET', '/api/v2/order/get_order_detail', {
       order_sn_list: orderSnList.join(','),
       // note: buyer catatan ke seller; payment_method: deteksi COD
-      response_optional_fields: 'buyer_username,recipient_address,item_list,package_list,shipping_carrier,actual_shipping_cost,tracking_number,note,payment_method',
+      response_optional_fields: 'buyer_user_id,buyer_username,recipient_address,item_list,package_list,shipping_carrier,actual_shipping_cost,tracking_number,note,payment_method',
       ...extraParams,
     }, null, accessToken, String(shopId));
   }
@@ -1794,6 +1800,175 @@ class ShopeeService {
     throw new Error('Shopee API: upload_image gagal setelah beberapa percobaan');
   }
 
+  // ──────────────────────────────────────────────
+  // Seller chat (v2.sellerchat.*)
+  // ──────────────────────────────────────────────
+  //
+  // Replying to buyers only. Shopee's chat permission forbids proactive order
+  // updates, broadcasts and chatbot replies, so there is deliberately no
+  // auto-reply or bulk-send method here — see the Chat API permission terms.
+
+  /**
+   * One page of conversations, newest first.
+   *
+   * @param {string} accessToken
+   * @param {string|number} shopId
+   * @param {Object} [opts]
+   * @param {'all'|'unread'|'pinned'} [opts.type='all']
+   * @param {string} [opts.nextTimestampNano] - `next_cursor.next_message_time_nano` of the previous page
+   * @param {number} [opts.pageSize=25] - Shopee caps it at 60
+   */
+  async getConversationList(accessToken, shopId, { type = 'all', nextTimestampNano, pageSize = 25 } = {}) {
+    return this._request('GET', '/api/v2/sellerchat/get_conversation_list', {
+      direction: 'older',
+      type,
+      // Kept as the string Shopee handed out: it is a nanosecond timestamp, far
+      // past the range a JavaScript number holds exactly.
+      next_timestamp_nano: nextTimestampNano || undefined,
+      page_size: Math.min(pageSize, 60),
+    }, null, accessToken, String(shopId));
+  }
+
+  /**
+   * Messages of one conversation, newest first; `offset` walks back in time.
+   *
+   * @param {string} accessToken
+   * @param {string|number} shopId
+   * @param {string} conversationId
+   * @param {Object} [opts]
+   * @param {string} [opts.offset] - `page_result.next_offset` of the previous page
+   * @param {number} [opts.pageSize=25] - Shopee caps it at 60
+   */
+  async getChatMessages(accessToken, shopId, conversationId, { offset, pageSize = 25 } = {}) {
+    return this._request('GET', '/api/v2/sellerchat/get_message', {
+      conversation_id: String(conversationId),
+      offset: offset || undefined,
+      page_size: Math.min(pageSize, 60),
+    }, null, accessToken, String(shopId));
+  }
+
+  /** Number of conversations (not messages) the shop has not read. */
+  async getUnreadConversationCount(accessToken, shopId) {
+    return this._request('GET', '/api/v2/sellerchat/get_unread_conversation_count', {},
+      null, accessToken, String(shopId));
+  }
+
+  /**
+   * Mark a conversation read up to a message.
+   *
+   * @param {string} accessToken
+   * @param {string|number} shopId
+   * @param {string} conversationId
+   * @param {string} lastReadMessageId
+   */
+  async readConversation(accessToken, shopId, conversationId, lastReadMessageId) {
+    const body = jsonWithInt64(
+      { conversation_id: String(conversationId), last_read_message_id: String(lastReadMessageId) },
+      ['conversation_id'],
+    );
+    return this._request('POST', '/api/v2/sellerchat/read_conversation', {}, body, accessToken, String(shopId));
+  }
+
+  /**
+   * Send one reply to a buyer. Never retried — see `_request`.
+   *
+   * @param {string} accessToken
+   * @param {string|number} shopId
+   * @param {Object} msg
+   * @param {string} msg.toId - The buyer's user id (conversation `to_id`)
+   * @param {'text'|'image'} msg.type
+   * @param {string} [msg.text] - At most 600 characters
+   * @param {string} [msg.imageUrl] - From `uploadChatImage`
+   */
+  async sendChatMessage(accessToken, shopId, { toId, type, text, imageUrl }) {
+    if (!['text', 'image'].includes(type)) {
+      throw new Error(`sendChatMessage supports text and image, got "${type}"`);
+    }
+    const content = type === 'text' ? { text } : { image_url: imageUrl };
+    const body = jsonWithInt64({ to_id: String(toId), message_type: type, content }, ['to_id']);
+    return this._request('POST', '/api/v2/sellerchat/send_message', {}, body, accessToken, String(shopId));
+  }
+
+  /**
+   * Upload an image for a chat message and return its URL.
+   *
+   * Unlike the product image upload this one is shop-scoped, so it is signed
+   * with the shop's token. jpg/jpeg/png/gif, at most 10 MB.
+   *
+   * @param {string} accessToken
+   * @param {string|number} shopId
+   * @param {Buffer} buffer
+   * @param {Object} [opts]
+   * @param {string} [opts.filename]
+   * @param {string} [opts.contentType]
+   * @returns {Promise<{ url: string, thumbnail: string|null }>}
+   */
+  async uploadChatImage(accessToken, shopId, buffer, { filename = 'image.jpg', contentType = 'image/jpeg' } = {}) {
+    const path = '/api/v2/sellerchat/upload_image';
+    const form = new FormData();
+    form.append('file', new Blob([buffer], { type: contentType }), filename);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 60_000);
+    let response;
+    try {
+      response = await fetch(this._buildUrl(path, {}, accessToken, String(shopId)), {
+        method: 'POST', body: form, signal: controller.signal,
+      });
+    } catch (err) {
+      throw new Error(`Shopee API: upload gambar chat gagal terhubung – ${err.message}`);
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const raw = await response.text();
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error(`Shopee API: upload gambar chat mengembalikan respons tidak terbaca (HTTP ${response.status})`);
+    }
+    if (data.error) {
+      const err = new Error(`Shopee API Error: ${data.error} – ${data.message || 'no message'} (request_id=${data.request_id || 'n/a'})`);
+      err.shopeeError = data.error;
+      err.shopeeMessage = data.message || null;
+      err.requestId = data.request_id || null;
+      err.path = path;
+      throw err;
+    }
+    const url = data.response?.url;
+    if (!url) throw new Error(`Shopee API: upload gambar chat tidak mengembalikan url (${raw.slice(0, 200)})`);
+    return { url, thumbnail: data.response?.thumbnail || null };
+  }
+
+}
+
+/**
+ * JSON.stringify, but with the named fields written as bare integers.
+ *
+ * Shopee's chat ids are int64 — 38732689394223980 and up — and a JavaScript
+ * number silently rounds anything past 2^53, so a conversation id passed
+ * through Number() points at a different conversation. The ids travel as
+ * strings everywhere in this app and are only unquoted here, in the text.
+ *
+ * @param {Object} obj
+ * @param {string[]} int64Keys - Top-level keys holding digit strings
+ * @returns {string}
+ */
+function jsonWithInt64(obj, int64Keys) {
+  const copy = { ...obj };
+  const marks = {};
+  for (const key of int64Keys) {
+    const v = String(copy[key] ?? '');
+    if (!/^\d+$/.test(v)) throw new Error(`${key} must be a numeric id, got "${v}"`);
+    const mark = `__int64_${key}__`;
+    marks[mark] = v;
+    copy[key] = mark;
+  }
+  let json = JSON.stringify(copy);
+  for (const [mark, digits] of Object.entries(marks)) json = json.replace(`"${mark}"`, digits);
+  return json;
 }
 
 module.exports = new ShopeeService();
+module.exports.jsonWithInt64 = jsonWithInt64;

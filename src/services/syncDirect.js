@@ -135,6 +135,9 @@ function expandShopeeOrderToPackages(order, knownPackages) {
   const common = {
     orderId:         order.order_sn,
     buyerName:       order.recipient_address?.name || order.buyer_username || 'Unknown',
+    // Kept as a string: it is what chat conversations are matched on, and
+    // an id is an identifier, not a number to do arithmetic with.
+    buyerUserId:     order.buyer_user_id ? String(order.buyer_user_id) : null,
     buyerAddress:    order.recipient_address?.full_address || '',
     buyerPhone:      order.recipient_address?.phone || '',
     buyerCity:       order.recipient_address?.city || '',
@@ -728,6 +731,7 @@ async function upsertOrderRows(storeId, orders) {
             storeId,
             packageNumber,
             buyerName:       orderData.buyerName,
+            buyerUserId:     orderData.buyerUserId || null,
             buyerAddress:    orderData.buyerAddress,
             buyerPhone:      orderData.buyerPhone,
             buyerCity:       orderData.buyerCity,
@@ -774,6 +778,7 @@ async function upsertOrderRows(storeId, orders) {
           shippingCourier: orderData.shippingCourier || row.shippingCourier,
           items:           JSON.stringify(Array.isArray(orderData.items) ? orderData.items : []),
           buyerNote:       orderData.buyerNote    ?? row.buyerNote,
+          buyerUserId:     orderData.buyerUserId  ?? row.buyerUserId,
           paymentMethod:   orderData.paymentMethod ?? row.paymentMethod,
           // Same rule as tracking above: Shopee stops reporting a deadline once
           // the parcel ships, and blanking it would erase the only record of

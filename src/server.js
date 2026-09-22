@@ -44,6 +44,7 @@ app.use('/api/orders', require('./routes/orders'));
 app.use('/api/products/drafts', require('./routes/productDrafts'));
 app.use('/api/products', require('./routes/products'));
 app.use('/api/print', require('./routes/print'));
+app.use('/api/chat', require('./routes/chat'));
 app.use('/api/sync', require('./routes/sync'));
 app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/system', require('./routes/system'));

@@ -24,6 +24,7 @@ model User {
   printedOrders   Order[]       @relation("PrintedBy")
   printBatches    PrintBatch[]
   productDrafts   ProductDraft[]
+  chatReplies     ChatReply[]
 
   @@map("users")
 }
@@ -57,6 +58,7 @@ model Store {
   orders   Order[]
   access   StoreAccess[]
   listings ProductListing[]
+  chatReplies ChatReply[]
   draftsFrom ProductDraft[] @relation("DraftSource")
   draftsTo   ProductDraft[] @relation("DraftTarget")
 
@@ -230,6 +232,11 @@ model Order {
   // let duplicates through the unique constraint below.
   packageNumber      String    @default("")
   buyerName          String
+  // Shopee's user id for the buyer. `buyerName` is the recipient on the
+  // address label — masked, and not who is typing in chat — so this is the
+  // only field that ties a chat conversation (its `to_id`) to the buyer's
+  // orders. Null on rows synced before it was requested.
+  buyerUserId        String?
   buyerAddress       String
   buyerPhone         String?
   buyerCity          String?
@@ -284,7 +291,35 @@ model Order {
   @@index([batchId])
   @@index([printedAt])
   @@index([storeId, shipByDate])
+  @@index([storeId, buyerUserId])
   @@map("orders")
+}
+
+// One reply sent to a buyer from OrderPro's chat inbox.
+//
+// The conversations themselves are not copied here — they are read live from
+// Shopee, which already keeps them. What Shopee cannot tell us is which of our
+// operators wrote a given reply, and that is what this records: for a
+// complaint about something said in chat, "who sent it" has to be answerable.
+model ChatReply {
+  id             String   @id @default(cuid())
+  storeId        String
+  // Shopee ids are int64 and exceed JavaScript's safe integer range, so they
+  // are kept as the exact digits Shopee sent.
+  conversationId String
+  messageId      String?
+  toId           String
+  messageType    String // text | image
+  text           String?
+  imageUrl       String?
+  sentById       String?
+  createdAt      DateTime @default(now())
+
+  store  Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  sentBy User? @relation(fields: [sentById], references: [id], onDelete: SetNull)
+
+  @@index([storeId, conversationId])
+  @@map("chat_replies")
 }
 
 model PrintBatch {

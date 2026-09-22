@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import Link from 'next/link'
 import {
@@ -17,7 +17,9 @@ import {
   Menu,
   X,
   Settings,
+  MessageCircle,
 } from 'lucide-react'
+import api from '@/lib/api'
 import { User, logout } from '@/lib/auth'
 import { useTheme } from './ThemeProvider'
 
@@ -28,6 +30,7 @@ interface SidebarProps {
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/orders', label: 'Pesanan', icon: ShoppingBag },
+  { href: '/chat', label: 'Chat', icon: MessageCircle },
   { href: '/products', label: 'Produk', icon: Package },
   { href: '/stock', label: 'Daftar Stok', icon: Boxes },
   { href: '/print', label: 'Cetak Resi', icon: Printer },
@@ -43,6 +46,7 @@ export default function Sidebar({ user }: SidebarProps) {
   const pathname = usePathname()
   const { theme, toggleTheme } = useTheme()
   const [mobileOpen, setMobileOpen] = useState(false)
+  const chatUnread = useChatUnread(Boolean(user))
 
   const isActive = (href: string) => {
     if (href === '/dashboard') return pathname === '/dashboard'
@@ -133,7 +137,15 @@ export default function Sidebar({ user }: SidebarProps) {
                     active ? 'text-primary-600 dark:text-primary-400' : 'text-gray-400 dark:text-slate-400'
                   }`}
                 />
-                {item.label}
+                <span className="flex-1">{item.label}</span>
+                {item.href === '/chat' && chatUnread > 0 && (
+                  <span
+                    className="rounded-full bg-shopee text-white text-[10px] font-semibold px-1.5 min-w-[20px] text-center"
+                    title={`${chatUnread} percakapan belum dibaca`}
+                  >
+                    {chatUnread > 99 ? '99+' : chatUnread}
+                  </span>
+                )}
               </Link>
             )
           })}
@@ -223,4 +235,34 @@ export default function Sidebar({ user }: SidebarProps) {
       </aside>
     </>
   )
+}
+
+/**
+ * Unread chat conversations across the stores this user may see.
+ *
+ * Polled, since Shopee pushes nothing here yet; the server caches per store so
+ * many open tabs do not multiply the calls. Any failure — including chat not
+ * being enabled for the app — just hides the badge.
+ */
+function useChatUnread(enabled: boolean): number {
+  const [count, setCount] = useState(0)
+  useEffect(() => {
+    if (!enabled) return
+    let cancelled = false
+    const load = () => {
+      api.get('/chat/unread')
+        .then((r) => { if (!cancelled) setCount(r.data?.data?.total || 0) })
+        .catch(() => { if (!cancelled) setCount(0) })
+    }
+    load()
+    const t = setInterval(load, 60_000)
+    // The chat page announces a conversation it just read
+    window.addEventListener('chat-read', load)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+      window.removeEventListener('chat-read', load)
+    }
+  }, [enabled])
+  return count
 }
