@@ -247,6 +247,10 @@ class ShopeeService {
         apiErr.shopeeMessage = data.message || null;
         apiErr.requestId = data.request_id || null;
         apiErr.path = path;
+        // Batch endpoints (unlist_item, …) answer "all failed" at the top level
+        // and put the reason per item in `response.failure_list` — without this
+        // the only thing left to show is "all failed".
+        apiErr.shopeeResponse = data.response ?? null;
         throw apiErr;
       }
 

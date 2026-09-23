@@ -531,9 +531,27 @@ async function runPublish(draftId) {
     // 4. On sale
     if (!steps.listed && !steps.createdLive) {
       await step('Tayangkan produk (unlist_item)', async () => {
-        const res = await shopeeService.unlistItem(accessToken, store.shopId, [{ item_id: Number(itemId), unlist: false }]);
+        const reasonOf = (f) => f.failed_reason || f.fail_message || JSON.stringify(f);
+        let res;
+        try {
+          res = await shopeeService.unlistItem(accessToken, store.shopId, [{ item_id: Number(itemId), unlist: false }]);
+        } catch (err) {
+          // "all failed" says nothing on its own. Shopee's per-item reason, and
+          // the item's own status, are what tell an operator what to fix.
+          const failure = err.shopeeResponse?.failure_list?.[0];
+          const itemStatus = await shopeeService.getItemBaseInfo(accessToken, store.shopId, [itemId])
+            .then(r => r.response?.item_list?.[0]?.item_status)
+            .catch(() => null);
+          const extra = [
+            failure && reasonOf(failure),
+            itemStatus && `status produk di Shopee: ${itemStatus}`,
+          ].filter(Boolean).join('; ');
+          if (extra) err.shopeeMessage = `${err.shopeeMessage || err.message} — ${extra}`;
+          err.itemStatus = itemStatus;
+          throw err;
+        }
         const failure = res.response?.failure_list?.[0];
-        if (failure) throw new Error(failure.failed_reason || failure.fail_message || JSON.stringify(failure));
+        if (failure) throw new Error(reasonOf(failure));
       });
     }
     steps.listed = true;
@@ -596,6 +614,8 @@ async function runPublish(draftId) {
           message: cause?.shopeeMessage ?? cause?.message ?? String(cause),
           requestId: cause?.requestId ?? null,
           path: cause?.path ?? null,
+          itemStatus: cause?.itemStatus ?? null,
+          response: cause?.shopeeResponse ?? null,
           at: new Date().toISOString(),
         },
       },
