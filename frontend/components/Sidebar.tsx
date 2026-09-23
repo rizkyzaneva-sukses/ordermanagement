@@ -18,6 +18,7 @@ import {
   X,
   Settings,
   MessageCircle,
+  History,
 } from 'lucide-react'
 import api from '@/lib/api'
 import { User, logout } from '@/lib/auth'
@@ -39,6 +40,7 @@ const navItems = [
 const adminItems = [
   { href: '/admin/users', label: 'Kelola User', icon: Users },
   { href: '/admin/stores', label: 'Kelola Toko', icon: Store },
+  { href: '/admin/activity', label: 'Log Aktivitas', icon: History },
   { href: '/admin/settings', label: 'Pengaturan', icon: Settings },
 ]
 

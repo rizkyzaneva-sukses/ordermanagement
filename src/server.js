@@ -35,6 +35,10 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Ahead of every router: records the write actions listed in the activity
+// route table once each response has finished.
+app.use('/api', require('./services/activity').recordActivity());
+
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/oauth', require('./routes/oauth'));
 app.use('/api/users', require('./routes/users'));

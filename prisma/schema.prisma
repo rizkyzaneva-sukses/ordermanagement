@@ -25,6 +25,7 @@ model User {
   printBatches    PrintBatch[]
   productDrafts   ProductDraft[]
   chatReplies     ChatReply[]
+  activityLogs    ActivityLog[]
 
   @@map("users")
 }
@@ -336,4 +337,32 @@ model PrintBatch {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("print_batches")
+}
+
+// One action someone took in OrderPro, for the admin's Log Aktivitas.
+//
+// Written by a middleware from a fixed route table (src/services/activity.js),
+// so `label` is that table's wording. `userEmail` is a snapshot: it survives
+// the user being renamed, and on a failed login it is the only identity there is.
+model ActivityLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  userEmail  String?
+  // "POST /api/orders/ship-mass" — the matched route, for filtering.
+  action     String
+  label      String
+  // The :id in the route, when there is one.
+  targetId   String?
+  ok         Boolean
+  statusCode Int
+  // Trimmed request body, the response's counts, and the error when it failed.
+  detail     Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@map("activity_logs")
 }

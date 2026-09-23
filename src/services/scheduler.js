@@ -17,6 +17,7 @@ const prisma = require('../prisma/client.js');
 const { syncQueue, connection, isRedisReady } = require('./queue.js');
 const fulfillmentService = require('./fulfillment.js');
 const tokenService = require('./tokens.js');
+const activity = require('./activity.js');
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -180,6 +181,12 @@ function startAwbCleanup() {
       await fulfillmentService.cleanupOldAwbFiles(AWB_RETENTION_DAYS);
     } catch (err) {
       console.error('[scheduler] AWB cleanup failed:', err.message);
+    }
+    // Same daily beat, separate failure: one must not stop the other.
+    try {
+      await activity.pruneOld();
+    } catch (err) {
+      console.error('[scheduler] Activity log prune failed:', err.message);
     }
   };
 

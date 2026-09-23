@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const prisma = require('../prisma/client');
 const { authenticate } = require('../middleware/auth');
+const { recordLogin } = require('../services/activity');
 
 const router = express.Router();
 
@@ -37,16 +38,19 @@ router.post('/login', async (req, res) => {
     const user = await prisma.user.findUnique({ where: { email } });
 
     if (!user || !user.isActive) {
+      recordLogin(req, { email, ok: false, reason: user ? 'User nonaktif' : 'Email tidak terdaftar' });
       return res.status(401).json({ success: false, error: 'Invalid credentials' });
     }
 
     const valid = await bcrypt.compare(password, user.password);
 
     if (!valid) {
+      recordLogin(req, { user, ok: false, reason: 'Password salah' });
       return res.status(401).json({ success: false, error: 'Invalid credentials' });
     }
 
     const tokens = generateTokens(user);
+    recordLogin(req, { user, ok: true });
 
     return res.json({ success: true, data: tokens });
   } catch (err) {

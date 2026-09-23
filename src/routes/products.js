@@ -595,27 +595,75 @@ router.patch('/masters/:id', async (req, res) => {
 });
 
 /**
- * DELETE /masters/:id
+ * Delete Master SKUs, and any parent left with no variation under it.
  *
- * Admin only, and non-destructive to the catalogue: `onDelete: SetNull` returns
- * every listing bound to it to unmapped rather than deleting it with the master.
+ * Non-destructive to the catalogue: `onDelete: SetNull` returns every listing
+ * bound to them to unmapped, so the item can go through "Jadikan Master"
+ * again from scratch. What is lost is the typed stock number. Nothing on the
+ * marketplace changes.
+ *
+ * @returns {Promise<{deleted:number, unmapped:number, parentsRemoved:number}>}
+ */
+async function deleteMasters(ids) {
+  return prisma.$transaction(async (tx) => {
+    const masters = await tx.product.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, masterSku: true, masterProductId: true, _count: { select: { listings: true } } },
+    });
+    if (masters.length === 0) return { deleted: 0, unmapped: 0, parentsRemoved: 0 };
+
+    await tx.product.deleteMany({ where: { id: { in: masters.map(m => m.id) } } });
+
+    // A parent is only a name over its variations; one with none left would sit
+    // on the Master Produk list as an empty shell.
+    const parentIds = [...new Set(masters.map(m => m.masterProductId).filter(Boolean))];
+    const { count: parentsRemoved } = parentIds.length
+      ? await tx.masterProduct.deleteMany({ where: { id: { in: parentIds }, variants: { none: {} } } })
+      : { count: 0 };
+
+    const unmapped = masters.reduce((sum, m) => sum + m._count.listings, 0);
+    console.log(
+      `[masters] Deleted ${masters.length} master(s) (${masters.map(m => m.masterSku).join(', ')}) — ` +
+      `${unmapped} listing(s) returned to unmapped, ${parentsRemoved} empty parent(s) removed`
+    );
+    return { deleted: masters.length, unmapped, parentsRemoved };
+  });
+}
+
+/**
+ * DELETE /masters/:id
+ * Admin only. See deleteMasters.
  */
 router.delete('/masters/:id', requireRole('ADMIN'), async (req, res) => {
   try {
-    const master = await prisma.product.findUnique({
-      where: { id: req.params.id },
-      include: { _count: { select: { listings: true } } },
-    });
-    if (!master) {
+    const result = await deleteMasters([req.params.id]);
+    if (result.deleted === 0) {
       return res.status(404).json({ success: false, error: 'Master produk tidak ditemukan' });
     }
-
-    await prisma.product.delete({ where: { id: req.params.id } });
-    console.log(`[masters] Deleted "${master.masterSku}" — ${master._count.listings} listing(s) returned to unmapped`);
-
-    return res.json({ success: true, data: { unmapped: master._count.listings } });
+    return res.json({ success: true, data: result });
   } catch (err) {
     console.error('DELETE /products/masters/:id error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal menghapus master produk' });
+  }
+});
+
+/**
+ * POST /masters/delete
+ * Admin only. Body: { productIds[] } — the "Hapus Master" action on Daftar Stok.
+ */
+router.post('/masters/delete', requireRole('ADMIN'), async (req, res) => {
+  try {
+    const ids = req.body?.productIds;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, error: 'Pilih minimal satu master' });
+    }
+    if (ids.length > MAX_LIMIT) {
+      return res.status(400).json({ success: false, error: `Maksimal ${MAX_LIMIT} master sekali hapus` });
+    }
+    const result = await deleteMasters(ids.map(String));
+    return res.json({ success: true, data: result });
+  } catch (err) {
+    console.error('POST /products/masters/delete error:', err);
     return res.status(500).json({ success: false, error: 'Gagal menghapus master produk' });
   }
 });

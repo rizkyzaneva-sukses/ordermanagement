@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
 import api from '@/lib/api'
+import { getMe } from '@/lib/auth'
 import Pagination from '@/components/Pagination'
 import {
   Boxes,
@@ -12,6 +13,7 @@ import {
   X,
   Pencil,
   AlertTriangle,
+  Trash2,
 } from 'lucide-react'
 
 interface Master {
@@ -55,6 +57,15 @@ export default function StockPage() {
   const [bulkOpen, setBulkOpen] = useState(false)
   const [bulkMode, setBulkMode] = useState<BulkMode>('set')
   const [bulkValue, setBulkValue] = useState('')
+
+  // Deleting a master is admin-only on the server; the button follows suit so
+  // staff are not offered an action that can only answer "forbidden".
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+
+  useEffect(() => {
+    getMe().then((u) => setIsAdmin(u?.role === 'ADMIN')).catch(() => setIsAdmin(false))
+  }, [])
 
   const fetchMasters = useCallback(async () => {
     setLoading(true)
@@ -172,6 +183,28 @@ export default function StockPage() {
     }
   }
 
+  const handleDelete = async () => {
+    setBusy(true)
+    try {
+      const res = await api.post<any>('/products/masters/delete', { productIds: selected })
+      setMessage({
+        type: 'success',
+        text:
+          `${res.data?.deleted ?? 0} master dihapus — ${res.data?.unmapped ?? 0} listing kembali ` +
+          'belum dipetakan dan bisa dijadikan master lagi dari halaman Produk.',
+      })
+      setDeleteOpen(false)
+      setSelected([])
+      await fetchMasters()
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err?.response?.data?.error || 'Gagal menghapus master' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const selectedMasters = masters.filter((m) => selected.includes(m.id))
+
   return (
     <div className="space-y-4">
       <div>
@@ -222,6 +255,16 @@ export default function StockPage() {
             <Boxes className="w-4 h-4" />
             <span>Edit Stok Massal</span>
           </button>
+          {isAdmin && (
+            <button
+              onClick={() => setDeleteOpen(true)}
+              disabled={busy}
+              className="btn-secondary flex items-center gap-2 text-red-600 dark:text-red-400 border-red-200 dark:border-red-900"
+            >
+              <Trash2 className="w-4 h-4" />
+              <span>Hapus Master</span>
+            </button>
+          )}
           <button onClick={() => setSelected([])} className="text-sm text-blue-800 dark:text-blue-300 underline ml-auto">
             Batal pilih
           </button>
@@ -376,6 +419,55 @@ export default function StockPage() {
           </div>
         )}
       </div>
+
+      {deleteOpen && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={() => !busy && setDeleteOpen(false)}>
+          <div className="card w-full max-w-md p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">
+                  Hapus {selected.length} master?
+                </h2>
+                <p className="text-sm text-gray-500 dark:text-slate-400">
+                  Untuk mengatur ulang: produknya kembali seperti belum pernah dijadikan master.
+                </p>
+              </div>
+              <button onClick={() => setDeleteOpen(false)} disabled={busy} className="text-gray-400 hover:text-gray-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <ul className="text-sm space-y-1.5 text-gray-700 dark:text-slate-200">
+              <li>• Listing yang terikat kembali ke &ldquo;belum dipetakan&rdquo; dan bisa dijadikan master lagi dari halaman Produk.</li>
+              <li className="text-red-700 dark:text-red-300">• Angka stok yang sudah diketik untuk master ini hilang.</li>
+              <li>• Produk di Shopee tidak berubah sama sekali.</li>
+            </ul>
+
+            {selectedMasters.length > 0 && (
+              <div className="max-h-40 overflow-y-auto rounded-lg border border-gray-200 dark:border-slate-700 divide-y divide-gray-100 dark:divide-slate-700/60">
+                {selectedMasters.map((m) => (
+                  <div key={m.id} className="px-3 py-1.5 flex justify-between gap-3 text-xs">
+                    <span className="font-mono text-gray-900 dark:text-slate-100 truncate">{m.masterSku}</span>
+                    <span className="text-gray-500 dark:text-slate-400 shrink-0">stok {m.stock}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-1">
+              <button onClick={() => setDeleteOpen(false)} disabled={busy} className="btn-secondary">Batal</button>
+              <button
+                onClick={handleDelete}
+                disabled={busy}
+                className="btn-primary bg-red-600 hover:bg-red-700 flex items-center gap-2"
+              >
+                {busy && <Loader2 className="w-4 h-4 animate-spin" />}
+                <span>Ya, Hapus</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {bulkOpen && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={() => setBulkOpen(false)}>
