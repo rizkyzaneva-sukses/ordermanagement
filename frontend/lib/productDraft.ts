@@ -163,6 +163,8 @@ export interface FormOptions {
   attributes: AttributeDef[]
   channels: ChannelDef[] | null
   brandMandatory: boolean
+  /** Shopee refused this shop an image description before; plain text only. */
+  plainDescriptionOnly?: boolean
   warnings: string[]
   errors: ValidationError[]
 }
@@ -186,6 +188,21 @@ export const rupiah = (n: number | null | undefined) =>
 
 /** Characters as Shopee counts them: an emoji is one. */
 export const charCount = (s: string | null | undefined) => [...(s ?? '')].length
+
+/**
+ * The description as plain text: text blocks in order, images dropped.
+ * Mirrors toPlainDescription in src/services/productCopy.js.
+ */
+export function toPlainDescription(p: DraftPayload) {
+  if (p.descriptionType !== 'extended') return
+  p.description = p.descriptionBlocks
+    .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+    .map((b) => b.text.trim())
+    .filter(Boolean)
+    .join('\n\n')
+  p.descriptionType = 'normal'
+  p.descriptionBlocks = []
+}
 
 export function imageSrc(img: ImageRef | null | undefined): string | null {
   return img?.url || null

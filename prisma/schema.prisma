@@ -53,6 +53,10 @@ model Store {
   // signal there is, and that answers "did I reach Shopee", not "is my data
   // right". Those turned out to be very different questions.
   lastSyncCounts    String?
+  // Set the first time add_item refuses this shop an extended (image)
+  // description: Shopee whitelists that per shop. New copies to the shop then
+  // start with plain text instead of failing the same way again.
+  plainDescriptionOnly Boolean @default(false)
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 

@@ -152,7 +152,7 @@ async function createDrafts(user, { listingIds, targetStoreIds }) {
 
   const targets = await prisma.store.findMany({
     where: { id: { in: targetIds }, platform: 'SHOPEE', isActive: true },
-    select: { id: true, name: true, needsReconnect: true },
+    select: { id: true, name: true, needsReconnect: true, plainDescriptionOnly: true },
   });
   if (targets.length !== targetIds.length) throw httpError(400, 'Ada toko tujuan yang tidak aktif atau bukan Shopee');
   const broken = targets.filter(t => t.needsReconnect);
@@ -181,7 +181,7 @@ async function createDrafts(user, { listingIds, targetStoreIds }) {
         sourceStoreId,
         sourceItemId: itemId,
         targetStoreId: target.id,
-        payload,
+        payload: target.plainDescriptionOnly ? copy.toPlainDescription(payload) : payload,
         sourceSnapshot: snapshot,
         createdById: user.id,
       },
@@ -292,6 +292,7 @@ async function getFormContext(draft) {
     attributes,
     channels,
     brandMandatory: Boolean(brandsHead?.is_mandatory),
+    plainDescriptionOnly: Boolean(store.plainDescriptionOnly),
     warnings,
   };
 }
@@ -334,6 +335,7 @@ async function validateDraft(draft, context) {
     attributeNames: new Map(ctx.attributes.map(a => [a.attributeId, a.name])),
     brandMandatory: ctx.brandMandatory,
     channels: channelMap,
+    plainDescriptionOnly: ctx.plainDescriptionOnly,
   });
 }
 
@@ -445,7 +447,7 @@ async function runPublish(draftId) {
   }
 
   const store = draft.targetStore;
-  const payload = draft.payload;
+  let payload = draft.payload;
   const uploaded = { ...(draft.uploadedImages || {}) };
   const steps = { ...(draft.publishSteps || {}) };
   const saveProgress = (data) => prisma.productDraft.update({
@@ -479,21 +481,37 @@ async function runPublish(draftId) {
     if (pending.length) console.log(`[publish] Draft ${draftId}: ${done} gambar diunggah`);
 
     // 2. The item itself, unlisted
-    const itemBody = await step('Siapkan data produk', () => copy.buildAddItemBody(payload, uploaded));
+    let itemBody = await step('Siapkan data produk', () => copy.buildAddItemBody(payload, uploaded));
     let itemId = draft.publishedItemId;
     if (!itemId) {
-      const res = await step('Buat produk (add_item)', async () => {
+      const addItem = async (body) => {
         try {
-          return await shopeeService.addItem(accessToken, store.shopId, itemBody);
+          return await shopeeService.addItem(accessToken, store.shopId, body);
         } catch (err) {
           // If this shop's API will not take a status on create, the item is
           // made live straight away instead. Noted, so it is not a surprise.
           if (/item_status/i.test(err.shopeeMessage || err.message)) {
             steps.createdLive = true;
-            const { item_status: _ignored, ...rest } = itemBody;
+            const { item_status: _ignored, ...rest } = body;
             return shopeeService.addItem(accessToken, store.shopId, rest);
           }
           throw err;
+        }
+      };
+      const res = await step('Buat produk (add_item)', async () => {
+        try {
+          return await addItem(itemBody);
+        } catch (err) {
+          // Extended descriptions are whitelisted per shop. Fall back to the
+          // text alone, keep that in the draft so the form shows what was sent,
+          // and remember the shop so the next copy starts as plain text.
+          if (payload.descriptionType !== 'extended' || !copy.isDescriptionImageRefused(err)) throw err;
+          payload = copy.toPlainDescription(payload);
+          itemBody = copy.buildAddItemBody(payload, uploaded);
+          await saveProgress({ payload });
+          await prisma.store.update({ where: { id: store.id }, data: { plainDescriptionOnly: true } });
+          console.log(`[publish] Draft ${draftId}: ${store.name} menolak deskripsi bergambar — dicoba ulang dengan teks biasa`);
+          return addItem(itemBody);
         }
       });
       itemId = String(res.response?.item_id ?? '');

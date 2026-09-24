@@ -7,7 +7,7 @@ import api from '@/lib/api'
 import {
   AttributeDef, AttributeValue, ChannelDef, DraftModel, DraftPayload, DraftStatus, FormOptions, ImageRef,
   STATUS_CLASS, STATUS_LABEL, Tier, ValidationError,
-  apiError, charCount, imageSrc, modelLabel, newOptionKey, regenerateModels, sectionOf,
+  apiError, charCount, imageSrc, modelLabel, newOptionKey, regenerateModels, sectionOf, toPlainDescription,
 } from '@/lib/productDraft'
 import {
   AlertTriangle, ArrowDown, ArrowLeft, ArrowUp, ChevronDown, ChevronRight, ImagePlus, Loader2, Plus, Star, Trash2, X,
@@ -252,7 +252,7 @@ function EditDraft() {
       )}
 
       <fieldset disabled={!meta.editable || busy} className="space-y-4 min-w-0">
-        <BasicSection meta={meta} payload={payload} limits={L} mutate={mutate} uploadImage={uploadImage} />
+        <BasicSection meta={meta} payload={payload} limits={L} plainOnly={Boolean(options.plainDescriptionOnly)} mutate={mutate} uploadImage={uploadImage} />
         <AttributeSection draftId={id} payload={payload} options={options} mutate={mutate} />
         <MediaSection payload={payload} limits={L} mutate={mutate} uploadImage={uploadImage} />
         <SalesSection payload={payload} limits={L} mutate={mutate} />
@@ -361,8 +361,8 @@ function Thumb({ img, className = 'w-20 h-20' }: { img: ImageRef | null | undefi
 
 // ── Informasi Dasar ───────────────────────────────────────────────────────────
 
-function BasicSection({ meta, payload, limits: L, mutate, uploadImage }: {
-  meta: DraftMeta; payload: DraftPayload; limits: FormOptions['limits']; mutate: Mutate; uploadImage: Upload
+function BasicSection({ meta, payload, limits: L, plainOnly, mutate, uploadImage }: {
+  meta: DraftMeta; payload: DraftPayload; limits: FormOptions['limits']; plainOnly: boolean; mutate: Mutate; uploadImage: Upload
 }) {
   const sameName = payload.name.trim() === meta.source.name.trim()
   const blocks = payload.descriptionBlocks || []
@@ -411,10 +411,27 @@ function BasicSection({ meta, payload, limits: L, mutate, uploadImage }: {
           </>
         ) : (
           <div className="space-y-2">
-            <p className="text-xs text-gray-500 dark:text-slate-400">
-              Deskripsi bergambar: teks dan gambar tampil berurutan seperti di Shopee.
-              Teks {textLen}/{L.extendedTextMax} karakter · gambar {imageCount}/{L.extendedImageMax}.
-            </p>
+            {plainOnly && (
+              <p className="text-xs text-red-600 dark:text-red-400">
+                {meta.targetStore.name} belum diizinkan Shopee memakai deskripsi bergambar. Ubah jadi teks biasa sebelum Publish.
+              </p>
+            )}
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <p className="text-xs text-gray-500 dark:text-slate-400">
+                Deskripsi bergambar: teks dan gambar tampil berurutan seperti di Shopee.
+                Teks {textLen}/{L.extendedTextMax} karakter · gambar {imageCount}/{L.extendedImageMax}.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  if (imageCount > 0 && !window.confirm(`${imageCount} gambar deskripsi akan dibuang, teksnya digabung. Lanjut?`)) return
+                  mutate(toPlainDescription)
+                }}
+                className={`${plainOnly ? 'btn-primary' : 'btn-secondary'} text-xs px-2 py-1 shrink-0`}
+              >
+                Ubah jadi teks biasa
+              </button>
+            </div>
             {blocks.map((b, i) => (
               <div key={i} className="flex gap-2 items-start rounded border border-gray-200 dark:border-slate-700 p-2">
                 <div className="flex-1 min-w-0">

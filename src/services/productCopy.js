@@ -97,6 +97,30 @@ function readDescription(item) {
 }
 
 /**
+ * The same payload with a plain-text description: the text blocks in order,
+ * images dropped. For shops Shopee has not whitelisted for extended
+ * descriptions (Zaneva Curve Active, 24 Sep 2026).
+ */
+function toPlainDescription(payload) {
+  if (payload?.descriptionType !== 'extended') return payload;
+  const text = (payload.descriptionBlocks || [])
+    .filter(b => b.type === 'text')
+    .map(b => String(b.text ?? '').trim())
+    .filter(Boolean)
+    .join('\n\n');
+  return { ...payload, descriptionType: 'normal', description: text, descriptionBlocks: [] };
+}
+
+/**
+ * add_item's answer when the shop may not use extended descriptions:
+ * "You are not in the whitelist to add images in description, can only upload plain text".
+ */
+function isDescriptionImageRefused(err) {
+  const msg = String(err?.shopeeMessage || err?.message || '');
+  return /whitelist[^.]*description|images? in description|only upload plain text/i.test(msg);
+}
+
+/**
  * Stable key for a variation option. Models point at options by key, so an
  * option can be renamed or reordered on the form without losing its price,
  * stock, SKU — or its link back to the source variation's master.
@@ -281,6 +305,7 @@ function charLength(s) {
  * @param {number[]} [ctx.mandatoryAttributeIds]
  * @param {boolean} [ctx.brandMandatory]
  * @param {Map<number, {enabled: boolean, maxWeightKg: number}>} [ctx.channels] - The destination shop's top-level channels
+ * @param {boolean} [ctx.plainDescriptionOnly] - Shopee refused this shop an extended description before
  * @returns {Array<{field: string, message: string}>}
  */
 function validatePayload(payload, ctx) {
@@ -307,8 +332,10 @@ function validatePayload(payload, ctx) {
     if (textLen < L.extendedTextMin || textLen > L.extendedTextMax) {
       add('description', `Teks deskripsi harus ${L.extendedTextMin}–${L.extendedTextMax} karakter (sekarang ${textLen})`);
     }
-    if (imageCount < L.extendedImageMin || imageCount > L.extendedImageMax) {
-      add('description', `Deskripsi bergambar butuh ${L.extendedImageMin}–${L.extendedImageMax} gambar (sekarang ${imageCount})`);
+    if (ctx.plainDescriptionOnly) {
+      add('description', 'Toko ini belum diizinkan Shopee memakai deskripsi bergambar — tekan "Ubah jadi teks biasa" di Deskripsi');
+    } else if (imageCount < L.extendedImageMin || imageCount > L.extendedImageMax) {
+      add('description', `Deskripsi bergambar butuh ${L.extendedImageMin}–${L.extendedImageMax} gambar (sekarang ${imageCount}) — atau ubah jadi teks biasa`);
     }
   } else {
     const len = charLength(p.description);
@@ -656,6 +683,7 @@ function explainShopeeError(err) {
   const hints = [
     [/error_auth|invalid_access_token|invalid_acceess_token/i, 'Token toko tidak berlaku — hubungkan ulang toko di Kelola Toko'],
     [/duplicate|same name|similar/i, 'Shopee menganggap produk ini duplikat — ubah nama atau foto utama'],
+    [/whitelist[^.]*description|images? in description|only upload plain text/i, 'Toko ini belum diizinkan Shopee memakai deskripsi bergambar — ubah deskripsi jadi teks biasa'],
     [/image/i, 'Ada foto yang ditolak Shopee'],
     [/brand/i, 'Merek ditolak Shopee untuk kategori ini'],
     [/attribute/i, 'Ada atribut yang ditolak Shopee'],
@@ -672,6 +700,8 @@ function explainShopeeError(err) {
 
 module.exports = {
   snapshotToPayload,
+  toPlainDescription,
+  isDescriptionImageRefused,
   validatePayload,
   normaliseLimits,
   imagesToUpload,

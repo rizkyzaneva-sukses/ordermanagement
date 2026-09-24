@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const {
   snapshotToPayload, validatePayload, normaliseLimits, imagesToUpload,
   buildAddItemBody, buildTierVariationBody, planListingBinding, explainShopeeError,
+  toPlainDescription, isDescriptionImageRefused,
 } = require('../src/services/productCopy.js');
 
 // Shaped after the item the probe read on 17 Sep 2026 (Zaneva Official Shop):
@@ -231,4 +232,36 @@ test('Shopee errors are explained, and unknown ones are quoted rather than hidde
 
   const unknown = explainShopeeError({ shopeeError: 'product.error_busi', shopeeMessage: 'something new' });
   assert.equal(unknown, 'product.error_busi: something new');
+});
+
+// Zaneva Curve Active, 24 Sep 2026: add_item on a shop without the whitelist.
+const descriptionRefused = {
+  shopeeError: 'product.error_param',
+  shopeeMessage: 'Parameter is not match the constraints, . : You are not in the whitelist to add images in description, can only upload plain text',
+};
+
+test('a shop refused image descriptions is recognised and told to use plain text', () => {
+  assert.equal(isDescriptionImageRefused(descriptionRefused), true);
+  assert.equal(isDescriptionImageRefused({ shopeeMessage: 'invalid image id' }), false);
+  assert.match(explainShopeeError(descriptionRefused), /belum diizinkan Shopee memakai deskripsi bergambar/);
+});
+
+test('plain description keeps the text blocks in order and drops the images', () => {
+  const p = renamed(snapshotToPayload({ item, models }));
+  const plain = toPlainDescription(p);
+  assert.equal(plain.descriptionType, 'normal');
+  assert.deepEqual(plain.descriptionBlocks, []);
+  const texts = p.descriptionBlocks.filter(b => b.type === 'text').map(b => b.text.trim());
+  assert.equal(plain.description, texts.join('\n\n'));
+
+  const body = buildAddItemBody(plain, uploadedFor(plain));
+  assert.equal(body.description_type, 'normal');
+  assert.equal(body.description_info, undefined);
+  assert.equal(imagesToUpload(plain).some(i => i.scene === 'desc'), false);
+});
+
+test('an image description on a shop known to refuse it blocks Publish', () => {
+  const p = renamed(snapshotToPayload({ item, models }));
+  const errors = validatePayload(p, { limits, sourceName: item.item_name, plainDescriptionOnly: true });
+  assert.ok(errors.some(e => e.field === 'description' && /teks biasa/.test(e.message)));
 });

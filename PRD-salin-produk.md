@@ -63,6 +63,7 @@ Urutan bagian dan isinya mengikuti form Komplace. Semua field sudah terisi dari 
 - Deskripsi, dengan penghitung `2679/5000` (minimal 50 karakter). Shopee punya dua jenis deskripsi, dan keduanya didukung:
   - **Biasa:** satu kotak teks
   - **Deskripsi bergambar** (*extended*, dipakai produk contoh di Zaneva Official Shop): isinya urutan blok teks dan blok gambar. Form menampilkan blok-blok itu sesuai urutan. Teks bisa diedit, gambar bisa dihapus atau diganti, dan blok bisa ditambah. Batas: teks 50–5000 karakter, gambar 1–12 dengan lebar minimal 700px. Gambar deskripsi ikut diunggah ulang ke toko tujuan saat Publish
+  - **Tidak semua toko boleh.** Shopee mengizinkan deskripsi bergambar per toko (whitelist). Zaneva Curve Active ditolak pada 24 Sep 2026 (`not in the whitelist to add images in description`). Kalau `add_item` menolak karena ini, Publish otomatis mengulang dengan teks saja (blok teks digabung, gambar dibuang), draf ikut diubah, dan toko ditandai `plainDescriptionOnly` sehingga salinan berikutnya ke toko itu langsung berupa teks biasa. Form juga punya tombol **Ubah jadi teks biasa**
 - Kategori: versi pertama menampilkan ID kategori Shopee, bukan jalurnya ("Olahraga & Outdoor > …"), karena membaca jalur butuh pohon kategori lengkap. **Tidak bisa diubah di versi pertama** (§3.7)
 
 **Atribut Produk**
