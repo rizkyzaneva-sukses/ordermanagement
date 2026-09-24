@@ -21,6 +21,7 @@ import {
   RotateCcw,
   Check,
   ChevronDown,
+  Trash2,
 } from 'lucide-react'
 
 interface OrderItem {
@@ -347,6 +348,60 @@ function PrintBadge({ order }: { order: Order }) {
   )
 }
 
+/**
+ * The orders inside one courier card of a bulk dialog, each with a bin that
+ * takes it out of this run — Komplace's per-row delete. Nothing happens to the
+ * order itself; it just stays where it was for another time.
+ */
+function MassOrderList({ ids, orderById, onRemove, disabled }: {
+  ids: string[]
+  orderById: Map<string, Order>
+  onRemove: (ids: string[]) => void
+  disabled: boolean
+}) {
+  return (
+    <ul className="max-h-48 overflow-y-auto divide-y divide-gray-100 dark:divide-slate-700/60 rounded-md border border-gray-100 dark:border-slate-700/60">
+      {ids.map((id) => {
+        const o = orderById.get(id)
+        const item = o?.items[0]
+        return (
+          <li key={id} className="flex items-center gap-2 px-2.5 py-1.5 text-xs">
+            <span className="font-mono text-gray-900 dark:text-slate-100 shrink-0">{o?.orderId ?? id}</span>
+            <span className="min-w-0 flex-1 truncate text-gray-500 dark:text-slate-400">
+              {item ? `${item.name}${item.variant ? ` · ${item.variant}` : ''}` : ''}
+              {o && o.items.length > 1 ? ` +${o.items.length - 1}` : ''}
+            </span>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => onRemove([id])}
+              className="p-1 text-red-500 hover:text-red-700 disabled:opacity-40 shrink-0"
+              aria-label={`Keluarkan ${o?.orderId ?? id} dari proses ini`}
+              title="Keluarkan dari proses ini"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+/** "3 pesanan dikeluarkan · Kembalikan", under a bulk dialog's courier cards. */
+function ExcludedNote({ count, onRestore, disabled }: { count: number; onRestore: () => void; disabled: boolean }) {
+  if (count === 0) return null
+  return (
+    <p className="text-xs text-gray-500 dark:text-slate-400 flex items-center gap-2">
+      <Trash2 className="w-3.5 h-3.5 shrink-0" />
+      <span>{count} pesanan dikeluarkan dari proses ini dan tidak akan diproses.</span>
+      <button type="button" disabled={disabled} onClick={onRestore} className="text-primary-600 dark:text-primary-400 underline">
+        Kembalikan
+      </button>
+    </p>
+  )
+}
+
 function absoluteTime(iso: string): string {
   return new Date(iso).toLocaleString('id-ID', {
     day: '2-digit',
@@ -424,6 +479,8 @@ export default function OrdersPage() {
   const [massRetryOpen, setMassRetryOpen] = useState(false)
   const [massRetryOptions, setMassRetryOptions] = useState<{ groups: MassRetryGroup[] } | null>(null)
   const [retryChoices, setRetryChoices] = useState<Record<string, MassRetryChoice>>({})
+  /** Order row ids binned inside the open bulk dialog — left out of that run only. */
+  const [massExcluded, setMassExcluded] = useState<Set<string>>(new Set())
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
   const [awaitingTracking, setAwaitingTracking] = useState(0)
   const [couriers, setCouriers] = useState<string[]>([])
@@ -918,6 +975,7 @@ export default function OrdersPage() {
     setMassShipOpen(true)
     setMassShipOptions(null)
     setMassChoices({})
+    setMassExcluded(new Set())
     setBulkMessage(null)
     setBulkBusy(true)
     try {
@@ -937,8 +995,15 @@ export default function OrdersPage() {
     }
   }
 
-  /** Groups that can actually be sent — one Shopee refused is skipped, not blocking. */
-  const shippableGroups = (massShipOptions?.groups || []).filter((g) => g.availableModes.length > 0)
+  const orderById = new Map(orders.map((o) => [o.id, o]))
+  /** A group's orders minus the ones binned in the dialog. */
+  const keptIds = (ids: string[]) => ids.filter((id) => !massExcluded.has(id))
+  const excludeFromMass = (ids: string[]) => setMassExcluded((prev) => new Set([...prev, ...ids]))
+
+  /** Groups that can actually be sent — one Shopee refused is skipped, not blocking,
+      and one whose every order was binned is simply gone. */
+  const shippableGroups = (massShipOptions?.groups || [])
+    .filter((g) => g.availableModes.length > 0 && keptIds(g.orderRowIds).length > 0)
   const blockedGroups = (massShipOptions?.groups || []).filter((g) => g.availableModes.length === 0)
 
   // Only a pickup needs an address and a slot, and only for its own courier.
@@ -953,7 +1018,7 @@ export default function OrdersPage() {
     setMassChoices((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }))
 
   /** Orders actually covered by the batches, which excludes any blocked courier. */
-  const groupedOrderCount = shippableGroups.reduce((n, g) => n + g.orderRowIds.length, 0)
+  const groupedOrderCount = shippableGroups.reduce((n, g) => n + keptIds(g.orderRowIds).length, 0)
 
   const handleMassShip = async () => {
     if (shippableGroups.length === 0) return
@@ -971,7 +1036,7 @@ export default function OrdersPage() {
         groups: shippableGroups.map((g) => {
           const choice = massChoices[g.key]
           return {
-            ids: g.orderRowIds,
+            ids: keptIds(g.orderRowIds),
             mode: choice.mode,
             // Drop-off takes an empty object unless the channel asks for more (KB §5.1)
             modeData: choice.mode === 'pickup'
@@ -1055,6 +1120,7 @@ export default function OrdersPage() {
     setMassRetryOpen(true)
     setMassRetryOptions(null)
     setRetryChoices({})
+    setMassExcluded(new Set())
     setBulkMessage(null)
     setBulkBusy(true)
     try {
@@ -1081,7 +1147,7 @@ export default function OrdersPage() {
   }
 
   /** Couriers that answered with a schedule; one that did not is skipped, not blocking. */
-  const retryGroups = (massRetryOptions?.groups || []).filter((g) => g.pickup)
+  const retryGroups = (massRetryOptions?.groups || []).filter((g) => g.pickup && keptIds(g.orderRowIds).length > 0)
   const blockedRetryGroups = (massRetryOptions?.groups || []).filter((g) => !g.pickup)
   const incompleteRetryGroups = retryGroups.filter((g) => {
     const choice = retryChoices[g.key]
@@ -1105,7 +1171,7 @@ export default function OrdersPage() {
     try {
       const res = await api.post<any>('/orders/retry-ship-mass', {
         groups: retryGroups.map((g) => ({
-          ids: g.orderRowIds,
+          ids: keptIds(g.orderRowIds),
           addressId: retryChoices[g.key].addressId,
           pickupTimeId: retryChoices[g.key].pickupTimeId,
         })),
@@ -2088,9 +2154,10 @@ export default function OrdersPage() {
                         <div>
                           <p className="text-sm font-medium text-gray-900 dark:text-slate-100">{group.courier}</p>
                           <p className="text-xs text-gray-500 dark:text-slate-400">
-                            {group.storeName} · {group.orderRowIds.length} pesanan
+                            {group.storeName} · {keptIds(group.orderRowIds).length} pesanan
                           </p>
                         </div>
+                        <div className="flex items-start gap-2 shrink-0">
                         {canPickup && canDropoff ? (
                           <div className="flex gap-1 shrink-0">
                             {([
@@ -2119,7 +2186,20 @@ export default function OrdersPage() {
                             {canPickup ? 'Dijemput kurir' : 'Antar ke counter'}
                           </span>
                         )}
+                          <button
+                            type="button"
+                            disabled={bulkBusy}
+                            onClick={() => excludeFromMass(group.orderRowIds)}
+                            className="p-1 text-red-500 hover:text-red-700 disabled:opacity-40"
+                            aria-label={`Keluarkan semua pesanan ${group.courier} dari proses ini`}
+                            title={`Keluarkan semua pesanan ${group.courier} dari proses ini`}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
+
+                      <MassOrderList ids={keptIds(group.orderRowIds)} orderById={orderById} onRemove={excludeFromMass} disabled={bulkBusy} />
 
                       {/* The rule is the operators' own — Shopee offers
                           pickup for these couriers regardless — so it is stated
@@ -2202,6 +2282,8 @@ export default function OrdersPage() {
                   </div>
                 )}
 
+                <ExcludedNote count={massExcluded.size} onRestore={() => setMassExcluded(new Set())} disabled={bulkBusy} />
+
                 <p className="text-xs text-gray-500 dark:text-slate-400">
                   Tiap kurir dikirim dengan jadwalnya sendiri, satu per satu ke Shopee. Nomor resi tidak
                   ditunggu di sini — akan terisi pada sync berikutnya.
@@ -2277,12 +2359,26 @@ export default function OrdersPage() {
 
                   return (
                     <div key={group.key} className="rounded-lg border border-gray-200 dark:border-slate-700 p-3 space-y-2.5">
-                      <div>
-                        <p className="text-sm font-medium text-gray-900 dark:text-slate-100">{group.courier}</p>
-                        <p className="text-xs text-gray-500 dark:text-slate-400">
-                          {group.storeName} · {group.orderRowIds.length} pesanan
-                        </p>
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-medium text-gray-900 dark:text-slate-100">{group.courier}</p>
+                          <p className="text-xs text-gray-500 dark:text-slate-400">
+                            {group.storeName} · {keptIds(group.orderRowIds).length} pesanan
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={bulkBusy}
+                          onClick={() => excludeFromMass(group.orderRowIds)}
+                          className="p-1 text-red-500 hover:text-red-700 disabled:opacity-40 shrink-0"
+                          aria-label={`Keluarkan semua pesanan ${group.courier} dari proses ini`}
+                          title={`Keluarkan semua pesanan ${group.courier} dari proses ini`}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </div>
+
+                      <MassOrderList ids={keptIds(group.orderRowIds)} orderById={orderById} onRemove={excludeFromMass} disabled={bulkBusy} />
 
                       {/* Worth saying here too: re-booking a collection from a
                           courier that does not collect just fails again. */}
@@ -2334,6 +2430,8 @@ export default function OrdersPage() {
                   )
                 })}
 
+                <ExcludedNote count={massExcluded.size} onRestore={() => setMassExcluded(new Set())} disabled={bulkBusy} />
+
                 {blockedRetryGroups.length > 0 && (
                   <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 space-y-1">
                     <p className="text-sm font-medium text-amber-800 dark:text-amber-300">Tidak bisa dijadwalkan dari sini</p>
@@ -2355,7 +2453,7 @@ export default function OrdersPage() {
                     className="btn-primary"
                   >
                     {bulkBusy && <Loader2 className="w-4 h-4 animate-spin" />}
-                    Jadwalkan {retryGroups.reduce((n, g) => n + g.orderRowIds.length, 0)} pesanan
+                    Jadwalkan {retryGroups.reduce((n, g) => n + keptIds(g.orderRowIds).length, 0)} pesanan
                   </button>
                 </div>
               </>
