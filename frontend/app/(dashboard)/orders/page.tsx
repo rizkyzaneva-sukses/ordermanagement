@@ -402,6 +402,40 @@ function ExcludedNote({ count, onRestore, disabled }: { count: number; onRestore
   )
 }
 
+/**
+ * Orders per bulk ship/retry request. The backend refuses more than 50, and it
+ * works through them one Shopee call at a time, so a request this size still
+ * finishes well inside the 90-second client timeout.
+ */
+const BULK_CHUNK_SIZE = 25
+
+/**
+ * Cut courier batches into requests of at most `size` orders, keeping each
+ * order with its own batch's settings. A selection of 66 becomes three requests
+ * instead of one the backend turns away.
+ */
+function chunkBatches<T extends { ids: string[] }>(batches: T[], size: number): T[][] {
+  const chunks: T[][] = []
+  let current: T[] = []
+  let room = size
+  for (const batch of batches) {
+    let rest = batch.ids
+    while (rest.length > 0) {
+      const take = rest.slice(0, room)
+      current.push({ ...batch, ids: take })
+      rest = rest.slice(take.length)
+      room -= take.length
+      if (room === 0) {
+        chunks.push(current)
+        current = []
+        room = size
+      }
+    }
+  }
+  if (current.length > 0) chunks.push(current)
+  return chunks
+}
+
 function absoluteTime(iso: string): string {
   return new Date(iso).toLocaleString('id-ID', {
     day: '2-digit',
@@ -471,6 +505,8 @@ export default function OrdersPage() {
   const [stores, setStores] = useState<Store[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkBusy, setBulkBusy] = useState(false)
+  /** Orders sent so far while a chunked bulk ship/retry is running. */
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null)
   const [bulkMessage, setBulkMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [massShipOpen, setMassShipOpen] = useState(false)
   const [massShipOptions, setMassShipOptions] = useState<MassShipOptions | null>(null)
@@ -1029,26 +1065,35 @@ export default function OrdersPage() {
       })
       return
     }
+    const batches = shippableGroups.map((g) => {
+      const choice = massChoices[g.key]
+      return {
+        ids: keptIds(g.orderRowIds),
+        mode: choice.mode,
+        // Drop-off takes an empty object unless the channel asks for more (KB §5.1)
+        modeData: choice.mode === 'pickup'
+          ? { address_id: choice.addressId, pickup_time_id: choice.pickupTimeId }
+          : {},
+      }
+    })
+    const chunks = chunkBatches(batches, BULK_CHUNK_SIZE)
+    const total = batches.reduce((n, b) => n + b.ids.length, 0)
+
     setBulkBusy(true)
     setBulkMessage(null)
+    setBulkProgress({ done: 0, total })
+    let shipped = 0
+    const failed: any[] = []
+    let sent = 0
     try {
-      const res = await api.post<any>('/orders/ship-mass', {
-        groups: shippableGroups.map((g) => {
-          const choice = massChoices[g.key]
-          return {
-            ids: keptIds(g.orderRowIds),
-            mode: choice.mode,
-            // Drop-off takes an empty object unless the channel asks for more (KB §5.1)
-            modeData: choice.mode === 'pickup'
-              ? { address_id: choice.addressId, pickup_time_id: choice.pickupTimeId }
-              : {},
-          }
-        }),
-      })
+      for (const groups of chunks) {
+        const res = await api.post<any>('/orders/ship-mass', { groups })
+        shipped += res.data?.shipped?.length ?? 0
+        failed.push(...(res.data?.failed ?? []))
+        sent += groups.reduce((n, g) => n + g.ids.length, 0)
+        setBulkProgress({ done: sent, total })
+      }
       setMassShipOpen(false)
-      const shipped = res.data?.shipped?.length ?? 0
-      const failed = res.data?.failed ?? []
-
       setBulkMessage({
         type: failed.length > 0 ? 'error' : 'success',
         text: failed.length > 0
@@ -1056,13 +1101,28 @@ export default function OrdersPage() {
             failed.map((f: any) => `${f.orderId} (${f.message || f.error})`).join(', ')
           : `${shipped} pesanan berhasil diatur pengirimannya.`,
       })
-
       setSelected(new Set())
       await fetchOrders()
     } catch (err) {
-      setBulkMessage({ type: 'error', text: await readError(err) })
+      const reason = await readError(err)
+      if (sent === 0) {
+        setBulkMessage({ type: 'error', text: reason })
+      } else {
+        // Earlier requests already went through: say how far it got and reload,
+        // so the rows still waiting are the ones left to ship.
+        setMassShipOpen(false)
+        setBulkMessage({
+          type: 'error',
+          text: `Berhenti di tengah jalan: ${shipped} dari ${total} pesanan sudah dikirim` +
+            (failed.length > 0 ? `, ${failed.length} ditolak Shopee` : '') +
+            `, sisanya belum diproses (${reason}). Pilih ulang pesanan yang masih Siap Kirim lalu coba lagi.`,
+        })
+        setSelected(new Set())
+        await fetchOrders()
+      }
     } finally {
       setBulkBusy(false)
+      setBulkProgress(null)
     }
   }
 
@@ -1166,19 +1226,29 @@ export default function OrdersPage() {
       })
       return
     }
+    const batches = retryGroups.map((g) => ({
+      ids: keptIds(g.orderRowIds),
+      addressId: retryChoices[g.key].addressId,
+      pickupTimeId: retryChoices[g.key].pickupTimeId,
+    }))
+    const chunks = chunkBatches(batches, BULK_CHUNK_SIZE)
+    const total = batches.reduce((n, b) => n + b.ids.length, 0)
+
     setBulkBusy(true)
     setBulkMessage(null)
+    setBulkProgress({ done: 0, total })
+    let done = 0
+    const failed: any[] = []
+    let sent = 0
     try {
-      const res = await api.post<any>('/orders/retry-ship-mass', {
-        groups: retryGroups.map((g) => ({
-          ids: keptIds(g.orderRowIds),
-          addressId: retryChoices[g.key].addressId,
-          pickupTimeId: retryChoices[g.key].pickupTimeId,
-        })),
-      })
+      for (const groups of chunks) {
+        const res = await api.post<any>('/orders/retry-ship-mass', { groups })
+        done += res.data?.rescheduled?.length ?? 0
+        failed.push(...(res.data?.failed ?? []))
+        sent += groups.reduce((n, g) => n + g.ids.length, 0)
+        setBulkProgress({ done: sent, total })
+      }
       setMassRetryOpen(false)
-      const done = res.data?.rescheduled?.length ?? 0
-      const failed = res.data?.failed ?? []
       setBulkMessage({
         type: failed.length > 0 ? 'error' : 'success',
         text: failed.length > 0
@@ -1189,9 +1259,23 @@ export default function OrdersPage() {
       setSelected(new Set())
       await fetchOrders()
     } catch (err) {
-      setBulkMessage({ type: 'error', text: await readError(err) })
+      const reason = await readError(err)
+      if (sent === 0) {
+        setBulkMessage({ type: 'error', text: reason })
+      } else {
+        setMassRetryOpen(false)
+        setBulkMessage({
+          type: 'error',
+          text: `Berhenti di tengah jalan: ${done} dari ${total} pesanan sudah dijadwalkan ulang` +
+            (failed.length > 0 ? `, ${failed.length} ditolak Shopee` : '') +
+            `, sisanya belum diproses (${reason}). Pilih ulang pesanan yang tersisa lalu coba lagi.`,
+        })
+        setSelected(new Set())
+        await fetchOrders()
+      }
     } finally {
       setBulkBusy(false)
+      setBulkProgress(null)
     }
   }
 
@@ -2302,7 +2386,9 @@ export default function OrdersPage() {
                     className="btn-primary"
                   >
                     {bulkBusy && <Loader2 className="w-4 h-4 animate-spin" />}
-                    Kirim {groupedOrderCount} pesanan
+                    {bulkProgress
+                      ? `Mengirim ${bulkProgress.done}/${bulkProgress.total}…`
+                      : `Kirim ${groupedOrderCount} pesanan`}
                   </button>
                 </div>
               </>
@@ -2453,7 +2539,9 @@ export default function OrdersPage() {
                     className="btn-primary"
                   >
                     {bulkBusy && <Loader2 className="w-4 h-4 animate-spin" />}
-                    Jadwalkan {retryGroups.reduce((n, g) => n + keptIds(g.orderRowIds).length, 0)} pesanan
+                    {bulkProgress
+                      ? `Menjadwalkan ${bulkProgress.done}/${bulkProgress.total}…`
+                      : `Jadwalkan ${retryGroups.reduce((n, g) => n + keptIds(g.orderRowIds).length, 0)} pesanan`}
                   </button>
                 </div>
               </>
