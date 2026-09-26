@@ -208,6 +208,27 @@ const SORT_OPTIONS = [
 ] as const
 type SortKey = (typeof SORT_OPTIONS)[number]['key']
 
+/** Query keys that make up the list's view — everything a reload should keep. */
+const VIEW_KEYS = [
+  'tab', 'subTab', 'printFilter', 'search', 'platform', 'storeId',
+  'status', 'courier', 'dateFrom', 'dateTo', 'sort', 'limit',
+] as const
+const VIEW_STORAGE_KEY = 'orders:view'
+
+/**
+ * Where the list's filters start from. The URL wins, so a reload or a link
+ * (the chat's "lihat pesanan") lands exactly where it points; a bare /orders —
+ * arriving from the sidebar — picks up the view the operator last left.
+ */
+function initialView(searchParams: URLSearchParams): URLSearchParams {
+  if (VIEW_KEYS.some((k) => searchParams.has(k))) return searchParams
+  try {
+    return new URLSearchParams(localStorage.getItem(VIEW_STORAGE_KEY) || '')
+  } catch {
+    return new URLSearchParams()
+  }
+}
+
 const DEADLINE_TONES = {
   overdue: 'text-red-700 dark:text-red-400 font-semibold',
   today:   'text-orange-700 dark:text-orange-400 font-semibold',
@@ -492,13 +513,18 @@ const platformBadgeClass: Record<string, string> = {
 export default function OrdersPage() {
   const router = useRouter()
   const searchParams = useSearchParams()
+  // Read once: afterwards the state below is the source of truth and the URL
+  // only follows it.
+  const [view] = useState(() => initialView(new URLSearchParams(searchParams.toString())))
 
   const [orders, setOrders] = useState<Order[]>([])
   const [total, setTotal] = useState(0)
   const [counts, setCounts] = useState({ belumDicetak: 0, sudahDicetak: 0, semua: 0 })
   /** Orders past their deadline, and due before midnight — what to work on first. */
   const [urgency, setUrgency] = useState({ overdue: 0, dueToday: 0 })
-  const [sort, setSort] = useState<SortKey>('newest')
+  const [sort, setSort] = useState<SortKey>(
+    SORT_OPTIONS.some((o) => o.key === view.get('sort')) ? view.get('sort') as SortKey : 'newest'
+  )
   const [checkOpen, setCheckOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
@@ -526,13 +552,13 @@ export default function OrdersPage() {
   // `printedAt` only ever knows about labels printed from this app, so it can
   // never be reconciled against Shopee. The tabs above it can.
   const [printFilter, setPrintFilter] = useState<PrintFilter>(
-    (searchParams.get('printFilter') as PrintFilter) || 'semua'
+    (view.get('printFilter') as PrintFilter) || 'semua'
   )
   const [tab, setTab] = useState<OrderTab>(
-    (searchParams.get('tab') as OrderTab) || 'toShip'
+    (view.get('tab') as OrderTab) || 'toShip'
   )
   const [subTab, setSubTab] = useState<SubTab>(
-    (searchParams.get('subTab') as SubTab) || 'all'
+    (view.get('subTab') as SubTab) || 'all'
   )
   const [tabCounts, setTabCounts] = useState<Record<OrderTab, number>>(
     { all: 0, unpaid: 0, toShip: 0, shipped: 0 }
@@ -543,19 +569,22 @@ export default function OrdersPage() {
   const [page, setPage] = useState(1)
   // Seeded from the URL so other screens (the chat's order panel) can link
   // straight to one order.
-  const [search, setSearch] = useState(searchParams.get('search') || '')
-  const [platform, setPlatform] = useState('')
-  const [storeId, setStoreId] = useState('')
-  const [status, setStatus] = useState('')
-  const [courier, setCourier] = useState('')
+  const [search, setSearch] = useState(view.get('search') || '')
+  const [platform, setPlatform] = useState(view.get('platform') || '')
+  const [storeId, setStoreId] = useState(view.get('storeId') || '')
+  const [status, setStatus] = useState(view.get('status') || '')
+  const [courier, setCourier] = useState(view.get('courier') || '')
   // The page opens on today's orders: that is the day an operator is packing,
   // and an unbounded list makes every load pull months of history it has to
   // page through. Widening the range is one click on the date boxes.
   const today = isoDate(new Date())
-  const [dateFrom, setDateFrom] = useState(today)
-  const [dateTo, setDateTo] = useState(today)
+  // Only a range the operator picked is kept: "today" is left out of the URL so
+  // a tab reopened tomorrow moves on to tomorrow instead of sticking to a day
+  // that is already packed.
+  const [dateFrom, setDateFrom] = useState(view.get('dateFrom') ?? today)
+  const [dateTo, setDateTo] = useState(view.get('dateTo') ?? today)
 
-  const [limit, setLimit] = useState(20)
+  const [limit, setLimit] = useState(() => Number(view.get('limit')) || 20)
 
   // The oldest successful sync across all stores, not the newest: with several
   // shops the page is only as fresh as whichever one lagged furthest behind, and
@@ -817,17 +846,45 @@ export default function OrdersPage() {
     }
   }
 
-  /** Keep the chosen view in the URL, so a reload or a shared link lands back on it. */
-  const pushParams = (patch: Record<string, string>) => {
-    const params = new URLSearchParams(searchParams.toString())
-    for (const [k, v] of Object.entries(patch)) params.set(k, v)
-    router.push(`/orders?${params.toString()}`)
-  }
+  /**
+   * Keep the chosen view in the URL, so a reload or a shared link lands back on
+   * it, and remember it for the next visit from the sidebar. Only what differs
+   * from the defaults is written, which keeps the address readable.
+   *
+   * `history.replaceState` rather than the router: every keystroke in the
+   * search box lands here, and a router navigation per keystroke — or a
+   * history entry per filter — is not what anyone wants from the Back button.
+   */
+  useEffect(() => {
+    const params = new URLSearchParams()
+    const put = (key: string, value: string, fallback: string) => {
+      if (value !== fallback) params.set(key, value)
+    }
+    put('tab', tab, 'toShip')
+    put('subTab', subTab, 'all')
+    put('printFilter', printFilter, 'semua')
+    put('search', search, '')
+    put('platform', platform, '')
+    put('storeId', storeId, '')
+    put('status', status, '')
+    put('courier', courier, '')
+    put('dateFrom', dateFrom, today)
+    put('dateTo', dateTo, today)
+    put('sort', sort, 'newest')
+    put('limit', String(limit), '20')
+
+    const query = params.toString()
+    window.history.replaceState(window.history.state, '', query ? `/orders?${query}` : '/orders')
+    try {
+      localStorage.setItem(VIEW_STORAGE_KEY, query)
+    } catch {
+      // Private window or blocked storage: the URL still carries the view.
+    }
+  }, [tab, subTab, printFilter, search, platform, storeId, status, courier, dateFrom, dateTo, sort, limit, today])
 
   const handlePrintFilterChange = (filter: PrintFilter) => {
     setPrintFilter(filter)
     setPage(1)
-    pushParams({ printFilter: filter })
   }
 
   const handleTabChange = (next: OrderTab) => {
@@ -841,13 +898,11 @@ export default function OrdersPage() {
     // Sub-tabs only exist inside Perlu Dikirim; leaving one set would carry an
     // invisible filter into a tab that shows no sub-tabs at all.
     setSubTab('all')
-    pushParams({ tab: next, subTab: 'all', ...(keepStatus ? {} : { status: '' }) })
   }
 
   const handleSubTabChange = (next: SubTab) => {
     setSubTab(next)
     setPage(1)
-    pushParams({ subTab: next })
   }
 
   /**
