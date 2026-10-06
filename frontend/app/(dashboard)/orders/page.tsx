@@ -960,6 +960,31 @@ export default function OrdersPage() {
     return isPrintable(order) || isShippable(order) || isRetryable(order)
   }
 
+  /**
+   * Why a row's checkbox is greyed out, as hover text. A dead checkbox with no
+   * explanation reads as a broken page — the operator cannot tell "Shopee is
+   * not ready yet" from "the app is stuck", and only the second is ours to fix.
+   */
+  const checkboxDisabledReason = (order: Order): string => {
+    const pkg = order.logisticsStatus
+      ? `status paket "${logisticsLabel[order.logisticsStatus] || order.logisticsStatus}"`
+      : null
+    const statusName = STATUS_LABELS[order.status] || order.status
+    if (order.printed) {
+      return `Sudah dicetak dan resinya tidak bisa dicetak ulang lagi${pkg ? ` (${pkg})` : ''}.`
+    }
+    if (order.status === 'READY_TO_SHIP' && order.platform === 'SHOPEE') {
+      return `Shopee belum mengizinkan atur pengiriman — ${pkg || 'status paket belum diketahui'}. Coba "Sinkron pesanan" di menu Aksi baris ini.`
+    }
+    if (order.status === 'PROCESSED' && !order.trackingNumber) {
+      return 'Pengiriman sudah diatur, tapi nomor resi belum terbit dari kurir. Tunggu sebentar lalu Sinkron.'
+    }
+    if (order.trackingNumber && pkg) {
+      return `Resi tidak bisa dicetak pada ${pkg}.`
+    }
+    return `Status ${statusName} — tidak ada yang bisa diproses dari sini.`
+  }
+
   const toggleSelect = (orderId: string) => {
     setSelected((prev) => {
       const next = new Set(prev)
@@ -2077,7 +2102,10 @@ export default function OrdersPage() {
                   const enabled = isCheckboxEnabled(order)
                   return (
                     <tr key={order.id} className="hover:bg-gray-50 dark:hover:bg-slate-700/40 transition-colors">
-                      <td className="table-cell">
+                      {/* The title sits on the cell: a disabled input fires no
+                          mouse events in some browsers, so its own tooltip may
+                          never show. */}
+                      <td className="table-cell" title={enabled ? undefined : checkboxDisabledReason(order)}>
                         <input
                           type="checkbox"
                           checked={selected.has(order.id)}
