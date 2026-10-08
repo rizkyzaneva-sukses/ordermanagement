@@ -384,6 +384,18 @@ export default function ProductsPage() {
   const updateDraftName = (key: string, name: string) =>
     setDraft((prev) => prev.map((it) => (draftKey(it) === key ? { ...it, name } : it)))
 
+  /** Drop one product from the form — the "×" on its card. Its listings stay as they are. */
+  const removeDraftItem = (key: string) => {
+    const left = draft.filter((it) => draftKey(it) !== key)
+    setDraft(left)
+    if (left.length === 0) setModal(null)
+    setDraftErrors((prev) => {
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+  }
+
   const updateDraftSku = (key: string, listingId: string, masterSku: string) =>
     setDraft((prev) => prev.map((it) => draftKey(it) !== key ? it : {
       ...it,
@@ -915,6 +927,15 @@ export default function ProductsPage() {
                         {item.storeName} · {item.variants.length} varian · stok awal total {totalStock.toLocaleString('id-ID')}
                       </p>
                     </div>
+                    <button
+                      onClick={() => removeDraftItem(key)}
+                      disabled={busy}
+                      className="p-1 -mt-1 -mr-1 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 shrink-0"
+                      aria-label={`Hapus ${item.name} dari daftar`}
+                      title="Hapus dari daftar — produk ini tidak dijadikan master"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
                   </div>
 
                   {errors && (

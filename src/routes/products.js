@@ -15,7 +15,7 @@ const prisma = require('../prisma/client');
 const { authenticate } = require('../middleware/auth');
 const { requireRole } = require('../middleware/role');
 const {
-  normaliseSku, planAutoMap, planStockEdit,
+  normaliseSku, planAutoMap, planStockEdit, parseStockItems,
   itemNameOf, variantNameOf, planMasterFromItem,
 } = require('../services/productMapping');
 const {
@@ -791,9 +791,13 @@ router.post('/masters/automap', async (req, res) => {
  * Set or adjust stock on many masters at once.
  *
  * Body: { productIds[], mode: 'set' | 'adjust', value }
+ *    or: { items: [{ productId, stock }] }
  *
  *   set     stock becomes `value`
  *   adjust  stock becomes `stock + value`, floored at zero
+ *   items   each master gets its own number — a stock count rarely comes back
+ *           the same for every colour, so this is what the Daftar Stok dialog
+ *           sends
  *
  * Adjust exists because the real action is almost never "this SKU now has 40" —
  * it is "30 more arrived". Making an operator read the current number, add to it
@@ -806,6 +810,32 @@ router.post('/masters/automap', async (req, res) => {
  */
 router.post('/masters/stock', async (req, res) => {
   try {
+    if (req.body?.items !== undefined) {
+      const { writes, error } = parseStockItems(req.body.items, MAX_BATCH);
+      if (error) return res.status(400).json({ success: false, error });
+
+      const found = await prisma.product.findMany({
+        where: { id: { in: writes.map(w => w.id) } },
+        select: { id: true },
+      });
+      if (found.length === 0) {
+        return res.status(404).json({ success: false, error: 'Master produk tidak ditemukan' });
+      }
+      const exists = new Set(found.map(m => m.id));
+      const valid = writes.filter(w => exists.has(w.id));
+
+      await prisma.$transaction(
+        valid.map(w => prisma.product.update({ where: { id: w.id }, data: { stock: w.stock } })),
+      );
+
+      console.log(`[masters] Stock set per master on ${valid.length} master(s)`);
+
+      return res.json({
+        success: true,
+        data: { updated: valid.length, clamped: 0, skipped: writes.length - valid.length },
+      });
+    }
+
     const productIds = req.body?.productIds;
     const mode = String(req.body?.mode ?? 'set');
     const value = Number(req.body?.value);

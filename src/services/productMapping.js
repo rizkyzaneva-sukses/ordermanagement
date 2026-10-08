@@ -112,6 +112,40 @@ function planStockEdit(masters, mode, amount) {
 }
 
 /**
+ * Validate a per-master stock edit: every master gets its own number.
+ *
+ * All-or-nothing: one bad number rejects the whole request rather than saving
+ * the rest, because the operator typed them as one count and a half-saved count
+ * is harder to spot than an error. A master listed twice keeps its last number,
+ * the one typed most recently.
+ *
+ * @param {unknown} items - [{ productId, stock }]
+ * @param {number} max - Batch limit
+ * @returns {{ writes: Array<{id: string, stock: number}>, error?: string }}
+ */
+function parseStockItems(items, max) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { writes: [], error: 'Pilih minimal satu master produk' };
+  }
+  if (items.length > max) {
+    return { writes: [], error: `Maksimal ${max} master sekali jalan` };
+  }
+
+  const byId = new Map();
+  for (const item of items) {
+    const id = item?.productId ? String(item.productId) : '';
+    const stock = Number(item?.stock);
+    if (!id) return { writes: [], error: 'productId wajib diisi' };
+    if (item?.stock === null || item?.stock === '' || !Number.isFinite(stock) || stock < 0) {
+      return { writes: [], error: 'Stok harus angka bulat, minimal 0' };
+    }
+    byId.set(id, Math.trunc(stock));
+  }
+
+  return { writes: [...byId].map(([id, stock]) => ({ id, stock })) };
+}
+
+/**
  * The item name a group of sibling listings (one Shopee item) share.
  *
  * Read from the stored column when the catalogue has been pulled since it
@@ -271,6 +305,7 @@ module.exports = {
   normaliseSku,
   planAutoMap,
   planStockEdit,
+  parseStockItems,
   itemNameOf,
   variantNameOf,
   planMasterFromItem,

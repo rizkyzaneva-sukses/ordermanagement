@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { planStockEdit } = require('../src/services/productMapping.js');
+const { planStockEdit, parseStockItems } = require('../src/services/productMapping.js');
 
 const master = (id, stock) => ({ id, stock });
 
@@ -67,4 +67,41 @@ test('nothing selected plans no writes', () => {
   const { writes, clamped } = planStockEdit([], 'adjust', -5);
   assert.deepEqual(writes, []);
   assert.equal(clamped, 0);
+});
+
+test('per-master items give each master its own number', () => {
+  const { writes, error } = parseStockItems(
+    [{ productId: 'a', stock: 43 }, { productId: 'b', stock: '146' }, { productId: 'c', stock: 0 }],
+    1000,
+  );
+
+  assert.equal(error, undefined);
+  assert.deepEqual(writes, [
+    { id: 'a', stock: 43 },
+    { id: 'b', stock: 146 },
+    { id: 'c', stock: 0 },
+  ]);
+});
+
+test('one bad number rejects the whole per-master edit', () => {
+  // A blank field is "not typed yet", not zero — writing 0 would empty a SKU.
+  for (const bad of [-1, '', null, 'abc', undefined]) {
+    const { writes, error } = parseStockItems(
+      [{ productId: 'a', stock: 10 }, { productId: 'b', stock: bad }],
+      1000,
+    );
+    assert.ok(error, `expected ${JSON.stringify(bad)} to be rejected`);
+    assert.deepEqual(writes, []);
+  }
+});
+
+test('per-master edit keeps the last number for a repeated master and respects the limit', () => {
+  const { writes } = parseStockItems(
+    [{ productId: 'a', stock: 5 }, { productId: 'a', stock: 9 }],
+    1000,
+  );
+  assert.deepEqual(writes, [{ id: 'a', stock: 9 }]);
+
+  assert.ok(parseStockItems([], 1000).error);
+  assert.ok(parseStockItems([{ productId: 'a', stock: 1 }, { productId: 'b', stock: 1 }], 1).error);
 });

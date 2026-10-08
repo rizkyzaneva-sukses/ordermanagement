@@ -54,9 +54,14 @@ export default function StockPage() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
 
+  // The bulk dialog lists every ticked master with its own "Stok baru" field,
+  // keyed by master id. Blank means "leave this one alone". The mode + value
+  // pair above the list only fills those fields; nothing is saved until Simpan.
   const [bulkOpen, setBulkOpen] = useState(false)
+  const [bulkValues, setBulkValues] = useState<Record<string, string>>({})
   const [bulkMode, setBulkMode] = useState<BulkMode>('set')
   const [bulkValue, setBulkValue] = useState('')
+  const [bulkFloored, setBulkFloored] = useState(0)
 
   // Deleting a master is admin-only on the server; the button follows suit so
   // staff are not offered an action that can only answer "forbidden".
@@ -105,6 +110,8 @@ export default function StockPage() {
         : [...new Set([...prev, ...masters.map((m) => m.id)])]
     )
 
+  const selectedMasters = masters.filter((m) => selected.includes(m.id))
+
   const startEdit = (master: Master) => {
     setEditingId(master.id)
     setEditValue(String(master.stock))
@@ -144,36 +151,72 @@ export default function StockPage() {
     }
   }
 
-  const handleBulk = async () => {
+  const openBulk = () => {
+    setBulkValues({})
+    setBulkValue('')
+    setBulkFloored(0)
+    setBulkOpen(true)
+  }
+
+  const closeBulk = () => {
+    if (!busy) setBulkOpen(false)
+  }
+
+  /** Untick a master from inside the dialog — the "×" on its row. */
+  const removeFromBulk = (id: string) => {
+    const left = selected.filter((x) => x !== id)
+    setSelected(left)
+    setBulkValues((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+    if (left.length === 0) setBulkOpen(false)
+  }
+
+  /**
+   * Fill every row's "Stok baru" from the mode + value pair, counted from each
+   * master's own current stock. Rows can still be changed one by one after.
+   * "Kurangi 30" is friendlier to type than "-30", so the sign is applied here.
+   */
+  const fillAll = () => {
     const raw = Number(bulkValue)
-    if (!Number.isFinite(raw)) {
-      setMessage({ type: 'error', text: 'Isi angkanya dulu' })
+    if (bulkValue === '' || !Number.isFinite(raw) || raw < 0) {
+      setMessage({ type: 'error', text: 'Isi angkanya dulu, minimal 0' })
       return
     }
+    const amount = Math.trunc(raw)
+    let floored = 0
+    const next: Record<string, string> = {}
+    for (const m of selectedMasters) {
+      let value = bulkMode === 'set' ? amount : bulkMode === 'add' ? m.stock + amount : m.stock - amount
+      if (value < 0) {
+        floored++
+        value = 0
+      }
+      next[m.id] = String(value)
+    }
+    setBulkValues(next)
+    setBulkFloored(floored)
+  }
 
-    // "Kurangi 30" is friendlier to type than "adjust by -30", so the sign is
-    // applied here rather than asked for.
-    const mode = bulkMode === 'set' ? 'set' : 'adjust'
-    const value = bulkMode === 'subtract' ? -Math.abs(Math.trunc(raw)) : Math.trunc(raw)
+  const isBadStock = (raw: string) => raw !== '' && (!Number.isFinite(Number(raw)) || Number(raw) < 0)
+
+  // Only rows holding a number different from the master's current stock are sent.
+  const bulkChanges = selectedMasters
+    .filter((m) => (bulkValues[m.id] ?? '') !== '' && Number(bulkValues[m.id]) !== m.stock)
+    .map((m) => ({ productId: m.id, stock: Math.trunc(Number(bulkValues[m.id])) }))
+
+  const bulkInvalid = selectedMasters.some((m) => isBadStock(bulkValues[m.id] ?? ''))
+
+  const handleBulk = async () => {
+    if (bulkInvalid || bulkChanges.length === 0) return
 
     setBusy(true)
     try {
-      const res = await api.post<any>('/products/masters/stock', {
-        productIds: selected,
-        mode,
-        value,
-      })
-      const clamped = res.data?.clamped ?? 0
-      setMessage({
-        type: clamped > 0 ? 'error' : 'success',
-        text:
-          `${res.data?.updated ?? 0} master diubah` +
-          (clamped > 0
-            ? ` — tapi ${clamped} di antaranya jadi minus dan dibulatkan ke 0. Cek angkanya.`
-            : ''),
-      })
+      const res = await api.post<any>('/products/masters/stock', { items: bulkChanges })
+      setMessage({ type: 'success', text: `${res.data?.updated ?? 0} master diubah` })
       setBulkOpen(false)
-      setBulkValue('')
       setSelected([])
       await fetchMasters()
     } catch (err: any) {
@@ -202,8 +245,6 @@ export default function StockPage() {
       setBusy(false)
     }
   }
-
-  const selectedMasters = masters.filter((m) => selected.includes(m.id))
 
   return (
     <div className="space-y-4">
@@ -251,7 +292,7 @@ export default function StockPage() {
           <span className="text-sm font-medium text-blue-900 dark:text-blue-200 mr-1">
             {selected.length} master dipilih
           </span>
-          <button onClick={() => setBulkOpen(true)} disabled={busy} className="btn-primary flex items-center gap-2">
+          <button onClick={openBulk} disabled={busy} className="btn-primary flex items-center gap-2">
             <Boxes className="w-4 h-4" />
             <span>Edit Stok Massal</span>
           </button>
@@ -470,60 +511,119 @@ export default function StockPage() {
       )}
 
       {bulkOpen && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={() => setBulkOpen(false)}>
-          <div className="card w-full max-w-md p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={closeBulk}>
+          <div className="card w-full max-w-2xl p-5 flex flex-col gap-4 max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">Edit Stok Massal</h2>
                 <p className="text-sm text-gray-500 dark:text-slate-400">
-                  Berlaku untuk {selected.length} master terpilih.
+                  {selectedMasters.length} master. Isi &ldquo;Stok baru&rdquo; per SKU — yang dikosongkan tidak diubah.
                 </p>
               </div>
-              <button onClick={() => setBulkOpen(false)} className="text-gray-400 hover:text-gray-600">
+              <button onClick={closeBulk} disabled={busy} className="text-gray-400 hover:text-gray-600">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="flex gap-2">
-              {(Object.keys(modeLabels) as BulkMode[]).map((mode) => (
-                <button
-                  key={mode}
-                  onClick={() => setBulkMode(mode)}
-                  className={`flex-1 px-3 py-2 rounded-lg text-sm border ${
-                    bulkMode === mode
-                      ? 'border-primary-500 bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 font-medium'
-                      : 'border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-300'
-                  }`}
-                >
-                  {modeLabels[mode]}
+            {/* Only fills the fields below; nothing is saved until Simpan. */}
+            <div className="rounded-lg border border-gray-200 dark:border-slate-700 p-3 space-y-2">
+              <p className="text-xs font-medium text-gray-500 dark:text-slate-400">Isi semua sekaligus</p>
+              <div className="flex flex-wrap gap-2">
+                <div className="flex gap-1">
+                  {(Object.keys(modeLabels) as BulkMode[]).map((mode) => (
+                    <button
+                      key={mode}
+                      onClick={() => setBulkMode(mode)}
+                      className={`px-3 py-1.5 rounded-lg text-sm border ${
+                        bulkMode === mode
+                          ? 'border-primary-500 bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 font-medium'
+                          : 'border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-300'
+                      }`}
+                    >
+                      {modeLabels[mode]}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="number"
+                  min={0}
+                  value={bulkValue}
+                  onChange={(e) => setBulkValue(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') fillAll() }}
+                  placeholder="0"
+                  className="input w-28 text-right py-1.5"
+                />
+                <button onClick={fillAll} disabled={bulkValue === ''} className="btn-secondary py-1.5">
+                  Isi ke semua
                 </button>
-              ))}
+              </div>
+              {bulkFloored > 0 && (
+                <p className="text-xs text-red-700 dark:text-red-300">
+                  {bulkFloored} master jadi minus dan diisi 0. Cek angkanya.
+                </p>
+              )}
             </div>
 
-            <div>
-              <input
-                type="number"
-                min={0}
-                value={bulkValue}
-                onChange={(e) => setBulkValue(e.target.value)}
-                placeholder="0"
-                autoFocus
-                className="input w-full text-right"
-              />
-              <p className="text-xs text-gray-500 dark:text-slate-400 mt-1">
-                {bulkMode === 'set'
-                  ? 'Semua master terpilih akan bernilai persis angka ini.'
-                  : bulkMode === 'add'
-                    ? 'Ditambahkan ke stok yang sekarang, per master.'
-                    : 'Dikurangi dari stok yang sekarang. Yang jadi minus dibulatkan ke 0 dan dilaporkan.'}
-              </p>
+            <div className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
+              {selectedMasters.map((m) => {
+                const raw = bulkValues[m.id] ?? ''
+                return (
+                  <div
+                    key={m.id}
+                    className="relative rounded-lg border border-gray-200 dark:border-slate-700 p-3 flex flex-col sm:flex-row sm:items-center gap-3"
+                  >
+                    <button
+                      onClick={() => removeFromBulk(m.id)}
+                      disabled={busy}
+                      className="absolute top-1.5 right-1.5 p-0.5 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-slate-700"
+                      aria-label={`Keluarkan ${m.masterSku}`}
+                      title="Keluarkan dari edit ini"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                    <div className="flex-1 min-w-0 pr-5">
+                      <p className="text-sm text-gray-900 dark:text-slate-100 truncate" title={m.name}>{m.name}</p>
+                      <p className="text-xs font-mono text-gray-500 dark:text-slate-400 truncate">MSKU {m.masterSku}</p>
+                    </div>
+                    <div className="flex gap-3 sm:pr-5">
+                      <div>
+                        <label className="block text-xs text-gray-500 dark:text-slate-400 mb-1">Stok lama</label>
+                        <input
+                          value={m.stock}
+                          readOnly
+                          tabIndex={-1}
+                          className="input w-24 py-1 text-right bg-gray-50 dark:bg-slate-800/60 text-gray-500 dark:text-slate-400"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-500 dark:text-slate-400 mb-1">Stok baru</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={raw}
+                          onChange={(e) => setBulkValues((prev) => ({ ...prev, [m.id]: e.target.value }))}
+                          placeholder="Stok"
+                          className={`input w-24 py-1 text-right ${isBadStock(raw) ? 'border-red-400 dark:border-red-700' : ''}`}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
 
-            <div className="flex justify-end gap-2 pt-1">
-              <button onClick={() => setBulkOpen(false)} className="btn-secondary">Batal</button>
-              <button onClick={handleBulk} disabled={busy || bulkValue === ''} className="btn-primary flex items-center gap-2">
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <span className="text-xs text-gray-500 dark:text-slate-400 mr-auto">
+                {bulkInvalid ? 'Ada stok yang minus atau bukan angka' : `${bulkChanges.length} master akan diubah`}
+              </span>
+              <button onClick={closeBulk} disabled={busy} className="btn-secondary">Batal</button>
+              <button
+                onClick={handleBulk}
+                disabled={busy || bulkInvalid || bulkChanges.length === 0}
+                className="btn-primary flex items-center gap-2"
+              >
                 {busy && <Loader2 className="w-4 h-4 animate-spin" />}
-                <span>Terapkan</span>
+                <span>Simpan</span>
               </button>
             </div>
           </div>
