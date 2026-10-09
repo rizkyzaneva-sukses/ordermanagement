@@ -23,6 +23,81 @@ interface Master {
   stock: number
   isActive: boolean
   _count?: { listings: number }
+  // What the bound listings hold on Shopee, as of the last refresh or push.
+  listingStock?: { min: number; max: number } | null
+}
+
+interface PushFailure {
+  store: string
+  name: string
+  reason: string
+}
+
+interface PushResult {
+  listings: number
+  pushed: number
+  failed: PushFailure[]
+  skipped: PushFailure[]
+  error?: string
+}
+
+type Message = { type: 'success' | 'error'; text: string; details?: string[] }
+
+/** Masters per request, so a 500-row page does not outrun the 90s request timeout. */
+const BULK_CHUNK = 50
+
+/** True when every bound listing already holds the master's number. */
+const inSync = (m: Master) =>
+  !m.listingStock || (m.listingStock.min === m.stock && m.listingStock.max === m.stock)
+
+/** "17", or "17–42" when the shops disagree. */
+const formatRange = (r: { min: number; max: number }) => (r.min === r.max ? `${r.min}` : `${r.min}–${r.max}`)
+
+/** Merge the push results of several chunked requests into one. */
+function mergePush(results: PushResult[]): PushResult {
+  const out: PushResult = { listings: 0, pushed: 0, failed: [], skipped: [] }
+  for (const r of results) {
+    out.listings += r.listings
+    out.pushed += r.pushed
+    out.failed.push(...r.failed)
+    out.skipped.push(...r.skipped)
+    if (r.error) out.error = r.error
+  }
+  return out
+}
+
+/**
+ * Turn a save + push outcome into the banner above the table. The save itself
+ * already succeeded when this runs; what is left to say is whether Shopee took it.
+ */
+function describePush(saved: string, push: PushResult | null | undefined): Message {
+  if (!push || push.listings === 0) {
+    return { type: 'success', text: `${saved}. Belum terikat ke listing Shopee, jadi tidak ada yang dikirim.` }
+  }
+  if (push.error) {
+    return { type: 'error', text: `${saved}. ${push.error} — simpan lagi untuk mencoba ulang.` }
+  }
+
+  const details = [
+    ...push.failed.map((f) => `Gagal — ${f.store}: ${f.name} (${f.reason})`),
+    ...push.skipped.map((f) => `Dilewati — ${f.store}: ${f.name} (${f.reason})`),
+  ]
+  const shown = details.slice(0, 10)
+  if (details.length > shown.length) shown.push(`…dan ${details.length - shown.length} lainnya`)
+
+  if (push.failed.length > 0) {
+    return {
+      type: 'error',
+      text: `${saved}. Terkirim ke ${push.pushed} listing Shopee, ${push.failed.length} gagal — simpan lagi untuk mencoba ulang, atau ubah langsung di Seller Centre.`,
+      details: shown,
+    }
+  }
+  return {
+    type: 'success',
+    text: `${saved} dan terkirim ke ${push.pushed} listing Shopee.` +
+      (push.skipped.length > 0 ? ` ${push.skipped.length} listing dilewati.` : ''),
+    details: push.skipped.length > 0 ? shown : undefined,
+  }
 }
 
 type BulkMode = 'set' | 'add' | 'subtract'
@@ -36,7 +111,7 @@ const modeLabels: Record<BulkMode, string> = {
 export default function StockPage() {
   const [masters, setMasters] = useState<Master[]>([])
   const [loading, setLoading] = useState(true)
-  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [message, setMessage] = useState<Message | null>(null)
 
   const [page, setPage] = useState(1)
   const [limit, setLimit] = useState(20)
@@ -62,6 +137,8 @@ export default function StockPage() {
   const [bulkMode, setBulkMode] = useState<BulkMode>('set')
   const [bulkValue, setBulkValue] = useState('')
   const [bulkFloored, setBulkFloored] = useState(0)
+  // "50/120" while chunked requests are going out.
+  const [bulkProgress, setBulkProgress] = useState<string | null>(null)
 
   // Deleting a master is admin-only on the server; the button follows suit so
   // staff are not offered an action that can only answer "forbidden".
@@ -128,21 +205,28 @@ export default function StockPage() {
       setMessage({ type: 'error', text: 'Stok harus angka bulat, minimal 0' })
       return
     }
-    if (next === master.stock) {
+    // The same number is still worth saving when Shopee holds something else:
+    // that is how a push that failed, or a shop that drifted, gets re-sent.
+    if (next === master.stock && inSync(master)) {
       cancelEdit()
       return
     }
 
+    const stock = Math.trunc(next)
     setBusy(true)
     try {
-      await api.patch(`/products/masters/${master.id}`, { stock: Math.trunc(next) })
+      const res = await api.patch<any>(`/products/masters/${master.id}`, { stock })
+      const push: PushResult | null = res.data?.push ?? null
+      const allPushed = !!push && !push.error && push.failed.length === 0 && push.pushed > 0
       // Patched in place rather than refetching the page: a refetch would reorder
       // nothing but would blank the table for a moment on every single edit, and
       // this screen is used one row after another.
       setMasters((prev) =>
-        prev.map((m) => (m.id === master.id ? { ...m, stock: Math.trunc(next) } : m))
+        prev.map((m) => (m.id === master.id
+          ? { ...m, stock, listingStock: allPushed ? { min: stock, max: stock } : m.listingStock }
+          : m))
       )
-      setMessage({ type: 'success', text: `Stok "${master.masterSku}" jadi ${Math.trunc(next)}` })
+      setMessage(describePush(`Stok "${master.masterSku}" jadi ${stock}`, push))
       cancelEdit()
     } catch (err: any) {
       setMessage({ type: 'error', text: err?.response?.data?.error || 'Gagal mengubah stok' })
@@ -202,9 +286,10 @@ export default function StockPage() {
 
   const isBadStock = (raw: string) => raw !== '' && (!Number.isFinite(Number(raw)) || Number(raw) < 0)
 
-  // Only rows holding a number different from the master's current stock are sent.
+  // Rows holding a number different from the master's stock are sent, and so are
+  // rows whose number Shopee does not hold yet — saving those re-sends the push.
   const bulkChanges = selectedMasters
-    .filter((m) => (bulkValues[m.id] ?? '') !== '' && Number(bulkValues[m.id]) !== m.stock)
+    .filter((m) => (bulkValues[m.id] ?? '') !== '' && (Number(bulkValues[m.id]) !== m.stock || !inSync(m)))
     .map((m) => ({ productId: m.id, stock: Math.trunc(Number(bulkValues[m.id])) }))
 
   const bulkInvalid = selectedMasters.some((m) => isBadStock(bulkValues[m.id] ?? ''))
@@ -213,16 +298,32 @@ export default function StockPage() {
     if (bulkInvalid || bulkChanges.length === 0) return
 
     setBusy(true)
+    let updated = 0
+    const pushes: PushResult[] = []
     try {
-      const res = await api.post<any>('/products/masters/stock', { items: bulkChanges })
-      setMessage({ type: 'success', text: `${res.data?.updated ?? 0} master diubah` })
+      for (let i = 0; i < bulkChanges.length; i += BULK_CHUNK) {
+        const chunk = bulkChanges.slice(i, i + BULK_CHUNK)
+        if (bulkChanges.length > BULK_CHUNK) setBulkProgress(`${i + chunk.length}/${bulkChanges.length}`)
+        const res = await api.post<any>('/products/masters/stock', { items: chunk })
+        updated += res.data?.updated ?? 0
+        if (res.data?.push) pushes.push(res.data.push)
+      }
+      setMessage(describePush(`${updated} master diubah`, mergePush(pushes)))
       setBulkOpen(false)
       setSelected([])
       await fetchMasters()
     } catch (err: any) {
-      setMessage({ type: 'error', text: err?.response?.data?.error || 'Gagal mengubah stok massal' })
+      const reason = err?.response?.data?.error || 'Gagal mengubah stok massal'
+      // Chunks before the failing one are already saved and pushed. Saying so
+      // keeps the operator from retrying the lot believing nothing happened.
+      setMessage({
+        type: 'error',
+        text: updated > 0 ? `${updated} master sudah diubah, sisanya gagal: ${reason}` : reason,
+      })
+      if (updated > 0) await fetchMasters()
     } finally {
       setBusy(false)
+      setBulkProgress(null)
     }
   }
 
@@ -252,6 +353,7 @@ export default function StockPage() {
         <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">Daftar Stok</h1>
         <p className="text-sm text-gray-500 dark:text-slate-400">
           Stok master produk. Diisi manual — angka ini tidak berkurang sendiri saat ada pesanan.
+          Saat disimpan, angkanya langsung dikirim ke semua listing Shopee yang terikat.
         </p>
       </div>
 
@@ -261,7 +363,12 @@ export default function StockPage() {
             ? 'border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 text-blue-800 dark:text-blue-200'
             : 'border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200'
         }`}>
-          {message.text}
+          <p>{message.text}</p>
+          {message.details && message.details.length > 0 && (
+            <ul className="mt-2 space-y-0.5 text-xs">
+              {message.details.map((d, i) => <li key={i}>• {d}</li>)}
+            </ul>
+          )}
         </div>
       )}
 
@@ -352,14 +459,15 @@ export default function StockPage() {
                 <th className="px-4 py-3">Nama Produk</th>
                 <th className="px-4 py-3 text-right">Listing Terikat</th>
                 <th className="px-4 py-3 text-right">Stok</th>
+                <th className="px-4 py-3 text-right" title="Stok yang dipegang listing Shopee, per penyegaran atau pengiriman terakhir">Di Shopee</th>
                 <th className="px-4 py-3 w-24"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200 dark:divide-slate-700">
               {loading ? (
-                <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-500 dark:text-slate-400">Memuat…</td></tr>
+                <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500 dark:text-slate-400">Memuat…</td></tr>
               ) : masters.length === 0 ? (
-                <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-500 dark:text-slate-400">Tidak ada master yang cocok.</td></tr>
+                <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500 dark:text-slate-400">Tidak ada master yang cocok.</td></tr>
               ) : masters.map((m) => (
                 <tr
                   key={m.id}
@@ -405,6 +513,22 @@ export default function StockPage() {
                       />
                     ) : (
                       <span className="font-medium text-gray-900 dark:text-slate-100">{m.stock}</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    {!m.listingStock ? (
+                      <span className="text-gray-500 dark:text-slate-400">—</span>
+                    ) : inSync(m) ? (
+                      <span className="text-gray-600 dark:text-slate-300">{formatRange(m.listingStock)}</span>
+                    ) : (
+                      // Shopee holds a different number — usually sales since the
+                      // last save. Worth seeing before typing a new count.
+                      <span
+                        className="inline-flex items-center gap-1 text-amber-700 dark:text-amber-400"
+                        title="Beda dengan stok master. Simpan stok untuk mengirim angka master ke Shopee."
+                      >
+                        <AlertTriangle className="w-3 h-3" /> {formatRange(m.listingStock)}
+                      </span>
                     )}
                   </td>
                   <td className="px-4 py-3">
@@ -596,6 +720,17 @@ export default function StockPage() {
                         />
                       </div>
                       <div>
+                        <label className="block text-xs text-gray-500 dark:text-slate-400 mb-1">Di Shopee</label>
+                        <input
+                          value={m.listingStock ? formatRange(m.listingStock) : '—'}
+                          readOnly
+                          tabIndex={-1}
+                          className={`input w-24 py-1 text-right bg-gray-50 dark:bg-slate-800/60 ${
+                            inSync(m) ? 'text-gray-500 dark:text-slate-400' : 'text-amber-700 dark:text-amber-400'
+                          }`}
+                        />
+                      </div>
+                      <div>
                         <label className="block text-xs text-gray-500 dark:text-slate-400 mb-1">Stok baru</label>
                         <input
                           type="number"
@@ -614,7 +749,11 @@ export default function StockPage() {
 
             <div className="flex items-center justify-end gap-2 pt-1">
               <span className="text-xs text-gray-500 dark:text-slate-400 mr-auto">
-                {bulkInvalid ? 'Ada stok yang minus atau bukan angka' : `${bulkChanges.length} master akan diubah`}
+                {bulkInvalid
+                  ? 'Ada stok yang minus atau bukan angka'
+                  : busy
+                    ? `Menyimpan & mengirim ke Shopee…${bulkProgress ? ` ${bulkProgress}` : ''}`
+                    : `${bulkChanges.length} master akan diubah dan dikirim ke Shopee`}
               </span>
               <button onClick={closeBulk} disabled={busy} className="btn-secondary">Batal</button>
               <button

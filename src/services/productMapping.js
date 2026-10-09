@@ -146,6 +146,41 @@ function parseStockItems(items, max) {
 }
 
 /**
+ * Group the listings a stock push touches into the calls Shopee takes.
+ *
+ * `update_stock` writes one item at a time, up to 50 models per call, so
+ * listings are grouped by store, then by item, then cut into batches of 50.
+ * Five colours of one cap in one shop is one call, not five.
+ *
+ * @param {Array<{id: string, storeId: string, itemId: string, modelId: string, stock: number}>} listings
+ *   `stock` is the number to write — the master's, not what Shopee holds now
+ * @param {number} [maxModels=50]
+ * @returns {Map<string, Array<{itemId: string, models: Array<{listingId: string, modelId: string, stock: number}>}>>}
+ *   storeId → calls
+ */
+function planStockPush(listings, maxModels = 50) {
+  const byStore = new Map();
+  for (const l of listings) {
+    if (!byStore.has(l.storeId)) byStore.set(l.storeId, new Map());
+    const items = byStore.get(l.storeId);
+    if (!items.has(l.itemId)) items.set(l.itemId, []);
+    items.get(l.itemId).push({ listingId: l.id, modelId: l.modelId, stock: l.stock });
+  }
+
+  const plan = new Map();
+  for (const [storeId, items] of byStore) {
+    const calls = [];
+    for (const [itemId, models] of items) {
+      for (let i = 0; i < models.length; i += maxModels) {
+        calls.push({ itemId, models: models.slice(i, i + maxModels) });
+      }
+    }
+    plan.set(storeId, calls);
+  }
+  return plan;
+}
+
+/**
  * The item name a group of sibling listings (one Shopee item) share.
  *
  * Read from the stored column when the catalogue has been pulled since it
@@ -306,6 +341,7 @@ module.exports = {
   planAutoMap,
   planStockEdit,
   parseStockItems,
+  planStockPush,
   itemNameOf,
   variantNameOf,
   planMasterFromItem,

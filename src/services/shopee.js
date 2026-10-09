@@ -1687,6 +1687,25 @@ class ShopeeService {
   }
 
   /**
+   * Set the seller stock of one item's models (Push Stock).
+   *
+   * An absolute write, so the retry in `_request` is safe: sending "40" twice
+   * leaves 40. Shopee caps `stock_list` at 50 models; the caller chunks.
+   * A listing without variations is written as model_id 0.
+   *
+   * @param {number} itemId
+   * @param {Array<{model_id: number, seller_stock: Array<{stock: number}>}>} stockList
+   * @returns {Promise<Object>} `{ response: { success_list, failure_list } }`
+   */
+  async updateStock(accessToken, shopId, itemId, stockList) {
+    console.error(`[ShopeeService.updateStock] shop=${shopId} item=${itemId} models=${stockList.length}`);
+    return this._request('POST', '/api/v2/product/update_stock', {}, {
+      item_id: itemId,
+      stock_list: stockList,
+    }, accessToken, String(shopId));
+  }
+
+  /**
    * List or unlist items. `unlist: false` puts an item on sale.
    *
    * @param {Array<{item_id: number, unlist: boolean}>} itemList

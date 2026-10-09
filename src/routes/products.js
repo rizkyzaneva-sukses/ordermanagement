@@ -1,12 +1,11 @@
 'use strict';
 
 /**
- * products.js — the catalogue, read-only.
+ * products.js — the catalogue, masters, and master stock.
  *
- * This is the first half of the product feature: pull what Shopee has and show
- * it. Mapping listings to masters and pushing stock back are separate steps, and
- * the second of them needs a product write permission this app has not been
- * confirmed to hold — so nothing here writes to a marketplace.
+ * Pulling the catalogue and mapping listings to masters never write to a
+ * marketplace. Saving a master's stock does: the new number is pushed to every
+ * Shopee listing bound to it (services/stockPush.js).
  */
 
 const express = require('express');
@@ -22,6 +21,7 @@ const {
   syncAllCatalogues, syncStoreCatalogue, getLastPull, recordPull,
   syncAllStock, syncStoreStock, getLastStockSync, recordStockSync,
 } = require('../services/productSync');
+const { pushMasterStock } = require('../services/stockPush');
 
 router.use(authenticate);
 
@@ -337,6 +337,7 @@ router.get('/masters', async (req, res) => {
         include: {
           _count: { select: { listings: true } },
           masterProduct: { select: { id: true, name: true } },
+          listings: { where: { status: { in: ['NORMAL', 'UNLIST'] } }, select: { stock: true } },
         },
         orderBy: [{ masterSku: 'asc' }],
         skip: (page - 1) * limit,
@@ -345,9 +346,20 @@ router.get('/masters', async (req, res) => {
       prisma.product.count({ where }),
     ]);
 
+    // What the bound listings hold on the marketplace, as of the last refresh or
+    // push. A range rather than one number: eleven shops can disagree, and a
+    // master whose number is far from Shopee's is worth seeing before saving.
+    const rows = masters.map(({ listings, ...m }) => {
+      const known = listings.map(l => l.stock).filter(n => n !== null);
+      return {
+        ...m,
+        listingStock: known.length === 0 ? null : { min: Math.min(...known), max: Math.max(...known) },
+      };
+    });
+
     return res.json({
       success: true,
-      data: { masters, total, page, limit, totalPages: Math.ceil(total / limit) },
+      data: { masters: rows, total, page, limit, totalPages: Math.ceil(total / limit) },
     });
   } catch (err) {
     console.error('GET /products/masters error:', err);
@@ -561,6 +573,9 @@ router.post('/masters/from-items', async (req, res) => {
  *
  * `masterSku` is not editable: it is the identity operators match against, and
  * renaming it silently re-points every listing bound to it.
+ *
+ * Sending `stock` pushes it to the bound Shopee listings, even when the number
+ * is unchanged — that is how an operator re-sends a push that failed.
  */
 router.patch('/masters/:id', async (req, res) => {
   try {
@@ -584,7 +599,8 @@ router.patch('/masters/:id', async (req, res) => {
     }
 
     const master = await prisma.product.update({ where: { id: req.params.id }, data });
-    return res.json({ success: true, data: { master } });
+    const push = data.stock !== undefined ? await pushAfterSave([master.id]) : null;
+    return res.json({ success: true, data: { master, push } });
   } catch (err) {
     if (err.code === 'P2025') {
       return res.status(404).json({ success: false, error: 'Master produk tidak ditemukan' });
@@ -787,6 +803,22 @@ router.post('/masters/automap', async (req, res) => {
 });
 
 /**
+ * Push saved masters to Shopee, without letting a push failure undo the save.
+ *
+ * By the time this runs the new number is in the database. A crash here (the
+ * database dropping mid-push, say) must not answer 500, or the operator would
+ * read "gagal" and type the same count in again on top of a save that worked.
+ */
+async function pushAfterSave(productIds) {
+  try {
+    return await pushMasterStock(productIds);
+  } catch (err) {
+    console.error('[masters] Stock saved but push failed:', err);
+    return { listings: 0, pushed: 0, failed: [], skipped: [], error: 'Stok tersimpan, tapi gagal dikirim ke Shopee' };
+  }
+}
+
+/**
  * POST /masters/stock
  * Set or adjust stock on many masters at once.
  *
@@ -807,6 +839,10 @@ router.post('/masters/automap', async (req, res) => {
  * Rows are read and written inside one transaction rather than pushed through a
  * single `updateMany` with `increment`, because a decrement has to be floored
  * per row and `increment` would happily write -6.
+ *
+ * Once saved, every master in the request is pushed to its Shopee listings and
+ * the outcome comes back as `push`. The save stands even if the push fails —
+ * the operator sees which listings did not take it.
  */
 router.post('/masters/stock', async (req, res) => {
   try {
@@ -829,10 +865,11 @@ router.post('/masters/stock', async (req, res) => {
       );
 
       console.log(`[masters] Stock set per master on ${valid.length} master(s)`);
+      const push = await pushAfterSave(valid.map(w => w.id));
 
       return res.json({
         success: true,
-        data: { updated: valid.length, clamped: 0, skipped: writes.length - valid.length },
+        data: { updated: valid.length, clamped: 0, skipped: writes.length - valid.length, push },
       });
     }
 
@@ -874,6 +911,7 @@ router.post('/masters/stock', async (req, res) => {
     );
 
     console.log(`[masters] Stock ${mode} ${amount} on ${masters.length} master(s), ${clamped} floored at 0`);
+    const push = await pushAfterSave(masters.map(m => m.id));
 
     return res.json({
       success: true,
@@ -881,6 +919,7 @@ router.post('/masters/stock', async (req, res) => {
         updated: masters.length,
         clamped,
         skipped: productIds.length - masters.length,
+        push,
       },
     });
   } catch (err) {
