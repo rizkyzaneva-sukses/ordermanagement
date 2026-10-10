@@ -14,6 +14,7 @@ import {
   Pencil,
   AlertTriangle,
   Trash2,
+  History,
 } from 'lucide-react'
 
 interface Master {
@@ -49,6 +50,33 @@ const BULK_CHUNK = 50
 /** True when every bound listing already holds the master's number. */
 const inSync = (m: Master) =>
   !m.listingStock || (m.listingStock.min === m.stock && m.listingStock.max === m.stock)
+
+interface Movement {
+  id: string
+  kind: 'ORDER' | 'CANCEL' | 'MANUAL'
+  delta: number
+  stockAfter: number
+  orderId: string | null
+  note: string | null
+  createdAt: string
+  store: { name: string } | null
+  user: { name: string; email: string } | null
+}
+
+const kindLabels: Record<Movement['kind'], string> = {
+  ORDER: 'Pesanan',
+  CANCEL: 'Batal',
+  MANUAL: 'Edit manual',
+}
+
+const timeFmt = new Intl.DateTimeFormat('id-ID', {
+  day: '2-digit',
+  month: 'short',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  timeZone: 'Asia/Jakarta',
+})
 
 /** "17", or "17–42" when the shops disagree. */
 const formatRange = (r: { min: number; max: number }) => (r.min === r.max ? `${r.min}` : `${r.min}–${r.max}`)
@@ -148,6 +176,65 @@ export default function StockPage() {
   useEffect(() => {
     getMe().then((u) => setIsAdmin(u?.role === 'ADMIN')).catch(() => setIsAdmin(false))
   }, [])
+
+  // Stok otomatis: null = off. `undefined` until the setting has loaded, so the
+  // panel does not flash "Mati" on a shop where it is on.
+  const [autoSince, setAutoSince] = useState<string | null | undefined>(undefined)
+  const [autoDialog, setAutoDialog] = useState<'on' | 'off' | null>(null)
+
+  useEffect(() => {
+    api.get<any>('/products/stock-settings')
+      .then((res) => setAutoSince(res.data?.autoDeductSince ?? null))
+      .catch(() => setAutoSince(null))
+  }, [])
+
+  const handleAutoToggle = async (enable: boolean) => {
+    setBusy(true)
+    try {
+      const res = await api.put<any>('/products/stock-settings', { autoDeduct: enable })
+      setAutoSince(res.data?.autoDeductSince ?? null)
+      setMessage({
+        type: 'success',
+        text: enable
+          ? 'Stok otomatis menyala. Pesanan yang dibayar mulai sekarang mengurangi stok master dan dikirim ke semua toko.'
+          : 'Stok otomatis dimatikan. Stok master kembali hanya berubah lewat Edit Stok.',
+      })
+      setAutoDialog(null)
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err?.response?.data?.error || 'Gagal mengubah stok otomatis' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Riwayat Stok for one master, newest first, loaded a page at a time.
+  const [history, setHistory] = useState<Master | null>(null)
+  const [movements, setMovements] = useState<Movement[]>([])
+  const [historyPage, setHistoryPage] = useState(1)
+  const [historyTotalPages, setHistoryTotalPages] = useState(1)
+  const [historyLoading, setHistoryLoading] = useState(false)
+
+  const loadHistory = async (master: Master, nextPage: number) => {
+    setHistoryLoading(true)
+    try {
+      const res = await api.get<any>(`/products/masters/${master.id}/movements`, { params: { page: nextPage, limit: 20 } })
+      const rows: Movement[] = res.data?.movements ?? []
+      setMovements((prev) => (nextPage === 1 ? rows : [...prev, ...rows]))
+      setHistoryPage(nextPage)
+      setHistoryTotalPages(res.data?.totalPages ?? 1)
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err?.response?.data?.error || 'Riwayat stok tidak bisa dimuat' })
+      setHistory(null)
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
+
+  const openHistory = (master: Master) => {
+    setHistory(master)
+    setMovements([])
+    loadHistory(master, 1)
+  }
 
   const fetchMasters = useCallback(async () => {
     setLoading(true)
@@ -352,10 +439,41 @@ export default function StockPage() {
       <div>
         <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">Daftar Stok</h1>
         <p className="text-sm text-gray-500 dark:text-slate-400">
-          Stok master produk. Diisi manual — angka ini tidak berkurang sendiri saat ada pesanan.
-          Saat disimpan, angkanya langsung dikirim ke semua listing Shopee yang terikat.
+          {autoSince
+            ? 'Stok master produk. Berkurang sendiri saat pesanan dibayar dan kembali saat pesanan batal. '
+            : 'Stok master produk. Diisi manual — angka ini tidak ikut berkurang saat ada pesanan (stok di Shopee tetap berkurang sendiri). '}
+          Setiap perubahan langsung dikirim ke semua listing Shopee yang terikat.
         </p>
       </div>
+
+      {autoSince !== undefined && (
+        <div className={`card p-4 flex flex-col sm:flex-row sm:items-center gap-3 ${
+          autoSince ? 'border-green-300 dark:border-green-800' : ''
+        }`}>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-gray-900 dark:text-slate-100">
+              Kurangi stok otomatis dari pesanan:{' '}
+              <span className={autoSince ? 'text-green-700 dark:text-green-400' : 'text-gray-600 dark:text-slate-300'}>
+                {autoSince ? `Menyala sejak ${timeFmt.format(new Date(autoSince))} WIB` : 'Mati'}
+              </span>
+            </p>
+            <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
+              {autoSince
+                ? 'Pesanan yang dibayar mengurangi stok, pesanan batal sebelum dikirim mengembalikannya. Barang retur ditambah manual lewat Edit Stok.'
+                : 'Saat menyala, pesanan yang dibayar mengurangi stok master lalu angkanya dikirim ke semua toko.'}
+            </p>
+          </div>
+          {isAdmin && (
+            <button
+              onClick={() => setAutoDialog(autoSince ? 'off' : 'on')}
+              disabled={busy}
+              className={autoSince ? 'btn-secondary shrink-0' : 'btn-primary shrink-0'}
+            >
+              {autoSince ? 'Matikan' : 'Nyalakan'}
+            </button>
+          )}
+        </div>
+      )}
 
       {message && (
         <div className={`rounded-lg border px-4 py-3 text-sm ${
@@ -551,12 +669,18 @@ export default function StockPage() {
                         </button>
                       </div>
                     ) : (
-                      <div className="flex justify-end">
+                      <div className="flex flex-col items-end gap-1">
                         <button
                           onClick={() => startEdit(m)}
                           className="inline-flex items-center gap-1 text-xs text-primary-600 dark:text-primary-400 hover:underline"
                         >
                           <Pencil className="w-3 h-3" /> Edit Stok
+                        </button>
+                        <button
+                          onClick={() => openHistory(m)}
+                          className="inline-flex items-center gap-1 text-xs text-gray-600 dark:text-slate-300 hover:underline"
+                        >
+                          <History className="w-3 h-3" /> Riwayat
                         </button>
                       </div>
                     )}
@@ -584,6 +708,130 @@ export default function StockPage() {
           </div>
         )}
       </div>
+
+      {autoDialog && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={() => !busy && setAutoDialog(null)}>
+          <div className="card w-full max-w-md p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">
+                {autoDialog === 'on' ? 'Nyalakan stok otomatis?' : 'Matikan stok otomatis?'}
+              </h2>
+              <button onClick={() => setAutoDialog(null)} disabled={busy} className="text-gray-400 hover:text-gray-600" aria-label="Tutup">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {autoDialog === 'on' ? (
+              <ul className="text-sm space-y-1.5 text-gray-700 dark:text-slate-200">
+                <li className="text-amber-800 dark:text-amber-300 font-medium">
+                  • Pastikan stok semua master sudah benar dulu (stock opname).
+                </li>
+                <li>
+                  • Isi dengan <b>stok yang bisa dijual</b>: stok fisik dikurangi barang untuk pesanan yang sudah
+                  dibayar tapi belum dikirim.
+                </li>
+                <li>• Hanya pesanan yang masuk <b>setelah ini</b> yang mengurangi stok.</li>
+                <li>• Pesanan batal sebelum dikirim mengembalikan stoknya. Barang retur ditambah manual.</li>
+                <li>• Pesanan dari listing yang belum dijadikan master tidak mengurangi apa pun.</li>
+              </ul>
+            ) : (
+              <p className="text-sm text-gray-700 dark:text-slate-200">
+                Pesanan berikutnya tidak lagi mengurangi stok master. Kalau dinyalakan lagi nanti, lakukan stock opname
+                dulu — pesanan selama mati tidak ikut terhitung.
+              </p>
+            )}
+
+            <div className="flex justify-end gap-2 pt-1">
+              <button onClick={() => setAutoDialog(null)} disabled={busy} className="btn-secondary">Batal</button>
+              <button
+                onClick={() => handleAutoToggle(autoDialog === 'on')}
+                disabled={busy}
+                className="btn-primary flex items-center gap-2"
+              >
+                {busy && <Loader2 className="w-4 h-4 animate-spin" />}
+                <span>{autoDialog === 'on' ? 'Ya, stok sudah benar — Nyalakan' : 'Ya, Matikan'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {history && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={() => setHistory(null)}>
+          <div className="card w-full max-w-2xl p-5 flex flex-col gap-4 max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">Riwayat Stok</h2>
+                <p className="text-sm text-gray-500 dark:text-slate-400 truncate" title={history.name}>
+                  <span className="font-mono">{history.masterSku}</span> · stok sekarang {history.stock}
+                </p>
+              </div>
+              <button onClick={() => setHistory(null)} className="text-gray-400 hover:text-gray-600" aria-label="Tutup">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-auto">
+              {movements.length === 0 && historyLoading ? (
+                <p className="py-8 text-center text-sm text-gray-500 dark:text-slate-400">Memuat…</p>
+              ) : movements.length === 0 ? (
+                <p className="py-8 text-center text-sm text-gray-500 dark:text-slate-400">
+                  Belum ada riwayat. Riwayat mulai tercatat sejak fitur ini dipasang.
+                </p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead className="text-left text-xs uppercase text-gray-500 dark:text-slate-400">
+                    <tr>
+                      <th className="py-2 pr-3">Waktu (WIB)</th>
+                      <th className="py-2 pr-3">Jenis</th>
+                      <th className="py-2 pr-3 text-right">Perubahan</th>
+                      <th className="py-2 pr-3 text-right">Stok jadi</th>
+                      <th className="py-2">Keterangan</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-slate-700/60">
+                    {movements.map((mv) => (
+                      <tr key={mv.id} className="align-top">
+                        <td className="py-2 pr-3 whitespace-nowrap text-gray-600 dark:text-slate-300">
+                          {timeFmt.format(new Date(mv.createdAt))}
+                        </td>
+                        <td className="py-2 pr-3 whitespace-nowrap text-gray-900 dark:text-slate-100">{kindLabels[mv.kind] ?? mv.kind}</td>
+                        <td className={`py-2 pr-3 text-right font-medium ${
+                          mv.delta < 0 ? 'text-red-700 dark:text-red-400' : mv.delta > 0 ? 'text-green-700 dark:text-green-400' : 'text-gray-600 dark:text-slate-300'
+                        }`}>
+                          {mv.delta > 0 ? `+${mv.delta}` : mv.delta}
+                        </td>
+                        <td className="py-2 pr-3 text-right text-gray-900 dark:text-slate-100">{mv.stockAfter}</td>
+                        <td className="py-2 text-xs text-gray-600 dark:text-slate-300">
+                          {mv.orderId && (
+                            <span className="font-mono">{mv.orderId}</span>
+                          )}
+                          {mv.store && <span> · {mv.store.name}</span>}
+                          {mv.user && <span>{mv.user.name || mv.user.email}</span>}
+                          {mv.note && (
+                            <span className="block text-amber-700 dark:text-amber-400">{mv.note}</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {historyPage < historyTotalPages && (
+              <button
+                onClick={() => loadHistory(history, historyPage + 1)}
+                disabled={historyLoading}
+                className="btn-secondary self-center flex items-center gap-2"
+              >
+                {historyLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                <span>Muat lebih banyak</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {deleteOpen && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={() => !busy && setDeleteOpen(false)}>

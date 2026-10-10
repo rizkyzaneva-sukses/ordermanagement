@@ -993,6 +993,13 @@ async function syncStore(storeId) {
       console.warn(`[sync] Store ${storeId} finished with ${result.warnings.length} incomplete pass(es)`);
     }
 
+    // Stok otomatis: take stock for newly paid orders, give it back for
+    // cancelled ones. A no-op while the feature is off, and it never throws.
+    // Required here rather than at the top because it pulls in stockPush,
+    // which requires this module — a top-level require would hand it a
+    // half-built exports object.
+    await require('./orderStock.js').applyOrderStock(storeId);
+
     await prisma.store.update({
       where: { id: storeId },
       data: {

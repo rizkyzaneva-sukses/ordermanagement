@@ -53,6 +53,7 @@ const ACTIONS = {
   'DELETE /api/products/masters/:id': 'Hapus master produk',
   'POST /api/products/masters/delete': 'Hapus master produk',
   'POST /api/products/masters/stock': 'Edit stok massal',
+  'PUT /api/products/stock-settings': 'Ubah stok otomatis',
   'POST /api/products/masters/automap': 'Petakan otomatis',
   'POST /api/products/listings/map': 'Ikat listing ke master',
   'POST /api/products/listings/unmap': 'Lepas listing dari master',

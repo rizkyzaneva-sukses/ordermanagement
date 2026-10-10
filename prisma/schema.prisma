@@ -26,6 +26,7 @@ model User {
   productDrafts   ProductDraft[]
   chatReplies     ChatReply[]
   activityLogs    ActivityLog[]
+  stockMovements  StockMovement[]
 
   @@map("users")
 }
@@ -66,6 +67,7 @@ model Store {
   chatReplies ChatReply[]
   draftsFrom ProductDraft[] @relation("DraftSource")
   draftsTo   ProductDraft[] @relation("DraftTarget")
+  stockMovements StockMovement[]
 
   @@unique([platform, shopId])
   @@map("stores")
@@ -116,6 +118,7 @@ model Product {
 
   masterProduct MasterProduct?   @relation(fields: [masterProductId], references: [id], onDelete: SetNull)
   listings      ProductListing[]
+  movements     StockMovement[]
 
   @@index([masterProductId])
   @@map("products")
@@ -282,6 +285,16 @@ model Order {
   printedById        String?
   printBatchId       String?
   reprintCount       Int       @default(0)
+  // Stok otomatis (services/orderStock.js). Set on every package row of an
+  // order at once, so a sync never re-reads an order it has already handled:
+  //   stockCountedAt   its items were taken off master stock
+  //   stockShippedAt   it was seen shipped — a later cancel is a return, which
+  //                    operators put back by hand
+  //   stockReleasedAt  its cancellation was handled (restored, or not because
+  //                    it had shipped)
+  stockCountedAt     DateTime?
+  stockShippedAt     DateTime?
+  stockReleasedAt    DateTime?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
@@ -369,4 +382,49 @@ model ActivityLog {
   @@index([createdAt])
   @@index([userId, createdAt])
   @@map("activity_logs")
+}
+
+// One change to a master's stock: Riwayat Stok, and the guard that keeps an
+// order from being taken off stock twice when sync reads it again.
+model StockMovement {
+  id         String   @id @default(cuid())
+  productId  String
+  // ORDER (paid order took stock) | CANCEL (cancelled order gave it back) |
+  // MANUAL (an operator saved a number on Daftar Stok)
+  kind       String
+  // What actually changed. For ORDER this can be smaller than the quantity
+  // bought, when stock hit 0 — and CANCEL gives back exactly this, no more.
+  delta      Int
+  stockAfter Int
+  // ORDER / CANCEL: which order line. modelId is "" for an item without
+  // variations, as on ProductListing.
+  storeId    String?
+  orderId    String?
+  itemId     String?
+  modelId    String?
+  // MANUAL: who saved it.
+  userId     String?
+  // e.g. "stok kurang 1, diisi 0" — a likely oversell worth seeing.
+  note       String?
+  createdAt  DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  store   Store?  @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  user    User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // One order line takes stock once and gives it back once. MANUAL rows leave
+  // these columns NULL, which Postgres treats as distinct, so they never collide.
+  @@unique([storeId, orderId, itemId, modelId, kind])
+  @@index([productId, createdAt])
+  @@map("stock_movements")
+}
+
+// Small app-wide settings, key → value.
+//   stockAutoDeductSince  ISO time stok otomatis was switched on; absent = off
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@map("app_settings")
 }

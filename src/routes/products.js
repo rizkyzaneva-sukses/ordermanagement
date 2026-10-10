@@ -5,7 +5,8 @@
  *
  * Pulling the catalogue and mapping listings to masters never write to a
  * marketplace. Saving a master's stock does: the new number is pushed to every
- * Shopee listing bound to it (services/stockPush.js).
+ * Shopee listing bound to it (services/stockPush.js). Paid orders take master
+ * stock on their own once stok otomatis is on (services/orderStock.js).
  */
 
 const express = require('express');
@@ -22,6 +23,7 @@ const {
   syncAllStock, syncStoreStock, getLastStockSync, recordStockSync,
 } = require('../services/productSync');
 const { pushMasterStock } = require('../services/stockPush');
+const { getAutoDeductSince, setAutoDeduct } = require('../services/orderStock');
 
 router.use(authenticate);
 
@@ -598,7 +600,11 @@ router.patch('/masters/:id', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Tidak ada yang diubah' });
     }
 
+    const before = data.stock !== undefined
+      ? await prisma.product.findUnique({ where: { id: req.params.id }, select: { id: true, stock: true } })
+      : null;
     const master = await prisma.product.update({ where: { id: req.params.id }, data });
+    if (before) await recordManual([{ id: master.id, from: before.stock, to: master.stock }], req.user?.id);
     const push = data.stock !== undefined ? await pushAfterSave([master.id]) : null;
     return res.json({ success: true, data: { master, push } });
   } catch (err) {
@@ -803,6 +809,97 @@ router.post('/masters/automap', async (req, res) => {
 });
 
 /**
+ * Write Edit Stok into Riwayat Stok, so a number that changed by hand is as
+ * traceable as one an order took. Unchanged rows (a re-push) are not history.
+ * Best effort: the stock is saved already, and a missing history line is not
+ * worth answering "gagal" over.
+ *
+ * @param {Array<{id: string, from: number, to: number}>} changes
+ */
+async function recordManual(changes, userId) {
+  const rows = changes
+    .filter(c => c.from !== undefined && c.from !== c.to)
+    .map(c => ({ productId: c.id, kind: 'MANUAL', delta: c.to - c.from, stockAfter: c.to, userId: userId || null }));
+  if (rows.length === 0) return;
+  try {
+    await prisma.stockMovement.createMany({ data: rows });
+  } catch (err) {
+    console.error('[masters] Could not record manual stock change:', err);
+  }
+}
+
+/**
+ * GET /stock-settings
+ * Whether stok otomatis is on, and since when.
+ */
+router.get('/stock-settings', async (req, res) => {
+  try {
+    const since = await getAutoDeductSince();
+    return res.json({ success: true, data: { autoDeductSince: since ? since.toISOString() : null } });
+  } catch (err) {
+    console.error('GET /products/stock-settings error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal memuat pengaturan stok' });
+  }
+});
+
+/**
+ * PUT /stock-settings
+ * Body: { autoDeduct: boolean }
+ *
+ * Admin only: switching on makes every paid order across every shop move
+ * stock, and it is only right after a stock opname.
+ */
+router.put('/stock-settings', requireRole('ADMIN'), async (req, res) => {
+  try {
+    if (typeof req.body?.autoDeduct !== 'boolean') {
+      return res.status(400).json({ success: false, error: 'autoDeduct harus true atau false' });
+    }
+    const since = await setAutoDeduct(req.body.autoDeduct);
+    console.log(`[masters] Stok otomatis ${since ? `ON since ${since.toISOString()}` : 'OFF'} by ${req.user?.email}`);
+    return res.json({ success: true, data: { autoDeductSince: since ? since.toISOString() : null } });
+  } catch (err) {
+    console.error('PUT /products/stock-settings error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal mengubah pengaturan stok' });
+  }
+});
+
+/**
+ * GET /masters/:id/movements
+ * Riwayat Stok for one master, newest first.
+ *
+ * Query: page, limit
+ */
+router.get('/masters/:id/movements', async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const where = { productId: req.params.id };
+
+    const [movements, total] = await Promise.all([
+      prisma.stockMovement.findMany({
+        where,
+        include: {
+          store: { select: { name: true } },
+          user: { select: { name: true, email: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.stockMovement.count({ where }),
+    ]);
+
+    return res.json({
+      success: true,
+      data: { movements, total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    });
+  } catch (err) {
+    console.error('GET /products/masters/:id/movements error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal memuat riwayat stok' });
+  }
+});
+
+/**
  * Push saved masters to Shopee, without letting a push failure undo the save.
  *
  * By the time this runs the new number is in the database. A crash here (the
@@ -852,17 +949,18 @@ router.post('/masters/stock', async (req, res) => {
 
       const found = await prisma.product.findMany({
         where: { id: { in: writes.map(w => w.id) } },
-        select: { id: true },
+        select: { id: true, stock: true },
       });
       if (found.length === 0) {
         return res.status(404).json({ success: false, error: 'Master produk tidak ditemukan' });
       }
-      const exists = new Set(found.map(m => m.id));
-      const valid = writes.filter(w => exists.has(w.id));
+      const current = new Map(found.map(m => [m.id, m.stock]));
+      const valid = writes.filter(w => current.has(w.id));
 
       await prisma.$transaction(
         valid.map(w => prisma.product.update({ where: { id: w.id }, data: { stock: w.stock } })),
       );
+      await recordManual(valid.map(w => ({ id: w.id, from: current.get(w.id), to: w.stock })), req.user?.id);
 
       console.log(`[masters] Stock set per master on ${valid.length} master(s)`);
       const push = await pushAfterSave(valid.map(w => w.id));
@@ -909,6 +1007,8 @@ router.post('/masters/stock', async (req, res) => {
     await prisma.$transaction(
       writes.map(w => prisma.product.update({ where: { id: w.id }, data: { stock: w.stock } })),
     );
+    const was = new Map(masters.map(m => [m.id, m.stock]));
+    await recordManual(writes.map(w => ({ id: w.id, from: was.get(w.id), to: w.stock })), req.user?.id);
 
     console.log(`[masters] Stock ${mode} ${amount} on ${masters.length} master(s), ${clamped} floored at 0`);
     const push = await pushAfterSave(masters.map(m => m.id));
