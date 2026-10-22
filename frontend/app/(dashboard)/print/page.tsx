@@ -13,6 +13,7 @@ import {
   Eye,
   Package,
 } from 'lucide-react'
+import HelpTip from '@/components/HelpTip'
 
 interface PrintOrder {
   id: string
@@ -177,25 +178,29 @@ function PrintPageContent() {
             <ArrowLeft className="w-4 h-4" />
             Kembali ke Pesanan
           </button>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100 flex items-center gap-2">
             {isReprint ? 'Cetak Ulang Resi' : 'Cetak Resi'}
+            <HelpTip term="print.page" />
           </h1>
           <p className="text-sm text-gray-500 dark:text-slate-400 mt-0.5">
             {filteredOrders.length} pesanan siap dicetak
           </p>
         </div>
-        <button
-          onClick={handlePrintAll}
-          disabled={printing || filteredOrders.length === 0}
-          className="btn-primary"
-        >
-          {printing ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <Printer className="w-4 h-4" />
-          )}
-          Cetak Semua ({filteredOrders.length})
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={handlePrintAll}
+            disabled={printing || filteredOrders.length === 0}
+            className="btn-primary"
+          >
+            {printing ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Printer className="w-4 h-4" />
+            )}
+            Cetak Semua ({filteredOrders.length})
+          </button>
+          <HelpTip term="print.all" />
+        </div>
       </div>
 
       {/* Error */}
@@ -249,6 +254,7 @@ function PrintPageContent() {
           <div className="flex items-center gap-3">
             <Filter className="w-4 h-4 text-gray-400 dark:text-slate-500" />
             <span className="text-sm text-gray-600 dark:text-slate-400">Filter Kurir:</span>
+            <HelpTip term="print.courierFilter" />
             <select
               value={courierFilter}
               onChange={(e) => setCourierFilter(e.target.value)}
@@ -293,13 +299,16 @@ function PrintPageContent() {
                     )}
                   </div>
                 </div>
-                <button
-                  onClick={() => handlePreview(order)}
-                  className="btn-ghost text-sm"
-                >
-                  <Eye className="w-4 h-4" />
-                  Preview
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => handlePreview(order)}
+                    className="btn-ghost text-sm"
+                  >
+                    <Eye className="w-4 h-4" />
+                    Preview
+                  </button>
+                  <HelpTip term="print.preview" />
+                </div>
               </div>
             ))}
           </div>

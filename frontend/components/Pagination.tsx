@@ -2,6 +2,7 @@
 
 import type { ReactNode } from 'react'
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react'
+import HelpTip from '@/components/HelpTip'
 
 export const PAGE_SIZE_OPTIONS = [20, 50, 100, 200, 500]
 
@@ -53,16 +54,19 @@ export default function Pagination({
               ? `0 ${unit}`
               : `Menampilkan ${from.toLocaleString('id-ID')}–${to.toLocaleString('id-ID')} dari ${total.toLocaleString('id-ID')} ${unit}`}
         </span>
-        <select
-          value={limit}
-          onChange={(e) => onLimitChange(Number(e.target.value))}
-          className="input py-1 text-sm w-auto min-w-[110px] shrink-0"
-          aria-label="Jumlah per halaman"
-        >
-          {PAGE_SIZE_OPTIONS.map((n) => (
-            <option key={n} value={n}>{n} / halaman</option>
-          ))}
-        </select>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <select
+            value={limit}
+            onChange={(e) => onLimitChange(Number(e.target.value))}
+            className="input py-1 text-sm w-auto min-w-[110px]"
+            aria-label="Jumlah per halaman"
+          >
+            {PAGE_SIZE_OPTIONS.map((n) => (
+              <option key={n} value={n}>{n} / halaman</option>
+            ))}
+          </select>
+          <HelpTip term="filter.perPage" />
+        </div>
       </div>
 
       {totalPages > 1 && (

@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import api from '@/lib/api'
 import Pagination from '@/components/Pagination'
+import HelpTip, { HelpTipFor, Labelled } from '@/components/HelpTip'
+import FilterField from '@/components/FilterField'
 import CopyProductModal, { type CopyResult } from '@/components/products/CopyProductModal'
 import DraftsTab from '@/components/products/DraftsTab'
 import {
@@ -528,7 +530,10 @@ export default function ProductsPage() {
     <div className="space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">Produk</h1>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100 flex items-center gap-2">
+            Produk
+            <HelpTip term="product.concepts" />
+          </h1>
           <p className="text-sm text-gray-500 dark:text-slate-400">
             Katalog dari semua toko yang tersambung
           </p>
@@ -552,22 +557,28 @@ export default function ProductsPage() {
             daily. Pulling the catalogue is for when the shop gains a product —
             rare, and many times the work. */}
         <div className="flex flex-wrap gap-2 self-start">
-          <button
-            onClick={handleSyncStock}
-            disabled={syncing || syncingStock}
-            className="btn-primary flex items-center gap-2"
-          >
-            {syncingStock ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-            <span>{storeId ? 'Sinkron Stok Toko Ini' : 'Sinkron Stok'}</span>
-          </button>
-          <button
-            onClick={handleSync}
-            disabled={syncing || syncingStock}
-            className="btn-secondary flex items-center gap-2"
-          >
-            {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Package className="w-4 h-4" />}
-            <span>{storeId ? 'Tarik Katalog Toko Ini' : 'Tarik Katalog'}</span>
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={handleSyncStock}
+              disabled={syncing || syncingStock}
+              className="btn-primary flex items-center gap-2"
+            >
+              {syncingStock ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+              <span>{storeId ? 'Sinkron Stok Toko Ini' : 'Sinkron Stok'}</span>
+            </button>
+            <HelpTip term="btn.syncStock" />
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={handleSync}
+              disabled={syncing || syncingStock}
+              className="btn-secondary flex items-center gap-2"
+            >
+              {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Package className="w-4 h-4" />}
+              <span>{storeId ? 'Tarik Katalog Toko Ini' : 'Tarik Katalog'}</span>
+            </button>
+            <HelpTip term="btn.pullCatalog" />
+          </div>
         </div>
       </div>
 
@@ -649,19 +660,27 @@ export default function ProductsPage() {
       {summary && summary.listings > 0 && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <div className="card p-4">
-            <p className="text-xs text-gray-500 dark:text-slate-400">Total Listing</p>
+            <div className="text-xs text-gray-500 dark:text-slate-400">
+              <Labelled term="product.total">Total Listing</Labelled>
+            </div>
             <p className="text-2xl font-bold text-gray-900 dark:text-slate-100">{summary.listings.toLocaleString('id-ID')}</p>
           </div>
           <div className="card p-4">
-            <p className="text-xs text-gray-500 dark:text-slate-400">Sudah Punya Master</p>
+            <div className="text-xs text-gray-500 dark:text-slate-400">
+              <Labelled term="product.mapped">Sudah Punya Master</Labelled>
+            </div>
             <p className="text-2xl font-bold text-gray-900 dark:text-slate-100">{summary.mapped.toLocaleString('id-ID')}</p>
           </div>
           <div className="card p-4">
-            <p className="text-xs text-gray-500 dark:text-slate-400">Belum Dipetakan</p>
+            <div className="text-xs text-gray-500 dark:text-slate-400">
+              <Labelled term="product.unmapped">Belum Dipetakan</Labelled>
+            </div>
             <p className="text-2xl font-bold text-amber-600 dark:text-amber-400">{summary.unmapped.toLocaleString('id-ID')}</p>
           </div>
           <div className="card p-4">
-            <p className="text-xs text-gray-500 dark:text-slate-400">Master Produk</p>
+            <div className="text-xs text-gray-500 dark:text-slate-400">
+              <Labelled term="product.masters">Master Produk</Labelled>
+            </div>
             <p className="text-2xl font-bold text-gray-900 dark:text-slate-100">{summary.masters.toLocaleString('id-ID')}</p>
           </div>
         </div>
@@ -676,8 +695,11 @@ export default function ProductsPage() {
               onChange={(e) => setSearchInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') setSearch(searchInput) }}
               placeholder="Cari nama produk atau SKU..."
-              className="input pl-9 w-full"
+              className="input pl-9 pr-9 w-full"
             />
+            <span className="absolute right-2.5 top-1/2 -translate-y-1/2 flex">
+              <HelpTip term="filter.productSearch" />
+            </span>
           </div>
           <button onClick={() => setSearch(searchInput)} className="btn-secondary flex items-center gap-2 px-3 sm:px-4" aria-label="Cari">
             <Search className="w-4 h-4" />
@@ -686,38 +708,46 @@ export default function ProductsPage() {
         </div>
 
         <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
-          <select value={storeId} onChange={(e) => setStoreId(e.target.value)} className="input col-span-2 sm:w-auto">
-            <option value="">Semua Toko</option>
-            {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          <FilterField label="Toko" term="filter.store" className="col-span-2 sm:col-span-1">
+            <select value={storeId} onChange={(e) => setStoreId(e.target.value)} className="input w-full">
+              <option value="">Semua Toko</option>
+              {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </FilterField>
           {tab === 'active' && <>
-          <select value={status} onChange={(e) => setStatus(e.target.value)} className="input sm:w-auto">
-            <option value="">Semua Status</option>
-            <option value="NORMAL">Aktif</option>
-            <option value="UNLIST">Diarsipkan</option>
-          </select>
-          <select value={mapped} onChange={(e) => setMapped(e.target.value)} className="input sm:w-auto">
-            <option value="">Semua Pemetaan</option>
-            <option value="no">Belum punya master</option>
-            <option value="yes">Sudah punya master</option>
-          </select>
+          <FilterField label="Status listing" term="filter.listingStatus">
+            <select value={status} onChange={(e) => setStatus(e.target.value)} className="input w-full">
+              <option value="">Semua Status</option>
+              <option value="NORMAL">Aktif</option>
+              <option value="UNLIST">Diarsipkan</option>
+            </select>
+          </FilterField>
+          <FilterField label="Pemetaan" term="filter.mapped">
+            <select value={mapped} onChange={(e) => setMapped(e.target.value)} className="input w-full">
+              <option value="">Semua Pemetaan</option>
+              <option value="no">Belum punya master</option>
+              <option value="yes">Sudah punya master</option>
+            </select>
+          </FilterField>
           </>}
         </div>
       </div>
 
       <div className="flex gap-1 border-b border-gray-200 dark:border-slate-700">
-        {([['active', 'Aktif'], ['drafts', `Draf${draftCount !== null ? ` (${draftCount})` : ''}`]] as const).map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => switchTab(key)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px ${
-              tab === key
-                ? 'border-primary-600 text-primary-700 dark:text-primary-300'
-                : 'border-transparent text-gray-500 dark:text-slate-400 hover:text-gray-700 dark:hover:text-slate-200'
-            }`}
-          >
-            {label}
-          </button>
+        {([['active', 'Aktif', 'tab.productsActive'], ['drafts', `Draf${draftCount !== null ? ` (${draftCount})` : ''}`, 'tab.productsDrafts']] as const).map(([key, label, term]) => (
+          <div key={key} className="flex items-center -mb-px">
+            <button
+              onClick={() => switchTab(key)}
+              className={`pl-4 pr-1.5 py-2 text-sm font-medium border-b-2 ${
+                tab === key
+                  ? 'border-primary-600 text-primary-700 dark:text-primary-300'
+                  : 'border-transparent text-gray-500 dark:text-slate-400 hover:text-gray-700 dark:hover:text-slate-200'
+              }`}
+            >
+              {label}
+            </button>
+            <HelpTip term={term} className="mr-2" />
+          </div>
         ))}
       </div>
 
@@ -730,27 +760,39 @@ export default function ProductsPage() {
           <span className="text-sm font-medium text-blue-900 dark:text-blue-200 mr-1">
             {selected.length} listing dipilih
           </span>
-          <button onClick={openCreateMaster} disabled={busy} className="btn-primary flex items-center gap-2">
-            <Package className="w-4 h-4" />
-            <span>Jadikan Master</span>
-          </button>
-          <button onClick={openMapExisting} disabled={busy} className="btn-secondary flex items-center gap-2">
-            <Link2 className="w-4 h-4" />
-            <span>Petakan ke Master</span>
-          </button>
-          <button onClick={handleUnmap} disabled={busy} className="btn-secondary flex items-center gap-2">
-            <Link2Off className="w-4 h-4" />
-            <span>Lepas Pemetaan</span>
-          </button>
-          <button
-            onClick={() => setCopyOpen(true)}
-            disabled={busy || !copyTarget}
-            title={copyTarget ? undefined : 'Salin Produk hanya untuk varian dari satu produk'}
-            className="btn-secondary flex items-center gap-2"
-          >
-            <Copy className="w-4 h-4" />
-            <span>Salin Produk</span>
-          </button>
+          <div className="flex items-center gap-1">
+            <button onClick={openCreateMaster} disabled={busy} className="btn-primary flex items-center gap-2">
+              <Package className="w-4 h-4" />
+              <span>Jadikan Master</span>
+            </button>
+            <HelpTip term="btn.makeMaster" />
+          </div>
+          <div className="flex items-center gap-1">
+            <button onClick={openMapExisting} disabled={busy} className="btn-secondary flex items-center gap-2">
+              <Link2 className="w-4 h-4" />
+              <span>Petakan ke Master</span>
+            </button>
+            <HelpTip term="btn.mapExisting" />
+          </div>
+          <div className="flex items-center gap-1">
+            <button onClick={handleUnmap} disabled={busy} className="btn-secondary flex items-center gap-2">
+              <Link2Off className="w-4 h-4" />
+              <span>Lepas Pemetaan</span>
+            </button>
+            <HelpTip term="btn.unmap" />
+          </div>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setCopyOpen(true)}
+              disabled={busy || !copyTarget}
+              title={copyTarget ? undefined : 'Salin Produk hanya untuk varian dari satu produk'}
+              className="btn-secondary flex items-center gap-2"
+            >
+              <Copy className="w-4 h-4" />
+              <span>Salin Produk</span>
+            </button>
+            <HelpTip term="btn.copyProduct" />
+          </div>
           <button onClick={() => setSelected([])} className="text-sm text-blue-800 dark:text-blue-300 underline ml-auto">
             Batal pilih
           </button>
@@ -768,10 +810,13 @@ export default function ProductsPage() {
           onPageChange={setPage}
           onLimitChange={(n) => { setLimit(n); setPage(1) }}
         >
-          <button onClick={handleAutomap} disabled={busy} className="btn-secondary flex items-center gap-2 text-sm">
-            <Wand2 className="w-4 h-4" />
-            <span>Petakan Otomatis dari SKU</span>
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button onClick={handleAutomap} disabled={busy} className="btn-secondary flex items-center gap-2 text-sm">
+              <Wand2 className="w-4 h-4" />
+              <span>Petakan Otomatis dari SKU</span>
+            </button>
+            <HelpTip term="btn.automap" />
+          </div>
         </Pagination>
         {/* Below `md`, one card per listing; the eight-column table only ever
             showed half its columns on a phone. */}
@@ -822,8 +867,11 @@ export default function ProductsPage() {
                       {l.sku && <> · <span className="font-mono">{l.sku}</span></>}
                     </p>
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-                      <span className={`px-1.5 py-0.5 rounded font-medium ${statusClass[l.status] || statusClass.UNLIST}`}>
-                        {statusLabels[l.status] || l.status}
+                      <span className="inline-flex items-center gap-1">
+                        <span className={`px-1.5 py-0.5 rounded font-medium ${statusClass[l.status] || statusClass.UNLIST}`}>
+                          {statusLabels[l.status] || l.status}
+                        </span>
+                        <HelpTipFor prefix="listingStatus" value={l.status} />
                       </span>
                       {l.product ? (
                         <span className="font-mono text-gray-600 dark:text-slate-300 truncate">→ {l.product.masterSku}</span>
@@ -860,13 +908,13 @@ export default function ProductsPage() {
                     className="rounded border-gray-300 dark:border-slate-600"
                   />
                 </th>
-                <th className="px-4 py-3">Produk</th>
-                <th className="px-4 py-3">Toko</th>
-                <th className="px-4 py-3">SKU</th>
-                <th className="px-4 py-3">Master</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3 text-right">Harga</th>
-                <th className="px-4 py-3 text-right">Stok</th>
+                <th className="px-4 py-3"><Labelled term="col.listing.product">Produk</Labelled></th>
+                <th className="px-4 py-3"><Labelled term="filter.store">Toko</Labelled></th>
+                <th className="px-4 py-3"><Labelled term="col.listing.sku">SKU</Labelled></th>
+                <th className="px-4 py-3"><Labelled term="col.listing.master">Master</Labelled></th>
+                <th className="px-4 py-3"><Labelled term="col.listing.status">Status</Labelled></th>
+                <th className="px-4 py-3 text-right"><Labelled term="col.listing.price">Harga</Labelled></th>
+                <th className="px-4 py-3 text-right"><Labelled term="col.listing.stock">Stok</Labelled></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200 dark:divide-slate-700">
@@ -911,9 +959,12 @@ export default function ProductsPage() {
                     )}
                   </td>
                   <td className="px-4 py-3">
-                    <span className={`px-2 py-1 rounded text-xs font-medium ${statusClass[l.status] || statusClass.UNLIST}`}>
-                      {statusLabels[l.status] || l.status}
-                    </span>
+                    <div className="flex items-center gap-1">
+                      <span className={`px-2 py-1 rounded text-xs font-medium ${statusClass[l.status] || statusClass.UNLIST}`}>
+                        {statusLabels[l.status] || l.status}
+                      </span>
+                      <HelpTipFor prefix="listingStatus" value={l.status} />
+                    </div>
                   </td>
                   <td className="px-4 py-3 text-right text-gray-700 dark:text-slate-200">{rupiah(l.price)}</td>
                   <td className="px-4 py-3 text-right">
@@ -989,9 +1040,10 @@ export default function ProductsPage() {
                       ? <img src={item.imageUrl} alt="" className="w-12 h-12 rounded object-cover shrink-0" />
                       : <div className="w-12 h-12 rounded bg-gray-100 dark:bg-slate-700 shrink-0" />}
                     <div className="flex-1 min-w-0">
-                      <label className="block text-xs font-medium text-gray-500 dark:text-slate-400 mb-1">
+                      <div className="mb-1 flex items-center gap-1 text-xs font-medium text-gray-500 dark:text-slate-400">
                         Nama Master Produk
-                      </label>
+                        <HelpTip term="masterForm.name" />
+                      </div>
                       <input
                         value={item.name}
                         onChange={(e) => updateDraftName(key, e.target.value)}
@@ -1023,9 +1075,9 @@ export default function ProductsPage() {
                       <thead className="text-left text-xs uppercase text-gray-500 dark:text-slate-400">
                         <tr>
                           <th className="py-2 pr-3">Varian</th>
-                          <th className="py-2 pr-3">SKU Produk</th>
-                          <th className="py-2 pr-3">Master SKU</th>
-                          <th className="py-2 text-right">Stok Awal</th>
+                          <th className="py-2 pr-3"><Labelled term="masterForm.sku">SKU Produk</Labelled></th>
+                          <th className="py-2 pr-3"><Labelled term="masterForm.sku">Master SKU</Labelled></th>
+                          <th className="py-2 text-right"><Labelled term="masterForm.stock">Stok Awal</Labelled></th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100 dark:divide-slate-700/60">

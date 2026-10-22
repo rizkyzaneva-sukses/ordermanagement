@@ -16,6 +16,7 @@ import {
   AlertTriangle,
   Unlink,
 } from 'lucide-react'
+import HelpTip, { HelpTipFor, Labelled } from '@/components/HelpTip'
 
 type StoreStatus = 'ACTIVE' | 'TOKEN_EXPIRED' | 'NEEDS_RECONNECT' | 'SYNC_PARTIAL' | 'SYNC_ERROR' | 'ERROR'
 
@@ -193,7 +194,10 @@ export default function StoresPage() {
                 S
               </div>
               <div>
-                <h3 className="font-bold text-gray-900 dark:text-slate-100 text-lg">Shopee Seller Center</h3>
+                <h3 className="font-bold text-gray-900 dark:text-slate-100 text-lg flex items-center gap-1.5">
+                  Shopee Seller Center
+                  <HelpTip term="store.connectShopee" />
+                </h3>
                 <p className="text-xs text-gray-500 dark:text-slate-400">Otorisasi langsung via Akun Shopee Seller</p>
               </div>
             </div>
@@ -228,7 +232,10 @@ export default function StoresPage() {
                 T
               </div>
               <div>
-                <h3 className="font-bold text-gray-900 dark:text-slate-100 text-lg">TikTok Shop Center</h3>
+                <h3 className="font-bold text-gray-900 dark:text-slate-100 text-lg flex items-center gap-1.5">
+                  TikTok Shop Center
+                  <HelpTip term="store.connectTiktok" />
+                </h3>
                 <p className="text-xs text-gray-500 dark:text-slate-400">Otorisasi langsung via Akun TikTok Seller</p>
               </div>
             </div>
@@ -275,7 +282,8 @@ export default function StoresPage() {
               <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
               <div className="space-y-1">
                 <p className="text-sm font-semibold text-amber-900 dark:text-amber-200">
-                  {authorized.linkedCount} dari {authorized.authorizedCount} toko Shopee yang mengotorisasi aplikasi ini sudah tersambung
+                  {authorized.linkedCount} dari {authorized.authorizedCount} toko Shopee yang mengotorisasi aplikasi ini sudah tersambung{' '}
+                  <HelpTip term="store.authCheck" />
                 </p>
                 <p className="text-xs text-amber-800 dark:text-amber-300">
                   Pesanan dari toko yang belum tersambung tidak pernah masuk ke OrderPro — dan tidak muncul sebagai kekurangan di layar mana pun.
@@ -373,12 +381,12 @@ export default function StoresPage() {
             <thead>
               <tr className="border-b border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800/80">
                 <th className="table-header">Nama Toko</th>
-                <th className="table-header">Platform</th>
-                <th className="table-header">Shop ID</th>
-                <th className="table-header">Status</th>
-                <th className="table-header">Jumlah Pesanan</th>
-                <th className="table-header">Sync Terakhir</th>
-                <th className="table-header text-right">Aksi</th>
+                <th className="table-header"><Labelled term="filter.platform">Platform</Labelled></th>
+                <th className="table-header"><Labelled term="store.shopId">Shop ID</Labelled></th>
+                <th className="table-header"><Labelled term="store.statusGroup">Status</Labelled></th>
+                <th className="table-header"><Labelled term="store.orderCount">Jumlah Pesanan</Labelled></th>
+                <th className="table-header"><Labelled term="store.lastSync">Sync Terakhir</Labelled></th>
+                <th className="table-header text-right"><Labelled term="store.actions">Aksi</Labelled></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-slate-700/60">
@@ -430,10 +438,13 @@ export default function StoresPage() {
                       </td>
                       <td className="table-cell font-mono text-xs text-gray-500 dark:text-slate-400">{store.shopId}</td>
                       <td className="table-cell">
-                        <span className={`badge ${statusInfo.class}`}>
-                          <StatusIcon className="w-3 h-3 mr-1" />
-                          {statusInfo.label}
-                        </span>
+                        <div className="flex items-center gap-1">
+                          <span className={`badge ${statusInfo.class}`}>
+                            <StatusIcon className="w-3 h-3 mr-1" />
+                            {statusInfo.label}
+                          </span>
+                          <HelpTipFor prefix="storeStatus" value={store.status} />
+                        </div>
                       </td>
                       <td className="table-cell font-medium text-gray-900 dark:text-slate-100">{store.orderCount}</td>
                       <td className="table-cell text-gray-500 dark:text-slate-400 text-xs">

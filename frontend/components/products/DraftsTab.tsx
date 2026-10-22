@@ -8,6 +8,7 @@ import {
   DraftSummary, ValidationError, STATUS_CLASS, STATUS_LABEL, apiError, rupiah,
 } from '@/lib/productDraft'
 import { AlertTriangle, ChevronDown, ChevronUp, Copy, FileWarning, Loader2, MoreVertical, Pencil, Send, Trash2, X } from 'lucide-react'
+import HelpTip, { HelpTipFor } from '@/components/HelpTip'
 
 interface Props {
   storeId: string
@@ -150,7 +151,7 @@ export default function DraftsTab({ storeId, search, onChanged }: Props) {
       )}
 
       <div className="flex flex-wrap items-center gap-2">
-        <select value={status} onChange={(e) => setStatus(e.target.value)} className="input w-auto">
+        <select value={status} onChange={(e) => setStatus(e.target.value)} className="input w-auto" aria-label="Status draf">
           <option value="OPEN">Belum terbit</option>
           <option value="DRAFT">Draf</option>
           <option value="PUBLISHING">Sedang Publish</option>
@@ -158,9 +159,14 @@ export default function DraftsTab({ storeId, search, onChanged }: Props) {
           <option value="PUBLISHED">Terbit</option>
           <option value="">Semua</option>
         </select>
+        <HelpTip term="draft.filterStatus" />
         <p className="text-xs text-gray-500 dark:text-slate-400">
           Filter toko di atas berlaku untuk <span className="font-medium">toko tujuan</span>.
         </p>
+        <span className="ml-auto inline-flex items-center gap-1 text-xs text-gray-500 dark:text-slate-400">
+          Arti isi daftar
+          <HelpTip term="draft.columns" />
+        </span>
       </div>
 
       <div className="card overflow-hidden">
@@ -208,9 +214,12 @@ export default function DraftsTab({ storeId, search, onChanged }: Props) {
                         <span className="sm:hidden text-gray-700 dark:text-slate-300">
                           {priceRange(d)} · stok {d.stockTotal.toLocaleString('id-ID')}
                         </span>
-                        <span className={`px-1.5 py-0.5 rounded font-medium ${STATUS_CLASS[d.status]}`}>
-                          {d.status === 'PUBLISHING' && <Loader2 className="w-3 h-3 inline animate-spin mr-1" />}
-                          {STATUS_LABEL[d.status]}
+                        <span className="inline-flex items-center gap-1">
+                          <span className={`px-1.5 py-0.5 rounded font-medium ${STATUS_CLASS[d.status]}`}>
+                            {d.status === 'PUBLISHING' && <Loader2 className="w-3 h-3 inline animate-spin mr-1" />}
+                            {STATUS_LABEL[d.status]}
+                          </span>
+                          <HelpTipFor prefix="draft" value={d.status} />
                         </span>
                       </div>
                     </div>

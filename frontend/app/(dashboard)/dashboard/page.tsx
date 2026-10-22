@@ -15,6 +15,9 @@ import {
   Info,
   Clock,
 } from 'lucide-react'
+import HelpTip, { Labelled } from '@/components/HelpTip'
+import FilterField from '@/components/FilterField'
+import type { GlossaryKey } from '@/lib/glossary'
 
 interface DashboardStats {
   toShip: number
@@ -48,14 +51,14 @@ const BASIS_OPTIONS: { key: StatsBasis; label: string; hint: string }[] = [
 ]
 
 /** Labels for the status breakdown, in the order an order moves through them. */
-const BUCKET_LABELS: { key: keyof Statistics['breakdown']; label: string }[] = [
-  { key: 'unpaid',         label: 'Belum Bayar' },
-  { key: 'toShip',         label: 'Siap Kirim' },
-  { key: 'awaitingPickup', label: 'Menunggu Pickup' },
-  { key: 'needsAttention', label: 'Perlu Tindakan' },
-  { key: 'shipped',        label: 'Dikirim' },
-  { key: 'completed',      label: 'Selesai' },
-  { key: 'cancelled',      label: 'Dibatalkan' },
+const BUCKET_LABELS: { key: keyof Statistics['breakdown']; label: string; term: GlossaryKey }[] = [
+  { key: 'unpaid',         label: 'Belum Bayar', term: 'status.UNPAID' },
+  { key: 'toShip',         label: 'Siap Kirim', term: 'status.READY_TO_SHIP' },
+  { key: 'awaitingPickup', label: 'Menunggu Pickup', term: 'dash.awaitingPickup' },
+  { key: 'needsAttention', label: 'Perlu Tindakan', term: 'dash.needsAttention' },
+  { key: 'shipped',        label: 'Dikirim', term: 'dash.shipped' },
+  { key: 'completed',      label: 'Selesai', term: 'status.COMPLETED' },
+  { key: 'cancelled',      label: 'Dibatalkan', term: 'status.CANCELLED' },
 ]
 
 interface Statistics {
@@ -115,6 +118,14 @@ function absoluteTime(iso: string): string {
 /** YYYY-MM-DD in local time — `toISOString` would shift a WIB date back a day. */
 const isoDate = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+
+/** The dashboard's four store states, in the glossary's words for the same thing. */
+const STORE_STATUS_TERM: Record<StoreInfo['status'], GlossaryKey> = {
+  ACTIVE: 'storeStatus.ACTIVE',
+  PARTIAL: 'storeStatus.SYNC_PARTIAL',
+  EXPIRED: 'storeStatus.NEEDS_RECONNECT',
+  ERROR: 'storeStatus.SYNC_ERROR',
+}
 
 const statusColors: Record<string, string> = {
   ACTIVE: 'bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-300',
@@ -273,6 +284,7 @@ export default function DashboardPage() {
   const summaryCards = [
     {
       label: 'Siap Kirim',
+      term: 'dash.toShip' as GlossaryKey,
       value: stats?.toShip ?? 0,
       icon: Package,
       color: 'text-amber-600 dark:text-amber-400',
@@ -280,6 +292,7 @@ export default function DashboardPage() {
     },
     {
       label: 'Menunggu Pickup',
+      term: 'dash.awaitingPickup' as GlossaryKey,
       value: stats?.awaitingPickup ?? 0,
       icon: PackageCheck,
       color: 'text-blue-600 dark:text-blue-400',
@@ -287,6 +300,7 @@ export default function DashboardPage() {
     },
     {
       label: 'Dikirim',
+      term: 'dash.shipped' as GlossaryKey,
       value: stats?.shipped ?? 0,
       icon: Truck,
       color: 'text-emerald-600 dark:text-emerald-400',
@@ -294,6 +308,7 @@ export default function DashboardPage() {
     },
     {
       label: 'Perlu Tindakan',
+      term: 'dash.needsAttention' as GlossaryKey,
       value: stats?.needsAttention ?? 0,
       icon: AlertTriangle,
       color: 'text-rose-600 dark:text-rose-400',
@@ -321,6 +336,7 @@ export default function DashboardPage() {
             ) : (
               <span>Belum pernah disinkronkan</span>
             )}
+            <HelpTip term="sync.lastSynced" />
           </p>
         </div>
         <button onClick={handleSync} disabled={syncing} className="btn-primary self-start sm:self-auto">
@@ -344,7 +360,9 @@ export default function DashboardPage() {
                   <Icon className={`w-5 h-5 sm:w-6 sm:h-6 ${card.color}`} />
                 </div>
                 <div>
-                  <p className="text-xs sm:text-sm text-gray-500 dark:text-slate-400">{card.label}</p>
+                  <div className="text-xs sm:text-sm text-gray-500 dark:text-slate-400">
+                    <Labelled term={card.term}>{card.label}</Labelled>
+                  </div>
                   <p className="text-xl sm:text-2xl font-bold text-gray-900 dark:text-slate-100">{card.value.toLocaleString()}</p>
                 </div>
               </div>
@@ -358,7 +376,10 @@ export default function DashboardPage() {
       <div className="card">
         <div className="px-4 sm:px-6 py-4 border-b border-gray-200 dark:border-slate-700 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">Statistik</h2>
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100 flex items-center gap-1.5">
+              Statistik
+              <HelpTip term="dash.cards" />
+            </h2>
             {/* Only when the store or platform filter narrows to a shop with
                 a different cut-off than the header already states — otherwise
                 this is the same sentence twice. */}
@@ -368,69 +389,79 @@ export default function DashboardPage() {
               </p>
             )}
           </div>
-          <div className="grid grid-cols-2 sm:flex sm:flex-wrap sm:items-center gap-2">
-            <input
-              type="date"
-              className="input sm:w-auto"
-              value={statsFrom}
-              max={statsTo || undefined}
-              onChange={(e) => setStatsFrom(e.target.value)}
-              aria-label="Tanggal mulai"
-            />
-            <span className="hidden sm:inline text-gray-400 dark:text-slate-500 text-sm">–</span>
-            <input
-              type="date"
-              className="input sm:w-auto"
-              value={statsTo}
-              min={statsFrom || undefined}
-              onChange={(e) => setStatsTo(e.target.value)}
-              aria-label="Tanggal akhir"
-            />
-            <input
-              type="time"
-              className="input sm:w-auto"
-              value={statsUntil}
-              onChange={(e) => setStatsUntil(e.target.value)}
-              aria-label="Sampai jam"
-              title="Batas jam pada tanggal akhir. Kosong berarti sampai akhir hari."
-            />
-            <select
-              className="input sm:w-auto"
-              value={statsBasis}
-              onChange={(e) => setStatsBasis(e.target.value as StatsBasis)}
-              aria-label="Status pesanan"
-              title={BASIS_OPTIONS.find((o) => o.key === statsBasis)?.hint}
-            >
-              {BASIS_OPTIONS.map((o) => (
-                <option key={o.key} value={o.key}>{o.label}</option>
-              ))}
-            </select>
-            <select
-              className="input sm:w-auto"
-              value={statsPlatform}
-              onChange={(e) => {
-                setStatsPlatform(e.target.value)
-                setStatsStoreId('') // the chosen store may belong to the other platform
-              }}
-              aria-label="Platform"
-            >
-              <option value="">Semua Platform</option>
-              <option value="SHOPEE">Shopee</option>
-              <option value="TIKTOK">TikTok</option>
-            </select>
-            <select
-              className="input sm:w-auto"
-              value={statsStoreId}
-              onChange={(e) => setStatsStoreId(e.target.value)}
-              aria-label="Toko"
-            >
-              <option value="">Semua Toko</option>
-              {stores
-                .filter((s) => !statsPlatform || s.platform === statsPlatform)
-                .map((s) => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
+          <div className="grid grid-cols-2 sm:flex sm:flex-wrap sm:items-end gap-x-2 gap-y-3">
+            <FilterField label="Dari tanggal" term="stats.dateRange">
+              <input
+                type="date"
+                className="input"
+                value={statsFrom}
+                max={statsTo || undefined}
+                onChange={(e) => setStatsFrom(e.target.value)}
+                aria-label="Tanggal mulai"
+              />
+            </FilterField>
+            <FilterField label="Sampai tanggal" term="stats.dateRange">
+              <input
+                type="date"
+                className="input"
+                value={statsTo}
+                min={statsFrom || undefined}
+                onChange={(e) => setStatsTo(e.target.value)}
+                aria-label="Tanggal akhir"
+              />
+            </FilterField>
+            <FilterField label="Sampai jam" term="stats.untilTime">
+              <input
+                type="time"
+                className="input"
+                value={statsUntil}
+                onChange={(e) => setStatsUntil(e.target.value)}
+                aria-label="Sampai jam"
+              />
+            </FilterField>
+            <FilterField label="Status pesanan" term="stats.basis">
+              <select
+                className="input"
+                value={statsBasis}
+                onChange={(e) => setStatsBasis(e.target.value as StatsBasis)}
+                aria-label="Status pesanan"
+                title={BASIS_OPTIONS.find((o) => o.key === statsBasis)?.hint}
+              >
+                {BASIS_OPTIONS.map((o) => (
+                  <option key={o.key} value={o.key}>{o.label}</option>
                 ))}
-            </select>
+              </select>
+            </FilterField>
+            <FilterField label="Platform" term="filter.platform">
+              <select
+                className="input"
+                value={statsPlatform}
+                onChange={(e) => {
+                  setStatsPlatform(e.target.value)
+                  setStatsStoreId('') // the chosen store may belong to the other platform
+                }}
+                aria-label="Platform"
+              >
+                <option value="">Semua Platform</option>
+                <option value="SHOPEE">Shopee</option>
+                <option value="TIKTOK">TikTok</option>
+              </select>
+            </FilterField>
+            <FilterField label="Toko" term="filter.store">
+              <select
+                className="input"
+                value={statsStoreId}
+                onChange={(e) => setStatsStoreId(e.target.value)}
+                aria-label="Toko"
+              >
+                <option value="">Semua Toko</option>
+                {stores
+                  .filter((s) => !statsPlatform || s.platform === statsPlatform)
+                  .map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+              </select>
+            </FilterField>
           </div>
         </div>
 
@@ -443,13 +474,15 @@ export default function DashboardPage() {
             <>
               <div className={`grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 ${statsLoading ? 'opacity-60' : ''}`}>
                 {[
-                  { label: 'Nilai Total Pesanan', value: statistics?.totalValue ?? 0 },
-                  { label: 'Nilai Pesanan Selesai', value: statistics?.completedValue ?? 0 },
-                  { label: 'Nilai Pesanan Dibatalkan', value: statistics?.cancelledValue ?? 0 },
-                  { label: 'Rata-rata per Pesanan', value: statistics?.averageOrderValue ?? 0 },
+                  { label: 'Nilai Total Pesanan', term: 'stats.totalValue' as GlossaryKey, value: statistics?.totalValue ?? 0 },
+                  { label: 'Nilai Pesanan Selesai', term: 'stats.completedValue' as GlossaryKey, value: statistics?.completedValue ?? 0 },
+                  { label: 'Nilai Pesanan Dibatalkan', term: 'stats.cancelledValue' as GlossaryKey, value: statistics?.cancelledValue ?? 0 },
+                  { label: 'Rata-rata per Pesanan', term: 'stats.averageValue' as GlossaryKey, value: statistics?.averageOrderValue ?? 0 },
                 ].map((card) => (
                   <div key={card.label} className="rounded-xl border border-gray-200 dark:border-slate-700 p-3 sm:p-4 min-w-0">
-                    <p className="text-xs text-gray-500 dark:text-slate-400">{card.label}</p>
+                    <div className="text-xs text-gray-500 dark:text-slate-400">
+                      <Labelled term={card.term}>{card.label}</Labelled>
+                    </div>
                     {/* Never wrapped: "Rp 18.450.00 / 0" over two lines reads as two numbers. */}
                     <p className="text-[15px] sm:text-xl font-bold text-gray-900 dark:text-slate-100 mt-1 whitespace-nowrap tabular-nums">
                       {rupiah(card.value)}
@@ -462,6 +495,7 @@ export default function DashboardPage() {
                 {[
                   {
                     label: 'Jumlah Pesanan',
+                    term: 'stats.orderCount' as GlossaryKey,
                     value: statistics?.orderCount ?? 0,
                     icon: ShoppingBag,
                     // The primary scale stops at 900 (tailwind.config.ts), so
@@ -471,6 +505,7 @@ export default function DashboardPage() {
                   },
                   {
                     label: 'Pesanan Siap Dikirim',
+                    term: 'stats.readyToShip' as GlossaryKey,
                     value: statistics?.readyToShipCount ?? 0,
                     icon: Package,
                     color: 'text-amber-600 dark:text-amber-400',
@@ -478,6 +513,7 @@ export default function DashboardPage() {
                   },
                   {
                     label: 'Pesanan Dikirim',
+                    term: 'stats.shipped' as GlossaryKey,
                     value: statistics?.shippedCount ?? 0,
                     icon: Truck,
                     color: 'text-emerald-600 dark:text-emerald-400',
@@ -485,6 +521,7 @@ export default function DashboardPage() {
                   },
                   {
                     label: 'Pesanan Dibatalkan',
+                    term: 'stats.cancelled' as GlossaryKey,
                     value: statistics?.cancelledCount ?? 0,
                     icon: Ban,
                     color: 'text-rose-600 dark:text-rose-400',
@@ -501,7 +538,9 @@ export default function DashboardPage() {
                         <p className="text-xl sm:text-2xl font-bold text-gray-900 dark:text-slate-100">
                           {card.value.toLocaleString('id-ID')}
                         </p>
-                        <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">{card.label}</p>
+                        <div className="mt-0.5 text-xs text-gray-500 dark:text-slate-400">
+                          <Labelled term={card.term}>{card.label}</Labelled>
+                        </div>
                       </div>
                       <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${card.iconBg}`}>
                         <Icon className={`w-4 h-4 ${card.color}`} />
@@ -521,18 +560,22 @@ export default function DashboardPage() {
                     Rincian {statistics.orderCount.toLocaleString('id-ID')} pesanan pada dasar{' '}
                     <span className="font-medium text-gray-700 dark:text-slate-200">
                       {BASIS_OPTIONS.find((o) => o.key === statistics.basis)?.label}
-                    </span>
+                    </span>{' '}
+                    <HelpTip term="stats.breakdown" />
                   </p>
                   {statistics.orderCount === 0 ? (
                     <p className="text-sm text-gray-500 dark:text-slate-400">Tidak ada pesanan di periode ini.</p>
                   ) : (
                     <div className="flex flex-wrap gap-x-5 gap-y-2">
                       {BUCKET_LABELS.filter((b) => statistics.breakdown[b.key] > 0).map((b) => (
-                        <span key={b.key} className="text-sm text-gray-700 dark:text-slate-300">
-                          {b.label}{' '}
-                          <span className="font-semibold text-gray-900 dark:text-slate-100">
-                            {statistics.breakdown[b.key].toLocaleString('id-ID')}
+                        <span key={b.key} className="inline-flex items-center gap-1 text-sm text-gray-700 dark:text-slate-300">
+                          <span>
+                            {b.label}{' '}
+                            <span className="font-semibold text-gray-900 dark:text-slate-100">
+                              {statistics.breakdown[b.key].toLocaleString('id-ID')}
+                            </span>
                           </span>
+                          <HelpTip term={b.term} />
                         </span>
                       ))}
                     </div>
@@ -570,7 +613,10 @@ export default function DashboardPage() {
       {/* Active Stores */}
       <div className="card">
         <div className="px-4 sm:px-6 py-4 border-b border-gray-200 dark:border-slate-700">
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">Toko Aktif</h2>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100 flex items-center gap-1.5">
+            Toko Aktif
+            <HelpTip term="dash.stores" />
+          </h2>
         </div>
         <div className="divide-y divide-gray-100 dark:divide-slate-700/60">
           {stores.length === 0 ? (
@@ -595,6 +641,7 @@ export default function DashboardPage() {
                       <span className={`badge ${statusColors[store.status]}`}>
                         {statusLabels[store.status] || store.status}
                       </span>
+                      <HelpTip term={STORE_STATUS_TERM[store.status]} />
                       {store.status === 'ACTIVE' && store.tokenExpiry && (
                         <span className="text-xs text-gray-400 dark:text-slate-500">
                           token s/d {new Date(store.tokenExpiry).toLocaleTimeString('id-ID', {

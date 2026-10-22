@@ -12,6 +12,8 @@ import {
 import {
   AlertTriangle, ArrowDown, ArrowLeft, ArrowUp, ChevronDown, ChevronRight, ImagePlus, Loader2, Plus, Star, Trash2, X,
 } from 'lucide-react'
+import HelpTip from '@/components/HelpTip'
+import type { GlossaryKey } from '@/lib/glossary'
 
 interface DraftMeta {
   id: string
@@ -302,21 +304,34 @@ function Notice({ tone, children }: { tone: 'red' | 'amber' | 'blue'; children: 
   )
 }
 
-function Section({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {
+function Section({ id, title, help, children }: { id: string; title: string; help?: GlossaryKey; children: React.ReactNode }) {
   return (
     <section id={id} className="card p-4 sm:p-5 space-y-4 scroll-mt-20">
-      <h2 className="text-base font-semibold text-gray-900 dark:text-slate-100">{title}</h2>
+      <h2 className="flex items-center gap-1.5 text-base font-semibold text-gray-900 dark:text-slate-100">
+        {title}
+        {help && <HelpTip term={help} />}
+      </h2>
       {children}
     </section>
   )
 }
 
-function Field({ label, required, hint, children }: { label: string; required?: boolean; hint?: React.ReactNode; children: React.ReactNode }) {
+function Field({ label, required, hint, help, children }: {
+  label: string
+  required?: boolean
+  hint?: React.ReactNode
+  /** Glossary entry for the "?" beside the label. */
+  help?: GlossaryKey
+  children: React.ReactNode
+}) {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-[10rem_1fr] gap-1 sm:gap-4">
-      <label className="text-sm text-gray-600 dark:text-slate-300 sm:pt-2">
-        {required && <span className="text-red-600 mr-0.5">*</span>}{label}
-      </label>
+      <div className="flex items-start gap-1 text-sm text-gray-600 dark:text-slate-300 sm:pt-2">
+        <label>
+          {required && <span className="text-red-600 mr-0.5">*</span>}{label}
+        </label>
+        {help && <HelpTip term={help} className="mt-0.5" />}
+      </div>
       <div className="min-w-0 space-y-1">
         {children}
         {hint && <p className="text-xs text-gray-500 dark:text-slate-400">{hint}</p>}
@@ -377,12 +392,13 @@ function BasicSection({ meta, payload, limits: L, plainOnly, mutate, uploadImage
 
   return (
     <Section id="section-dasar" title="Informasi Dasar">
-      <Field label="Toko">
+      <Field label="Toko" help="draftForm.store">
         <p className="input bg-gray-50 dark:bg-slate-800 cursor-default">{meta.targetStore.name}</p>
       </Field>
 
       <Field
         label="Nama Produk"
+        help="draftForm.name"
         required
         hint={sameName
           ? <span className="text-red-600 dark:text-red-400">Masih sama persis dengan produk asal — ubah sedikit, Shopee tidak menerima nama yang sama.</span>
@@ -398,7 +414,7 @@ function BasicSection({ meta, payload, limits: L, plainOnly, mutate, uploadImage
         </div>
       </Field>
 
-      <Field label="Deskripsi" required>
+      <Field label="Deskripsi" required help="draftForm.description">
         {payload.descriptionType === 'normal' ? (
           <>
             <textarea
@@ -480,7 +496,7 @@ function BasicSection({ meta, payload, limits: L, plainOnly, mutate, uploadImage
         )}
       </Field>
 
-      <Field label="Kategori" hint="Sama dengan produk asal. Ubah kategori belum tersedia.">
+      <Field label="Kategori" help="draftForm.category" hint="Sama dengan produk asal. Ubah kategori belum tersedia.">
         <p className="text-sm text-gray-900 dark:text-slate-100 sm:pt-2">ID kategori Shopee {payload.categoryId ?? '—'}</p>
       </Field>
     </Section>
@@ -535,8 +551,8 @@ function AttributeSection({ draftId, payload, options, mutate }: {
   const valuesOf = (def: AttributeDef) => payload.attributes.find((a) => a.attributeId === def.attributeId)?.values ?? []
 
   return (
-    <Section id="section-atribut" title="Atribut Produk">
-      <Field label="Merek" required={options.brandMandatory}>
+    <Section id="section-atribut" title="Atribut Produk" help="draftForm.attributes">
+      <Field label="Merek" required={options.brandMandatory} help="draftForm.brand">
         <div className="space-y-1">
           <p className="text-sm text-gray-900 dark:text-slate-100">
             {payload.brand.id > 0 ? payload.brand.name : 'Tanpa merek (NoBrand)'}
@@ -717,7 +733,7 @@ function MediaSection({ payload, limits: L, mutate, uploadImage }: {
         Urutan foto produk bisa diubah dengan drag and drop. Foto dari produk asal diunggah ulang ke toko tujuan saat Publish.
       </p>
 
-      <Field label="Foto Produk" required hint={`${images.length}/${L.imageMax} foto, minimal ${L.imageMin}`}>
+      <Field label="Foto Produk" required help="draftForm.photos" hint={`${images.length}/${L.imageMax} foto, minimal ${L.imageMin}`}>
         <div className="flex flex-wrap gap-3">
           {images.map((img, i) => (
             <div
@@ -760,7 +776,7 @@ function MediaSection({ payload, limits: L, mutate, uploadImage }: {
       </Field>
 
       {firstTier && (
-        <Field label="Foto Variasi" hint="Isi untuk semua pilihan, atau kosongkan semua.">
+        <Field label="Foto Variasi" help="draftForm.variantPhotos" hint="Isi untuk semua pilihan, atau kosongkan semua.">
           <div className="flex flex-wrap gap-3">
             {firstTier.options.map((opt, o) => (
               <div key={opt.key} className="w-24 space-y-1">
@@ -792,11 +808,11 @@ function MediaSection({ payload, limits: L, mutate, uploadImage }: {
         </Field>
       )}
 
-      <Field label="Video Produk" hint="Video belum ikut disalin. Tambahkan lewat Seller Centre setelah produk tayang.">
+      <Field label="Video Produk" help="draftForm.video" hint="Video belum ikut disalin. Tambahkan lewat Seller Centre setelah produk tayang.">
         <p className="text-sm text-gray-500 dark:text-slate-400 sm:pt-2">—</p>
       </Field>
 
-      <Field label="Bagan Ukuran" required={L.sizeChartMandatory}>
+      <Field label="Bagan Ukuran" required={L.sizeChartMandatory} help="draftForm.sizeChart">
         {payload.sizeChart?.kind === 'template' ? (
           <div className="space-y-2">
             <p className="text-sm text-amber-800 dark:text-amber-300">
@@ -899,19 +915,19 @@ function SalesSection({ payload, limits: L, mutate }: { payload: DraftPayload; l
 
   return (
     <Section id="section-penjualan" title="Informasi Penjualan">
-      <Field label="SKU Induk">
+      <Field label="SKU Induk" help="draftForm.parentSku">
         <input value={payload.itemSku} onChange={(e) => mutate((p) => { p.itemSku = e.target.value })} className="input" />
       </Field>
 
       {tiers.length === 0 ? (
         <>
-          <Field label="Harga" required>
+          <Field label="Harga" required help="draftForm.price">
             <input type="number" min={L.priceMin} value={payload.price ?? ''} onChange={(e) => mutate((p) => { p.price = num(e.target.value) })} className="input" />
           </Field>
-          <Field label="Stok" required>
+          <Field label="Stok" required help="draftForm.stock">
             <input type="number" min={0} value={payload.stock ?? ''} onChange={(e) => mutate((p) => { p.stock = num(e.target.value) })} className="input" />
           </Field>
-          <Field label="Variasi">
+          <Field label="Variasi" help="draftForm.variations">
             <button type="button" onClick={addTier} className="btn-secondary text-sm flex items-center gap-1"><Plus className="w-4 h-4" /> Aktifkan Variasi</button>
           </Field>
         </>
@@ -1064,14 +1080,14 @@ function ShippingSection({ meta, payload, channels, mutate }: {
 
   return (
     <Section id="section-pengiriman" title="Informasi Pengiriman">
-      <Field label="Berat (gram)" required>
+      <Field label="Berat (gram)" required help="draftForm.weight">
         <input type="number" min={1} value={payload.weightGram ?? ''} onChange={(e) => mutate((p) => { p.weightGram = num(e.target.value) })} className="input" />
       </Field>
-      <Field label="Ukuran Paket (cm)">
+      <Field label="Ukuran Paket (cm)" help="draftForm.dimensions">
         <DimensionInputs value={payload.dimension} onChange={(d) => mutate((p) => { p.dimension = d })} />
       </Field>
 
-      <Field label="Jasa Kirim" required>
+      <Field label="Jasa Kirim" required help="draftForm.logistics">
         {shopChannels === null ? (
           <div className="space-y-1">
             <p className="text-xs text-amber-800 dark:text-amber-300">Daftar jasa kirim toko ini tidak terbaca. Pilihan dari produk asal:</p>
@@ -1134,13 +1150,13 @@ function ShippingSection({ meta, payload, channels, mutate }: {
 function OtherSection({ payload, limits: L, mutate }: { payload: DraftPayload; limits: FormOptions['limits']; mutate: Mutate }) {
   return (
     <Section id="section-lainnya" title="Lainnya">
-      <Field label="Kondisi">
+      <Field label="Kondisi" help="draftForm.condition">
         <select value={payload.condition} onChange={(e) => mutate((p) => { p.condition = e.target.value === 'USED' ? 'USED' : 'NEW' })} className="input">
           <option value="NEW">Baru</option>
           <option value="USED">Bekas</option>
         </select>
       </Field>
-      <Field label="Pre-order" hint={payload.preOrder.enabled ? `Dikirim dalam ${L.daysToShipMin}–${L.daysToShipMax} hari` : undefined}>
+      <Field label="Pre-order" help="draftForm.preorder" hint={payload.preOrder.enabled ? `Dikirim dalam ${L.daysToShipMin}–${L.daysToShipMax} hari` : undefined}>
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-2 text-sm text-gray-800 dark:text-slate-200">
             <input

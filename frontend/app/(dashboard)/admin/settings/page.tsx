@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Info,
 } from 'lucide-react'
+import HelpTip from '@/components/HelpTip'
 
 type CheckStatus = 'ok' | 'warn' | 'fail'
 
@@ -166,7 +167,10 @@ export default function SettingsPage() {
       <div className="card p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
           <div>
-            <h2 className="font-semibold text-gray-900 dark:text-slate-100">Cek Sistem</h2>
+            <h2 className="font-semibold text-gray-900 dark:text-slate-100 flex items-center gap-1.5">
+              Cek Sistem
+              <HelpTip term="check.system" />
+            </h2>
             <p className="text-sm text-gray-500 dark:text-slate-400 mt-0.5">
               Memeriksa apakah aplikasi masih terhubung dengan semua yang dibutuhkannya
             </p>
@@ -205,8 +209,9 @@ export default function SettingsPage() {
         {run && (
           <>
             <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-lg bg-gray-50 dark:bg-slate-800/60 px-4 py-3 text-sm">
-              <span className="text-gray-600 dark:text-slate-300">
+              <span className="inline-flex items-center gap-1 text-gray-600 dark:text-slate-300">
                 <span className="font-semibold">{run.summary.total}</span> pemeriksaan
+                <HelpTip term="check.status" />
               </span>
               <span className="text-emerald-700 dark:text-emerald-400 font-medium">{run.summary.ok} sehat</span>
               {run.summary.warn > 0 && (
@@ -262,6 +267,7 @@ export default function SettingsPage() {
                           disabled={rowBusy === result.id || busy}
                           className="btn-ghost p-1.5 shrink-0 text-gray-500"
                           title="Jalankan ulang pemeriksaan ini saja"
+                          aria-label="Jalankan ulang pemeriksaan ini saja"
                         >
                           {rowBusy === result.id ? (
                             <Loader2 className="w-3.5 h-3.5 animate-spin" />

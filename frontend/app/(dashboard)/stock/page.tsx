@@ -5,6 +5,7 @@ import Link from 'next/link'
 import api from '@/lib/api'
 import { getMe } from '@/lib/auth'
 import Pagination from '@/components/Pagination'
+import HelpTip, { Labelled } from '@/components/HelpTip'
 import {
   Boxes,
   Search,
@@ -465,7 +466,10 @@ export default function StockPage() {
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">Daftar Stok</h1>
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100 flex items-center gap-2">
+          Daftar Stok
+          <HelpTip term="stock.master" />
+        </h1>
         <p className="text-sm text-gray-500 dark:text-slate-400">
           {autoSince
             ? 'Stok master produk. Berkurang sendiri saat pesanan dibayar dan kembali saat pesanan batal. '
@@ -483,7 +487,8 @@ export default function StockPage() {
               Kurangi stok otomatis dari pesanan:{' '}
               <span className={autoSince ? 'text-green-700 dark:text-green-400' : 'text-gray-600 dark:text-slate-300'}>
                 {autoSince ? `Menyala sejak ${timeFmt.format(new Date(autoSince))} WIB` : 'Mati'}
-              </span>
+              </span>{' '}
+              <HelpTip term="stock.auto" />
             </p>
             <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
               {autoSince
@@ -527,8 +532,11 @@ export default function StockPage() {
               onChange={(e) => setSearchInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') { setSearch(searchInput); setPage(1) } }}
               placeholder="Cari SKU atau nama master…"
-              className="input pl-9 w-full"
+              className="input pl-9 pr-9 w-full"
             />
+            <span className="absolute right-2.5 top-1/2 -translate-y-1/2 flex">
+              <HelpTip term="filter.masterSearch" />
+            </span>
           </div>
           <button
             onClick={() => { setSearch(searchInput); setPage(1) }}
@@ -546,19 +554,25 @@ export default function StockPage() {
           <span className="text-sm font-medium text-blue-900 dark:text-blue-200 mr-1">
             {selected.length} master dipilih
           </span>
-          <button onClick={openBulk} disabled={busy} className="btn-primary flex items-center gap-2">
-            <Boxes className="w-4 h-4" />
-            <span>Edit Stok Massal</span>
-          </button>
-          {isAdmin && (
-            <button
-              onClick={() => setDeleteOpen(true)}
-              disabled={busy}
-              className="btn-secondary flex items-center gap-2 text-red-600 dark:text-red-400 border-red-200 dark:border-red-900"
-            >
-              <Trash2 className="w-4 h-4" />
-              <span>Hapus Master</span>
+          <div className="flex items-center gap-1">
+            <button onClick={openBulk} disabled={busy} className="btn-primary flex items-center gap-2">
+              <Boxes className="w-4 h-4" />
+              <span>Edit Stok Massal</span>
             </button>
+            <HelpTip term="btn.bulkStock" />
+          </div>
+          {isAdmin && (
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setDeleteOpen(true)}
+                disabled={busy}
+                className="btn-secondary flex items-center gap-2 text-red-600 dark:text-red-400 border-red-200 dark:border-red-900"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Hapus Master</span>
+              </button>
+              <HelpTip term="btn.deleteMaster" />
+            </div>
           )}
           <button onClick={() => setSelected([])} className="text-sm text-blue-800 dark:text-blue-300 underline ml-auto">
             Batal pilih
@@ -593,15 +607,22 @@ export default function StockPage() {
             the column a phone user came here to read or change. */}
         <div className="md:hidden">
           {!loading && masters.length > 0 && (
-            <label className="flex items-center gap-2 px-3 py-2 border-b border-gray-200 dark:border-slate-700 text-xs text-gray-600 dark:text-slate-300 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={allOnPageSelected}
-                onChange={toggleAllOnPage}
-                className="w-4 h-4 rounded border-gray-300 dark:border-slate-600"
-              />
-              Pilih semua di halaman ini
-            </label>
+            <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-gray-200 dark:border-slate-700 text-xs text-gray-600 dark:text-slate-300">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={allOnPageSelected}
+                  onChange={toggleAllOnPage}
+                  className="w-4 h-4 rounded border-gray-300 dark:border-slate-600"
+                />
+                Pilih semua di halaman ini
+              </label>
+              {/* One legend for the cards below, not three tips on each of twenty. */}
+              <span className="inline-flex items-center gap-1 text-gray-500 dark:text-slate-400">
+                Arti angka
+                <HelpTip term="stock.cardLegend" />
+              </span>
+            </div>
           )}
           {loading ? (
             <p className="px-4 py-8 text-center text-sm text-gray-500 dark:text-slate-400">Memuat…</p>
@@ -647,7 +668,7 @@ export default function StockPage() {
                         ) : (
                           <p className="text-xl font-bold leading-none text-gray-900 dark:text-slate-100 tabular-nums">{m.stock}</p>
                         )}
-                        <p className="text-[10px] uppercase tracking-wide text-gray-400 dark:text-slate-500 mt-1">Stok</p>
+                        <p className="mt-1 text-[10px] uppercase tracking-wide text-gray-400 dark:text-slate-500">Stok</p>
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
@@ -694,12 +715,12 @@ export default function StockPage() {
                     className="rounded border-gray-300 dark:border-slate-600"
                   />
                 </th>
-                <th className="px-4 py-3">SKU Master</th>
-                <th className="px-4 py-3">Nama Produk</th>
-                <th className="px-4 py-3 text-right">Listing Terikat</th>
-                <th className="px-4 py-3 text-right">Stok</th>
-                <th className="px-4 py-3 text-right" title="Stok yang dipegang listing Shopee, per penyegaran atau pengiriman terakhir">Di Shopee</th>
-                <th className="px-4 py-3 w-24"></th>
+                <th className="px-4 py-3"><Labelled term="col.master.sku">SKU Master</Labelled></th>
+                <th className="px-4 py-3"><Labelled term="col.master.name">Nama Produk</Labelled></th>
+                <th className="px-4 py-3 text-right"><Labelled term="col.master.listings">Listing Terikat</Labelled></th>
+                <th className="px-4 py-3 text-right"><Labelled term="col.master.stock">Stok</Labelled></th>
+                <th className="px-4 py-3 text-right"><Labelled term="col.master.shopee">Di Shopee</Labelled></th>
+                <th className="px-4 py-3 w-24"><Labelled term="stock.actions">Aksi</Labelled></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200 dark:divide-slate-700">
@@ -861,7 +882,10 @@ export default function StockPage() {
           <div className="card w-full max-w-2xl p-5 flex flex-col gap-4 max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
-                <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">Riwayat Stok</h2>
+                <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100 flex items-center gap-1.5">
+                  Riwayat Stok
+                  <HelpTip term="stock.history" />
+                </h2>
                 <p className="text-sm text-gray-500 dark:text-slate-400 truncate" title={history.name}>
                   <span className="font-mono">{history.masterSku}</span> · stok sekarang {history.stock}
                 </p>
@@ -989,7 +1013,8 @@ export default function StockPage() {
               <div>
                 <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">Edit Stok Massal</h2>
                 <p className="text-sm text-gray-500 dark:text-slate-400">
-                  {selectedMasters.length} master. Isi &ldquo;Stok baru&rdquo; per SKU — yang dikosongkan tidak diubah.
+                  {selectedMasters.length} master. Isi &ldquo;Stok baru&rdquo; per SKU — yang dikosongkan tidak diubah.{' '}
+                  <HelpTip term="stock.bulkColumns" />
                 </p>
               </div>
               <button onClick={closeBulk} disabled={busy} className="text-gray-400 hover:text-gray-600">
@@ -999,7 +1024,10 @@ export default function StockPage() {
 
             {/* Only fills the fields below; nothing is saved until Simpan. */}
             <div className="rounded-lg border border-gray-200 dark:border-slate-700 p-3 space-y-2">
-              <p className="text-xs font-medium text-gray-500 dark:text-slate-400">Isi semua sekaligus</p>
+              <div className="flex items-center gap-1 text-xs font-medium text-gray-500 dark:text-slate-400">
+                Isi semua sekaligus
+                <HelpTip term="stock.bulkMode" />
+              </div>
               <div className="flex flex-wrap gap-2">
                 <div className="flex gap-1">
                   {(Object.keys(modeLabels) as BulkMode[]).map((mode) => (

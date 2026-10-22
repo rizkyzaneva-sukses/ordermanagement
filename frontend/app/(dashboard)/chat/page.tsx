@@ -6,6 +6,7 @@ import api from '@/lib/api'
 import {
   AlertTriangle, ArrowLeft, ImagePlus, Loader2, MessageCircle, Package, RefreshCw, Send, Truck,
 } from 'lucide-react'
+import HelpTip from '@/components/HelpTip'
 
 interface Conversation {
   id: string
@@ -406,16 +407,19 @@ export default function ChatPage() {
         {/* ── List ── */}
         <aside className={`${active ? 'hidden md:flex' : 'flex'} w-full md:w-80 shrink-0 flex-col border-r border-gray-200 dark:border-slate-700`}>
           <div className="p-3 space-y-2 border-b border-gray-200 dark:border-slate-700">
-            <select
-              value={storeFilter}
-              onChange={(e) => setStoreFilter(e.target.value)}
-              className="input w-full text-sm"
-              aria-label="Filter toko"
-            >
-              <option value="">Semua Toko</option>
-              {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
-            <div className="flex gap-1 text-sm">
+            <div className="flex items-center gap-1.5">
+              <select
+                value={storeFilter}
+                onChange={(e) => setStoreFilter(e.target.value)}
+                className="input flex-1 min-w-0 text-sm"
+                aria-label="Filter toko"
+              >
+                <option value="">Semua Toko</option>
+                {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+              <HelpTip term="filter.store" />
+            </div>
+            <div className="flex items-center gap-1 text-sm">
               {(['all', 'unread'] as const).map((t) => (
                 <button
                   key={t}
@@ -429,6 +433,7 @@ export default function ChatPage() {
                   {t === 'all' ? 'Semua' : 'Belum dibaca'}
                 </button>
               ))}
+              <HelpTip term="chat.list" className="mx-1" />
             </div>
           </div>
 
@@ -569,8 +574,11 @@ export default function ChatPage() {
                       className="input w-full resize-none text-sm"
                       disabled={sending}
                     />
-                    <div className={`text-right text-[11px] ${textLength > MAX_TEXT ? 'text-red-700 dark:text-red-300 font-semibold' : 'text-gray-500 dark:text-slate-400'}`}>
-                      {textLength}/{MAX_TEXT}
+                    <div className="flex items-center justify-between">
+                      <HelpTip term="chat.reply" />
+                      <div className={`text-right text-[11px] ${textLength > MAX_TEXT ? 'text-red-700 dark:text-red-300 font-semibold' : 'text-gray-500 dark:text-slate-400'}`}>
+                        {textLength}/{MAX_TEXT}
+                      </div>
                     </div>
                   </div>
                   <button
@@ -592,6 +600,7 @@ export default function ChatPage() {
           <aside className="hidden xl:flex w-72 shrink-0 flex-col border-l border-gray-200 dark:border-slate-700">
             <div className="px-3 py-3 border-b border-gray-200 dark:border-slate-700 font-semibold text-sm text-gray-900 dark:text-slate-100 flex items-center gap-2">
               <Package className="w-4 h-4" /> Pesanan pembeli
+              <HelpTip term="chat.orders" />
             </div>
             <div className="flex-1 overflow-y-auto p-3 space-y-2">
               {ordersLoading ? (
@@ -646,10 +655,15 @@ function Bubble({ m }: { m: Message }) {
         {m.orderSn && !m.text && (
           <p className="mt-1 font-mono text-xs opacity-90">{m.orderSn}</p>
         )}
-        <div className={`mt-1 text-[10px] ${mine ? 'text-white/85' : 'text-gray-500 dark:text-slate-400'}`}>
+        <div className={`mt-1 flex flex-wrap items-center gap-x-1 text-[10px] ${mine ? 'text-white/85' : 'text-gray-500 dark:text-slate-400'}`}>
           {fullTime(m.createdAt)}
           {mine && m.sentBy ? ` · ${m.sentBy}` : ''}
-          {mine && !m.sentBy && m.source && m.source !== 'openapi' ? ' · dari Seller Centre' : ''}
+          {mine && !m.sentBy && m.source && m.source !== 'openapi' && (
+            <>
+              <span>· dari Seller Centre</span>
+              <HelpTip term="chat.fromSellerCentre" tone="inverse" />
+            </>
+          )}
         </div>
       </div>
     </div>

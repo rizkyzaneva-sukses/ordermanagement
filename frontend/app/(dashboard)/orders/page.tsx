@@ -4,6 +4,8 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import api from '@/lib/api'
 import OrderActions from '@/components/OrderActions'
+import HelpTip, { HelpTipFor, Labelled } from '@/components/HelpTip'
+import FilterField from '@/components/FilterField'
 import {
   RefreshCw,
   Search,
@@ -351,6 +353,7 @@ function PrintBadge({ order }: { order: Order }) {
   const official = Boolean(order.awbFetchedAt)
   const reprinted = times > 1
   return (
+    <span className="inline-flex items-center gap-1">
     <span
       title={[
         official ? 'Resi resmi Shopee' : 'Resi cadangan (buatan app)',
@@ -365,6 +368,8 @@ function PrintBadge({ order }: { order: Order }) {
       <Printer className="w-3 h-3" />
       {reprinted ? `Dicetak ${times}×` : 'Dicetak'}
       {!official && <span className="font-normal">· cadangan</span>}
+    </span>
+    <HelpTip term="print.badge" />
     </span>
   )
 }
@@ -1518,6 +1523,7 @@ export default function OrdersPage() {
                 Data terakhir disinkronkan <span className="font-medium">{relativeTime(lastSyncedAt)}</span>
                 <span className="text-gray-400 dark:text-slate-500"> · {absoluteTime(lastSyncedAt)}</span>
               </span>
+              <HelpTip term="sync.lastSynced" />
             </p>
           )}
 
@@ -1526,10 +1532,11 @@ export default function OrdersPage() {
               Seller Centre in another tab and counting by hand. This says
               whether the last run's own numbers agreed with Shopee's. */}
           {syncStatus?.check && syncStatus.check.checked > 0 && (
+            <div className="mt-1.5 flex items-center gap-1.5">
             <button
               type="button"
               onClick={() => setCheckOpen((v) => !v)}
-              className={`mt-1.5 inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+              className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
                 syncStatus.check.mismatched > 0
                   ? 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-950/60'
                   : 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-950/60'
@@ -1548,16 +1555,21 @@ export default function OrdersPage() {
               )}
               <ChevronDown className={`w-3.5 h-3.5 transition-transform ${checkOpen ? 'rotate-180' : ''}`} />
             </button>
+            <HelpTip term="check.shopee" />
+            </div>
           )}
         </div>
-        <button onClick={handleSync} disabled={syncBusy} className="btn-primary self-start sm:self-auto flex items-center gap-2">
-          {syncBusy ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <RefreshCw className="w-4 h-4" />
-          )}
-          <span>{syncBusy && !syncing ? 'Sync sedang berjalan' : 'Sync Pesanan'}</span>
-        </button>
+        <div className="flex items-center gap-2 self-start sm:self-auto">
+          <button onClick={handleSync} disabled={syncBusy} className="btn-primary flex items-center gap-2">
+            {syncBusy ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <RefreshCw className="w-4 h-4" />
+            )}
+            <span>{syncBusy && !syncing ? 'Sync sedang berjalan' : 'Sync Pesanan'}</span>
+          </button>
+          <HelpTip term="btn.syncOrders" />
+        </div>
       </div>
 
       {/* Standing sync health banner — visible without having to press Sync first */}
@@ -1763,6 +1775,7 @@ export default function OrdersPage() {
               )}
               {urgency.overdue > 0 && urgency.dueToday > 0 && ' · '}
               {urgency.dueToday > 0 && <span>{urgency.dueToday} jatuh tempo hari ini</span>}
+              {' '}<HelpTip term="urgency.banner" />
             </p>
           </div>
           {sort !== 'deadline' && (
@@ -1783,17 +1796,21 @@ export default function OrdersPage() {
             <Package className="w-4 h-4 mt-0.5 shrink-0" />
             <p>
               <span className="font-semibold">{awaitingTracking} pesanan belum punya nomor resi</span> — kurir belum
-              menerbitkannya. Pesanan tetap ditampilkan, tapi belum bisa dicentang untuk dicetak.
+              menerbitkannya. Pesanan tetap ditampilkan, tapi belum bisa dicentang untuk dicetak.{' '}
+              <HelpTip term="awaiting.tracking" />
             </p>
           </div>
-          <button
-            onClick={handleRefreshTrackingAll}
-            disabled={bulkBusy}
-            className="btn-secondary self-start sm:self-auto shrink-0 flex items-center gap-2"
-          >
-            {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-            Ambil semua nomor resi
-          </button>
+          <div className="flex items-center gap-1.5 self-start sm:self-auto shrink-0">
+            <button
+              onClick={handleRefreshTrackingAll}
+              disabled={bulkBusy}
+              className="btn-secondary flex items-center gap-2"
+            >
+              {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+              Ambil semua nomor resi
+            </button>
+            <HelpTip term="btn.refreshTrackingAll" />
+          </div>
         </div>
       )}
 
@@ -1804,26 +1821,35 @@ export default function OrdersPage() {
       <div className="card p-1">
         <div className="flex gap-1 overflow-x-auto">
           {ORDER_TABS.map((t) => (
-            <button
-              key={t.key}
-              onClick={() => handleTabChange(t.key)}
-              // Label over count on a phone, so all four tabs fit without a
-              // sideways scroll that hides "Dikirim" off the edge.
-              className={`flex-1 min-w-0 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-2 sm:py-2.5 px-1 sm:px-4 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
-                tab === t.key
-                  ? 'bg-primary-600 text-white shadow-sm dark:bg-primary-600'
-                  : 'text-gray-600 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-700/60'
-              }`}
-            >
-              {t.label}
-              <span className={`px-2 py-0.5 rounded-full text-[11px] sm:text-xs leading-none sm:leading-normal ${
-                tab === t.key
-                  ? 'bg-white/20 text-white'
-                  : 'bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-slate-300'
-              }`}>
-                {tabCounts[t.key]}
-              </span>
-            </button>
+            // The "?" is the button's sibling, not its child: a button cannot
+            // nest a button. It sits beside the count so the label stays whole.
+            <div key={t.key} className="relative flex flex-1 min-w-0">
+              <button
+                onClick={() => handleTabChange(t.key)}
+                // Label over count on a phone, so all four tabs fit without a
+                // sideways scroll that hides "Dikirim" off the edge.
+                className={`flex-1 min-w-0 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-2 sm:py-2.5 px-1 sm:px-4 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
+                  tab === t.key
+                    ? 'bg-primary-600 text-white shadow-sm dark:bg-primary-600'
+                    : 'text-gray-600 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-700/60'
+                }`}
+              >
+                {t.label}
+                <span className={`px-2 py-0.5 rounded-full text-[11px] sm:text-xs leading-none sm:leading-normal ${
+                  tab === t.key
+                    ? 'bg-white/20 text-white'
+                    : 'bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-slate-300'
+                }`}>
+                  {tabCounts[t.key]}
+                </span>
+              </button>
+              <HelpTipFor
+                prefix="tab"
+                value={t.key}
+                tone={tab === t.key ? 'inverse' : 'default'}
+                className="!absolute right-1.5 bottom-1.5 sm:bottom-auto sm:top-1/2 sm:-translate-y-1/2 sm:right-2"
+              />
+            </div>
           ))}
         </div>
       </div>
@@ -1832,7 +1858,7 @@ export default function OrdersPage() {
           shipment arranged, "Telah Diproses" already has one and is waiting to
           be printed. Two different jobs, two different buttons. */}
       {tab === 'toShip' && (
-        <div className="flex justify-between sm:justify-start gap-3 sm:gap-4 px-1 overflow-x-auto">
+        <div className="flex justify-between sm:justify-start gap-2 sm:gap-4 px-1 overflow-x-auto">
           {ORDER_SUB_TABS.map((st) => (
             <button
               key={st.key}
@@ -1846,6 +1872,7 @@ export default function OrdersPage() {
               {st.label} <span className="text-xs">({subTabCounts[st.key]})</span>
             </button>
           ))}
+          <HelpTip term="subtab.group" className="self-center mr-1.5" />
         </div>
       )}
 
@@ -1860,9 +1887,12 @@ export default function OrdersPage() {
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Cari order ID, nama buyer..."
-                className="input pl-10"
+                placeholder="Order ID / nama buyer"
+                className="input pl-10 pr-9"
               />
+              <span className="absolute right-2.5 top-1/2 -translate-y-1/2 flex">
+                <HelpTip term="filter.search" />
+              </span>
             </div>
             <button type="submit" className="btn-secondary px-3 sm:px-4" aria-label="Cari">
               <Search className="w-4 h-4" />
@@ -1893,88 +1923,105 @@ export default function OrdersPage() {
           </div>
 
           {/* Filter row */}
-          <div className={`${filtersOpen ? 'grid' : 'hidden'} sm:grid grid-cols-2 sm:grid-cols-3 lg:flex lg:flex-wrap gap-2.5`}>
-            <select value={platform} onChange={(e) => { setPlatform(e.target.value); setPage(1) }} className="input w-full lg:w-auto min-w-[130px]">
-              <option value="">Semua Platform</option>
-              <option value="SHOPEE">Shopee</option>
-              <option value="TIKTOK">TikTok</option>
-            </select>
+          <div className={`${filtersOpen ? 'grid' : 'hidden'} sm:grid grid-cols-2 sm:grid-cols-3 lg:flex lg:flex-wrap gap-x-2.5 gap-y-3`}>
+            <FilterField label="Platform" term="filter.platform" className="lg:min-w-[130px]">
+              <select value={platform} onChange={(e) => { setPlatform(e.target.value); setPage(1) }} className="input w-full">
+                <option value="">Semua Platform</option>
+                <option value="SHOPEE">Shopee</option>
+                <option value="TIKTOK">TikTok</option>
+              </select>
+            </FilterField>
 
-            <select value={storeId} onChange={(e) => { setStoreId(e.target.value); setPage(1) }} className="input w-full lg:w-auto min-w-[150px]">
-              <option value="">Semua Toko</option>
-              {stores.map((s) => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            </select>
+            <FilterField label="Toko" term="filter.store" className="lg:min-w-[150px]">
+              <select value={storeId} onChange={(e) => { setStoreId(e.target.value); setPage(1) }} className="input w-full">
+                <option value="">Semua Toko</option>
+                {stores.map((s) => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+            </FilterField>
 
             {/* Only the statuses the active tab covers. Offering one it does
                 not would hand the operator a choice that can only ever come
                 back empty. On "Semua" the full list is available, which is how
                 Dibatalkan and Selesai stay reachable while they have no tab. */}
-            <select
-              value={status}
-              onChange={(e) => { setStatus(e.target.value); setPage(1) }}
-              className="input w-full lg:w-auto min-w-[140px]"
-              aria-label="Status pesanan"
-            >
-              <option value="">Semua Status</option>
-              {(TAB_STATUSES[tab] ?? Object.keys(STATUS_LABELS)).map((st) => (
-                <option key={st} value={st}>{STATUS_LABELS[st] || st}</option>
-              ))}
-            </select>
+            <FilterField label="Status" term="filter.status" className="lg:min-w-[140px]">
+              <select
+                value={status}
+                onChange={(e) => { setStatus(e.target.value); setPage(1) }}
+                className="input w-full"
+                aria-label="Status pesanan"
+              >
+                <option value="">Semua Status</option>
+                {(TAB_STATUSES[tab] ?? Object.keys(STATUS_LABELS)).map((st) => (
+                  <option key={st} value={st}>{STATUS_LABELS[st] || st}</option>
+                ))}
+              </select>
+            </FilterField>
 
             {/* Demoted from the page's main tabs — see the comment there. */}
-            <select
-              value={printFilter}
-              onChange={(e) => handlePrintFilterChange(e.target.value as PrintFilter)}
-              className="input w-full lg:w-auto min-w-[150px]"
-              aria-label="Status cetak"
-            >
-              <option value="semua">Semua Status Cetak</option>
-              <option value="belum">Belum Dicetak ({counts.belumDicetak})</option>
-              <option value="sudah">Sudah Dicetak ({counts.sudahDicetak})</option>
-            </select>
+            <FilterField label="Status Cetak" term="filter.print" className="lg:min-w-[150px]">
+              <select
+                value={printFilter}
+                onChange={(e) => handlePrintFilterChange(e.target.value as PrintFilter)}
+                className="input w-full"
+                aria-label="Status cetak"
+              >
+                <option value="semua">Semua Status Cetak</option>
+                <option value="belum">Belum Dicetak ({counts.belumDicetak})</option>
+                <option value="sudah">Sudah Dicetak ({counts.sudahDicetak})</option>
+              </select>
+            </FilterField>
 
-            <select
-              value={sort}
-              onChange={(e) => { setSort(e.target.value as SortKey); setPage(1) }}
-              className="input w-full lg:w-auto min-w-[150px]"
-              aria-label="Urutkan"
-            >
-              {SORT_OPTIONS.map((o) => (
-                <option key={o.key} value={o.key}>Urutkan: {o.label}</option>
-              ))}
-            </select>
+            <FilterField label="Urutkan" term="filter.sort" className="lg:min-w-[150px]">
+              <select
+                value={sort}
+                onChange={(e) => { setSort(e.target.value as SortKey); setPage(1) }}
+                className="input w-full"
+                aria-label="Urutkan"
+              >
+                {SORT_OPTIONS.map((o) => (
+                  <option key={o.key} value={o.key}>Urutkan: {o.label}</option>
+                ))}
+              </select>
+            </FilterField>
 
-            <select
-              value={courier}
-              onChange={(e) => { setCourier(e.target.value); setPage(1) }}
-              className="input w-full lg:w-auto min-w-[150px]"
-            >
-              <option value="">Semua Kurir</option>
-              {/* Keep the active value selectable even when the current store
-                  filter no longer lists it — otherwise the box reads "Semua
-                  Kurir" while a courier filter is still narrowing the table. */}
-              {(couriers.includes(courier) || !courier ? couriers : [courier, ...couriers]).map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
+            <FilterField label="Kurir" term="filter.courier" className="lg:min-w-[150px]">
+              <select
+                value={courier}
+                onChange={(e) => { setCourier(e.target.value); setPage(1) }}
+                className="input w-full"
+                aria-label="Kurir"
+              >
+                <option value="">Semua Kurir</option>
+                {/* Keep the active value selectable even when the current store
+                    filter no longer lists it — otherwise the box reads "Semua
+                    Kurir" while a courier filter is still narrowing the table. */}
+                {(couriers.includes(courier) || !courier ? couriers : [courier, ...couriers]).map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </FilterField>
 
-            <input
-              type="date"
-              value={dateFrom}
-              onChange={(e) => { setDateFrom(e.target.value); setPage(1) }}
-              className="input w-full lg:w-auto"
-              placeholder="Dari"
-            />
+            <FilterField label="Dari tanggal" term="filter.dateFrom">
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => { setDateFrom(e.target.value); setPage(1) }}
+                className="input w-full"
+                placeholder="Dari"
+              />
+            </FilterField>
 
-            <input
-              type="date"
-              value={dateTo}
-              onChange={(e) => { setDateTo(e.target.value); setPage(1) }}
-              className="input w-full lg:w-auto"
-              placeholder="Sampai"
-            />
+            <FilterField label="Sampai tanggal" term="filter.dateTo">
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => { setDateTo(e.target.value); setPage(1) }}
+                className="input w-full"
+                placeholder="Sampai"
+              />
+            </FilterField>
           </div>
         </form>
       </div>
@@ -1993,565 +2040,745 @@ export default function OrdersPage() {
               <p className="text-xs sm:text-sm text-gray-500 dark:text-slate-400">
                 Menampilkan {(page - 1) * limit + 1}–{Math.min(page * limit, total)} dari {total} pesanan
               </p>
-              <select
-                value={limit}
-                onChange={(e) => { setLimit(Number(e.target.value)); setPage(1) }}
-                className="input py-1 text-sm w-auto min-w-[110px] shrink-0"
-                aria-label="Jumlah per halaman"
-              >
-                {[20, 50, 100, 200, 500].map((n) => (
-                  <option key={n} value={n}>{n} / halaman</option>
-                ))}
-              </select>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <select
+                  value={limit}
+                  onChange={(e) => { setLimit(Number(e.target.value)); setPage(1) }}
+                  className="input py-1 text-sm w-auto min-w-[110px]"
+                  aria-label="Jumlah per halaman"
+                >
+                  {[20, 50, 100, 200, 500].map((n) => (
+                    <option key={n} value={n}>{n} / halaman</option>
+                  ))}
+                </select>
+                <HelpTip term="filter.perPage" />
+              </div>
             </div>
             {totalPages > 1 && (
             <div className="flex items-center gap-1">
               <button
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page === 1}
-                className="btn-ghost p-2"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-              {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                const pageNum = Math.max(1, Math.min(page - 2, totalPages - 4)) + i
-                if (pageNum > totalPages) return null
-                return (
-                  <button
-                    key={pageNum}
-                    onClick={() => setPage(pageNum)}
-                    className={`w-9 h-9 rounded-lg text-sm font-medium transition-colors ${
-                      page === pageNum
-                        ? 'bg-primary-600 text-white'
-                        : 'text-gray-600 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-700'
-                    }`}
-                  >
-                    {pageNum}
-                  </button>
-                )
-              })}
-              <button
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={page === totalPages}
-                className="btn-ghost p-2"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-            )}
-          </div>
-        )}
-        {/* Below `lg`, one card per order. Eleven columns squeezed into a phone
-            width left the order ID and product names one letter per line. */}
-        <div className="lg:hidden">
-          {!loading && orders.length > 0 && (selectableUnprinted.length > 0 || selectablePrinted.length > 0) && (
-            <div className="flex items-center gap-4 px-3 py-2 border-b border-gray-200 dark:border-slate-700 text-xs text-gray-600 dark:text-slate-300">
-              <span className="text-gray-400 dark:text-slate-500">Pilih semua:</span>
-              <label className="flex items-center gap-1.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={allOf(selectableUnprinted)}
-                  onChange={() => toggleSelectGroup(selectableUnprinted)}
-                  disabled={selectableUnprinted.length === 0}
-                  className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:opacity-40"
-                />
-                Belum dicetak
-              </label>
-              <label className="flex items-center gap-1.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={allOf(selectablePrinted)}
-                  onChange={() => toggleSelectGroup(selectablePrinted)}
-                  disabled={selectablePrinted.length === 0}
-                  className="w-4 h-4 rounded border-gray-300 text-amber-500 focus:ring-amber-400 disabled:opacity-40"
-                />
-                Sudah dicetak
-              </label>
-            </div>
-          )}
-          {loading ? (
-            <div className="px-4 py-16 text-center">
-              <Loader2 className="w-8 h-8 animate-spin text-primary-600 mx-auto" />
-              <p className="text-sm text-gray-500 dark:text-slate-400 mt-2">Memuat pesanan...</p>
-            </div>
-          ) : orders.length === 0 ? (
-            <div className="px-4 py-16 text-center">
-              <Package className="w-12 h-12 text-gray-300 dark:text-slate-600 mx-auto mb-3" />
-              <p className="font-medium text-gray-900 dark:text-slate-200">Tidak ada pesanan</p>
-              <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">
-                {hasActiveFilters
-                  ? 'Coba ubah filter atau kata kunci pencarian'
-                  : 'Belum ada pesanan hari ini. Ubah rentang tanggal untuk melihat hari lain, atau klik "Sync" untuk mengambil pesanan terbaru'}
-              </p>
-            </div>
-          ) : (
-            <ul className="divide-y divide-gray-100 dark:divide-slate-700/60">
-              {orders.map((order) => {
-                const enabled = isCheckboxEnabled(order)
-                const deadline = shipDeadline(order.shipByDate)
-                return (
-                  <li
-                    key={order.id}
-                    className={`flex gap-3 px-3 py-3 transition-colors ${
-                      selected.has(order.id) ? 'bg-primary-50/70 dark:bg-primary-950/30' : ''
-                    }`}
-                  >
-                    {/* The whole strip is the tap target — a bare 16px box is
-                        too small to hit reliably with a thumb. */}
-                    <label
-                      className={`-my-3 -ml-3 pl-3 pr-1 py-3 flex items-start ${enabled ? 'cursor-pointer' : ''}`}
-                      title={enabled ? undefined : checkboxDisabledReason(order)}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={selected.has(order.id)}
-                        onChange={() => toggleSelect(order.id)}
-                        disabled={!enabled}
-                        className="mt-0.5 w-5 h-5 rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:opacity-30"
-                      />
-                    </label>
-
-                    <div className="min-w-0 flex-1 space-y-2">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="font-mono text-xs font-semibold text-gray-900 dark:text-slate-100 break-all">
-                            {order.orderId}
-                          </p>
-                          <p className="text-xs text-gray-500 dark:text-slate-400 truncate">
-                            {order.platform !== 'SHOPEE' && (
-                              <span className={`${platformBadgeClass[order.platform] || 'badge'} mr-1 !px-1.5 !py-0 text-[10px]`}>
-                                {order.platform}
-                              </span>
-                            )}
-                            {order.storeName} · {order.buyerName}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-1 shrink-0 -mt-1 -mr-1">
-                          <span className={`${statusBadgeClass[order.status] || 'badge'} whitespace-nowrap`}>
-                            {STATUS_LABELS[order.status] || order.status.replace(/_/g, ' ')}
-                          </span>
-                          <OrderActions order={order} onDone={() => fetchOrders({ background: true })} />
-                        </div>
-                      </div>
-
-                      {order.items.length > 0 && (
-                        <div className="space-y-0.5">
-                          {order.items.slice(0, 2).map((it, idx) => (
-                            <p key={idx} className="text-[13px] leading-snug text-gray-800 dark:text-slate-200 line-clamp-2">
-                              <span className="font-semibold text-gray-500 dark:text-slate-400">{it.quantity}×</span>{' '}
-                              {it.name}
-                              {it.variant && <span className="text-gray-500 dark:text-slate-400"> · {it.variant}</span>}
-                            </p>
-                          ))}
-                          {order.items.length > 2 && (
-                            <p className="text-xs text-gray-400 dark:text-slate-500">+{order.items.length - 2} produk lain</p>
-                          )}
-                        </div>
-                      )}
-
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-                        <span className="inline-flex items-center gap-1 text-gray-600 dark:text-slate-300">
-                          <Truck className="w-3.5 h-3.5 text-gray-400 dark:text-slate-500" />
-                          {order.courier}
-                        </span>
-                        {order.trackingNumber && (
-                          <span className="font-mono text-[11px] text-gray-500 dark:text-slate-400 break-all">{order.trackingNumber}</span>
-                        )}
-                        {deadline && (
-                          <span className={`inline-flex items-center gap-1 ${DEADLINE_TONES[deadline.tone]}`} title={deadline.title}>
-                            <Clock className="w-3.5 h-3.5" />
-                            {deadline.label}
-                          </span>
-                        )}
-                        {order.logisticsStatus && (
-                          <span className="text-gray-400 dark:text-slate-500">
-                            {logisticsLabel[order.logisticsStatus] || order.logisticsStatus}
-                          </span>
-                        )}
-                        {order.printed && <PrintBadge order={order} />}
-                      </div>
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-        </div>
-
-        <div className="hidden lg:block overflow-x-auto">
-          <table className="w-full table-fixed">
-            <colgroup>
-              <col className="w-[64px]" />
-              <col className="w-[12%]" />
-              <col className="w-[10%]" />
-              <col className="w-[7%]" />
-              <col className="w-[9%]" />
-              <col className="w-[22%]" />
-              <col className="w-[10%]" />
-              <col className="w-[9%]" />
-              <col className="w-[8%]" />
-              <col className="w-[8%]" />
-              <col className="w-[40px]" />
-            </colgroup>
-            <thead className="bg-gray-50 dark:bg-slate-800/80 border-b border-gray-200 dark:border-slate-700">
-              <tr>
-                <th className="table-header normal-case tracking-normal">
-                  <div className="flex flex-col gap-1 text-[10px] font-medium">
-                    <label
-                      className="flex items-center gap-1 cursor-pointer"
-                      title="Pilih semua pesanan yang belum dicetak di halaman ini"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={allOf(selectableUnprinted)}
-                        onChange={() => toggleSelectGroup(selectableUnprinted)}
-                        disabled={selectableUnprinted.length === 0}
-                        className="rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:opacity-40"
-                      />
-                      Belum
-                    </label>
-                    <label
-                      className="flex items-center gap-1 cursor-pointer"
-                      title="Pilih semua pesanan yang sudah dicetak di halaman ini (untuk cetak ulang)"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={allOf(selectablePrinted)}
-                        onChange={() => toggleSelectGroup(selectablePrinted)}
-                        disabled={selectablePrinted.length === 0}
-                        className="rounded border-gray-300 text-amber-500 focus:ring-amber-400 disabled:opacity-40"
-                      />
-                      Sudah
-                    </label>
-                  </div>
-                </th>
-                <th className="table-header">Order ID</th>
-                <th className="table-header">Toko</th>
-                <th className="table-header">Platform</th>
-                <th className="table-header">Pembeli</th>
-                <th className="table-header">Produk</th>
-                <th className="table-header">Kurir</th>
-                <th className="table-header">Status</th>
-                <th className="table-header">Batas Kirim</th>
-                <th className="table-header">Tanggal</th>
-                <th className="table-header">Aksi</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100 dark:divide-slate-700/60">
-              {loading ? (
-                <tr>
-                  <td colSpan={11} className="px-4 py-16 text-center">
-                    <Loader2 className="w-8 h-8 animate-spin text-primary-600 mx-auto" />
-                    <p className="text-sm text-gray-500 dark:text-slate-400 mt-2">Memuat pesanan...</p>
-                  </td>
-                </tr>
-              ) : orders.length === 0 ? (
-                <tr>
-                  <td colSpan={11} className="px-4 py-16 text-center">
-                    <Package className="w-12 h-12 text-gray-300 dark:text-slate-600 mx-auto mb-3" />
-                    <p className="font-medium text-gray-900 dark:text-slate-200">Tidak ada pesanan</p>
-                    <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">
-                      {hasActiveFilters
-                        ? 'Coba ubah filter atau kata kunci pencarian'
-                        : 'Belum ada pesanan hari ini. Ubah rentang tanggal untuk melihat hari lain, atau klik "Sync" untuk mengambil pesanan terbaru'}
-                    </p>
-                  </td>
-                </tr>
-              ) : (
-                orders.map((order) => {
-                  const enabled = isCheckboxEnabled(order)
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page === 1}
+                  className="btn-ghost p-2"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                  const pageNum = Math.max(1, Math.min(page - 2, totalPages - 4)) + i
+                  if (pageNum > totalPages) return null
                   return (
-                    <tr key={order.id} className="hover:bg-gray-50 dark:hover:bg-slate-700/40 transition-colors">
-                      {/* The title sits on the cell: a disabled input fires no
-                          mouse events in some browsers, so its own tooltip may
-                          never show. */}
-                      <td className="table-cell" title={enabled ? undefined : checkboxDisabledReason(order)}>
+                    <button
+                      key={pageNum}
+                      onClick={() => setPage(pageNum)}
+                      className={`w-9 h-9 rounded-lg text-sm font-medium transition-colors ${
+                        page === pageNum
+                          ? 'bg-primary-600 text-white'
+                          : 'text-gray-600 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-700'
+                      }`}
+                    >
+                      {pageNum}
+                    </button>
+                  )
+                })}
+                <button
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page === totalPages}
+                  className="btn-ghost p-2"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+              )}
+            </div>
+          )}
+          {/* Below `lg`, one card per order. Eleven columns squeezed into a phone
+              width left the order ID and product names one letter per line. */}
+          <div className="lg:hidden">
+            {!loading && orders.length > 0 && (selectableUnprinted.length > 0 || selectablePrinted.length > 0) && (
+              <div className="flex items-center gap-4 px-3 py-2 border-b border-gray-200 dark:border-slate-700 text-xs text-gray-600 dark:text-slate-300">
+                <span className="inline-flex items-center gap-1 text-gray-400 dark:text-slate-500">
+                  Pilih semua <HelpTip term="select.all" />
+                </span>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={allOf(selectableUnprinted)}
+                    onChange={() => toggleSelectGroup(selectableUnprinted)}
+                    disabled={selectableUnprinted.length === 0}
+                    className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:opacity-40"
+                  />
+                  Belum dicetak
+                </label>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={allOf(selectablePrinted)}
+                    onChange={() => toggleSelectGroup(selectablePrinted)}
+                    disabled={selectablePrinted.length === 0}
+                    className="w-4 h-4 rounded border-gray-300 text-amber-500 focus:ring-amber-400 disabled:opacity-40"
+                  />
+                  Sudah dicetak
+                </label>
+              </div>
+            )}
+            {loading ? (
+              <div className="px-4 py-16 text-center">
+                <Loader2 className="w-8 h-8 animate-spin text-primary-600 mx-auto" />
+                <p className="text-sm text-gray-500 dark:text-slate-400 mt-2">Memuat pesanan...</p>
+              </div>
+            ) : orders.length === 0 ? (
+              <div className="px-4 py-16 text-center">
+                <Package className="w-12 h-12 text-gray-300 dark:text-slate-600 mx-auto mb-3" />
+                <p className="font-medium text-gray-900 dark:text-slate-200">Tidak ada pesanan</p>
+                <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">
+                  {hasActiveFilters
+                    ? 'Coba ubah filter atau kata kunci pencarian'
+                    : 'Belum ada pesanan hari ini. Ubah rentang tanggal untuk melihat hari lain, atau klik "Sync" untuk mengambil pesanan terbaru'}
+                </p>
+              </div>
+            ) : (
+              <ul className="divide-y divide-gray-100 dark:divide-slate-700/60">
+                {orders.map((order) => {
+                  const enabled = isCheckboxEnabled(order)
+                  const deadline = shipDeadline(order.shipByDate)
+                  return (
+                    <li
+                      key={order.id}
+                      className={`flex gap-3 px-3 py-3 transition-colors ${
+                        selected.has(order.id) ? 'bg-primary-50/70 dark:bg-primary-950/30' : ''
+                      }`}
+                    >
+                      {/* The whole strip is the tap target — a bare 16px box is
+                          too small to hit reliably with a thumb. */}
+                      <label
+                        className={`-my-3 -ml-3 pl-3 pr-1 py-3 flex items-start ${enabled ? 'cursor-pointer' : ''}`}
+                        title={enabled ? undefined : checkboxDisabledReason(order)}
+                      >
                         <input
                           type="checkbox"
                           checked={selected.has(order.id)}
                           onChange={() => toggleSelect(order.id)}
                           disabled={!enabled}
-                          className="rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:opacity-40"
+                          className="mt-0.5 w-5 h-5 rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:opacity-30"
                         />
-                      </td>
-                      <td className="table-cell font-mono text-xs font-medium text-gray-900 dark:text-slate-100 break-all">
-                        {order.orderId}
-                        {order.packageNumber && (
-                          <p className="text-[10px] text-gray-400 dark:text-slate-500 break-all" title="Nomor paket">
-                            pkg {order.packageNumber}
-                          </p>
-                        )}
-                        {order.printed && (
-                          <div className="mt-1 font-sans">
-                            <PrintBadge order={order} />
+                      </label>
+
+                      <div className="min-w-0 flex-1 space-y-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="font-mono text-xs font-semibold text-gray-900 dark:text-slate-100 break-all">
+                              {order.orderId}
+                            </p>
+                            <p className="text-xs text-gray-500 dark:text-slate-400 truncate">
+                              {order.platform !== 'SHOPEE' && (
+                                <span className={`${platformBadgeClass[order.platform] || 'badge'} mr-1 !px-1.5 !py-0 text-[10px]`}>
+                                  {order.platform}
+                                </span>
+                              )}
+                              {order.storeName} · {order.buyerName}
+                            </p>
                           </div>
-                        )}
-                      </td>
-                      <td className="table-cell text-sm break-words">{order.storeName}</td>
-                      <td className="table-cell">
-                        <span className={platformBadgeClass[order.platform] || 'badge'}>
-                          {order.platform}
-                        </span>
-                      </td>
-                      <td className="table-cell text-sm break-words">{order.buyerName}</td>
-                      <td className="table-cell">
-                        {order.items.length === 0 ? (
-                          <span className="text-xs text-gray-400 dark:text-slate-500">—</span>
-                        ) : (
-                          <div
-                            className="space-y-0.5"
-                            title={order.items
-                              .map((it) => `${it.quantity}x ${it.name}${it.variant ? ` (${it.variant})` : ''}`)
-                              .join('\n')}
-                          >
+                          <div className="flex items-center gap-1 shrink-0 -mt-1 -mr-1">
+                            <span className={`${statusBadgeClass[order.status] || 'badge'} whitespace-nowrap`}>
+                              {STATUS_LABELS[order.status] || order.status.replace(/_/g, ' ')}
+                            </span>
+                            <HelpTipFor prefix="status" value={order.status} />
+                            <OrderActions order={order} onDone={() => fetchOrders({ background: true })} />
+                          </div>
+                        </div>
+
+                        {order.items.length > 0 && (
+                          <div className="space-y-0.5">
                             {order.items.slice(0, 2).map((it, idx) => (
-                              <p key={idx} className="text-xs text-gray-700 dark:text-slate-300 break-words">
-                                <span className="text-gray-400 dark:text-slate-500 font-mono text-[10px]">
-                                  {it.quantity}x
-                                </span>{' '}
+                              <p key={idx} className="text-[13px] leading-snug text-gray-800 dark:text-slate-200 line-clamp-2">
+                                <span className="font-semibold text-gray-500 dark:text-slate-400">{it.quantity}×</span>{' '}
                                 {it.name}
+                                {it.variant && <span className="text-gray-500 dark:text-slate-400"> · {it.variant}</span>}
                               </p>
                             ))}
                             {order.items.length > 2 && (
-                              <p className="text-xs text-gray-400 dark:text-slate-500">
-                                +{order.items.length - 2} produk lain
-                              </p>
+                              <p className="text-xs text-gray-400 dark:text-slate-500">+{order.items.length - 2} produk lain</p>
                             )}
                           </div>
                         )}
-                      </td>
-                      <td className="table-cell text-sm break-words">
-                        <div>
-                          <p>{order.courier}</p>
+
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                          <span className="inline-flex items-center gap-1 text-gray-600 dark:text-slate-300">
+                            <Truck className="w-3.5 h-3.5 text-gray-400 dark:text-slate-500" />
+                            {order.courier}
+                          </span>
                           {order.trackingNumber && (
-                            <p className="text-[10px] text-gray-400 dark:text-slate-500 font-mono break-all">{order.trackingNumber}</p>
+                            <span className="font-mono text-[11px] text-gray-500 dark:text-slate-400 break-all">{order.trackingNumber}</span>
                           )}
-                        </div>
-                      </td>
-                      <td className="table-cell">
-                        <span className={statusBadgeClass[order.status] || 'badge'}>
-                          {order.status.replace(/_/g, ' ')}
-                        </span>
-                        {order.logisticsStatus && (
-                          <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-1">
-                            {logisticsLabel[order.logisticsStatus] || order.logisticsStatus}
-                          </p>
-                        )}
-                      </td>
-                      {/* Blank rather than guessed when Shopee never sent a
-                          deadline — an invented "aman" would be read as one. */}
-                      <td className="table-cell text-xs whitespace-nowrap">
-                        {(() => {
-                          const deadline = shipDeadline(order.shipByDate)
-                          if (!deadline) return <span className="text-gray-300 dark:text-slate-600">—</span>
-                          return (
-                            <span className={DEADLINE_TONES[deadline.tone]} title={deadline.title}>
-                              {deadline.label}
+                          {deadline && (
+                            <span className="inline-flex items-center gap-1">
+                              <span className={`inline-flex items-center gap-1 ${DEADLINE_TONES[deadline.tone]}`} title={deadline.title}>
+                                <Clock className="w-3.5 h-3.5" />
+                                {deadline.label}
+                              </span>
+                              <HelpTip term="col.deadline" />
                             </span>
-                          )
-                        })()}
-                      </td>
-                      <td className="table-cell text-xs text-gray-500 dark:text-slate-400 whitespace-nowrap">
-                        {new Date(order.createdAt).toLocaleDateString('id-ID', {
-                          day: '2-digit',
-                          month: 'short',
-                          year: 'numeric',
-                        })}
-                      </td>
-                      <td className="table-cell">
-                        <OrderActions order={order} onDone={() => fetchOrders({ background: true })} />
-                      </td>
-                    </tr>
+                          )}
+                          {order.logisticsStatus && (
+                            <span className="inline-flex items-center gap-1 text-gray-400 dark:text-slate-500">
+                              {logisticsLabel[order.logisticsStatus] || order.logisticsStatus}
+                              <HelpTipFor prefix="logistics" value={order.logisticsStatus} />
+                            </span>
+                          )}
+                          {order.printed && <PrintBadge order={order} />}
+                        </div>
+                      </div>
+                    </li>
                   )
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+                })}
+              </ul>
+            )}
+          </div>
 
-      {/* Bulk action result — only when no selection bar is showing.
-          The bulk actions live in a bar fixed to the bottom of the viewport, but
-          this message renders in normal page flow below a long table. Pressing a
-          button there produced a result the operator never saw: it landed
-          off-screen, behind or above the bar. While a selection exists the
-          message is rendered inside that bar instead (see below), so it appears
-          where the click happened. */}
-      {bulkMessage && selected.size === 0 && (
-        <div
-          className={`rounded-lg border px-4 py-3 text-sm flex items-start justify-between gap-4 ${
-            bulkMessage.type === 'success'
-              ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800 text-green-700 dark:text-green-300'
-              : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300'
-          }`}
-        >
-          <span>{bulkMessage.text}</span>
-          <button onClick={() => setBulkMessage(null)} className="shrink-0">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-
-      {reprintConfirmOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => setReprintConfirmOpen(false)}
-        >
-          <div className="card w-full max-w-md p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-start justify-between gap-4">
-              <h3 className="font-semibold text-gray-900 dark:text-slate-100">Cetak ulang resi?</h3>
-              <button onClick={() => setReprintConfirmOpen(false)} className="btn-ghost p-1">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <p className="text-sm text-gray-700 dark:text-slate-300">
-              <span className="font-semibold">{awbReprints.length}</span> dari {awbSelected.length} pesanan
-              ini <span className="font-semibold">sudah pernah dicetak</span>. Nomor resinya tetap sama.
-            </p>
-            <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">
-              Buang label lama pesanan ini sebelum menempel yang baru. Dua label dengan resi yang sama
-              bisa tertempel di paket yang salah.
-            </div>
-            <div className="flex justify-end gap-2 pt-1">
-              <button onClick={() => setReprintConfirmOpen(false)} className="btn-secondary">Batal</button>
-              <button onClick={handleDownloadAwb} className="btn bg-shopee text-white hover:bg-orange-600">
-                <Printer className="w-4 h-4" />
-                Ya, cetak {awbSelected.length} resi
-              </button>
-            </div>
+          <div className="hidden lg:block overflow-x-auto">
+            <table className="w-full table-fixed">
+              <colgroup>
+                <col className="w-[64px]" />
+                <col className="w-[12%]" />
+                <col className="w-[8%]" />
+                <col className="w-[8%]" />
+                <col className="w-[10%]" />
+                <col className="w-[16%]" />
+                <col className="w-[10%]" />
+                <col className="w-[17%]" />
+                <col className="w-[9%]" />
+                <col className="w-[8%]" />
+                <col className="w-[52px]" />
+              </colgroup>
+              <thead className="bg-gray-50 dark:bg-slate-800/80 border-b border-gray-200 dark:border-slate-700">
+                <tr>
+                  <th className="table-header normal-case tracking-normal">
+                    <div className="flex flex-col gap-1 text-[10px] font-medium">
+                      <label
+                        className="flex items-center gap-1 cursor-pointer"
+                        title="Pilih semua pesanan yang belum dicetak di halaman ini"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={allOf(selectableUnprinted)}
+                          onChange={() => toggleSelectGroup(selectableUnprinted)}
+                          disabled={selectableUnprinted.length === 0}
+                          className="rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:opacity-40"
+                        />
+                        Belum
+                      </label>
+                      <label
+                        className="flex items-center gap-1 cursor-pointer"
+                        title="Pilih semua pesanan yang sudah dicetak di halaman ini (untuk cetak ulang)"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={allOf(selectablePrinted)}
+                          onChange={() => toggleSelectGroup(selectablePrinted)}
+                          disabled={selectablePrinted.length === 0}
+                          className="rounded border-gray-300 text-amber-500 focus:ring-amber-400 disabled:opacity-40"
+                        />
+                        Sudah
+                      </label>
+                      <HelpTip term="select.all" />
+                    </div>
+                  </th>
+                  <th className="table-header"><Labelled term="col.orderId">Order ID</Labelled></th>
+                  <th className="table-header">Toko</th>
+                  <th className="table-header">Platform</th>
+                  <th className="table-header">Pembeli</th>
+                  <th className="table-header"><Labelled term="col.products">Produk</Labelled></th>
+                  <th className="table-header"><Labelled term="col.courier">Kurir</Labelled></th>
+                  <th className="table-header"><Labelled term="col.status">Status</Labelled></th>
+                  <th className="table-header"><Labelled term="col.deadline">Batas Kirim</Labelled></th>
+                  <th className="table-header">Tanggal</th>
+                  <th className="table-header"><Labelled term="col.actions">Aksi</Labelled></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-slate-700/60">
+                {loading ? (
+                  <tr>
+                    <td colSpan={11} className="px-4 py-16 text-center">
+                      <Loader2 className="w-8 h-8 animate-spin text-primary-600 mx-auto" />
+                      <p className="text-sm text-gray-500 dark:text-slate-400 mt-2">Memuat pesanan...</p>
+                    </td>
+                  </tr>
+                ) : orders.length === 0 ? (
+                  <tr>
+                    <td colSpan={11} className="px-4 py-16 text-center">
+                      <Package className="w-12 h-12 text-gray-300 dark:text-slate-600 mx-auto mb-3" />
+                      <p className="font-medium text-gray-900 dark:text-slate-200">Tidak ada pesanan</p>
+                      <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">
+                        {hasActiveFilters
+                          ? 'Coba ubah filter atau kata kunci pencarian'
+                          : 'Belum ada pesanan hari ini. Ubah rentang tanggal untuk melihat hari lain, atau klik "Sync" untuk mengambil pesanan terbaru'}
+                      </p>
+                    </td>
+                  </tr>
+                ) : (
+                  orders.map((order) => {
+                    const enabled = isCheckboxEnabled(order)
+                    return (
+                      <tr key={order.id} className="hover:bg-gray-50 dark:hover:bg-slate-700/40 transition-colors">
+                        {/* The title sits on the cell: a disabled input fires no
+                            mouse events in some browsers, so its own tooltip may
+                            never show. */}
+                        <td className="table-cell" title={enabled ? undefined : checkboxDisabledReason(order)}>
+                          <input
+                            type="checkbox"
+                            checked={selected.has(order.id)}
+                            onChange={() => toggleSelect(order.id)}
+                            disabled={!enabled}
+                            className="rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:opacity-40"
+                          />
+                        </td>
+                        <td className="table-cell font-mono text-xs font-medium text-gray-900 dark:text-slate-100 break-all">
+                          {order.orderId}
+                          {order.packageNumber && (
+                            <p className="text-[10px] text-gray-400 dark:text-slate-500 break-all" title="Nomor paket">
+                              pkg {order.packageNumber}
+                            </p>
+                          )}
+                          {order.printed && (
+                            <div className="mt-1 font-sans">
+                              <PrintBadge order={order} />
+                            </div>
+                          )}
+                        </td>
+                        <td className="table-cell text-sm break-words">{order.storeName}</td>
+                        <td className="table-cell">
+                          <span className={platformBadgeClass[order.platform] || 'badge'}>
+                            {order.platform}
+                          </span>
+                        </td>
+                        <td className="table-cell text-sm break-words">{order.buyerName}</td>
+                        <td className="table-cell">
+                          {order.items.length === 0 ? (
+                            <span className="text-xs text-gray-400 dark:text-slate-500">—</span>
+                          ) : (
+                            <div
+                              className="space-y-0.5"
+                              title={order.items
+                                .map((it) => `${it.quantity}x ${it.name}${it.variant ? ` (${it.variant})` : ''}`)
+                                .join('\n')}
+                            >
+                              {order.items.slice(0, 2).map((it, idx) => (
+                                <p key={idx} className="text-xs text-gray-700 dark:text-slate-300 break-words">
+                                  <span className="text-gray-400 dark:text-slate-500 font-mono text-[10px]">
+                                    {it.quantity}x
+                                  </span>{' '}
+                                  {it.name}
+                                </p>
+                              ))}
+                              {order.items.length > 2 && (
+                                <p className="text-xs text-gray-400 dark:text-slate-500">
+                                  +{order.items.length - 2} produk lain
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                        <td className="table-cell text-sm break-words">
+                          <div>
+                            <p>{order.courier}</p>
+                            {order.trackingNumber && (
+                              <p className="text-[10px] text-gray-400 dark:text-slate-500 font-mono break-all">{order.trackingNumber}</p>
+                            )}
+                          </div>
+                        </td>
+                        <td className="table-cell">
+                          <div className="flex flex-wrap items-center gap-1">
+                            <span className={`${statusBadgeClass[order.status] || 'badge'} whitespace-nowrap`}>
+                              {STATUS_LABELS[order.status] || order.status.replace(/_/g, ' ')}
+                            </span>
+                            <HelpTipFor prefix="status" value={order.status} />
+                          </div>
+                          {order.logisticsStatus && (
+                            <p className="text-[10px] text-gray-400 dark:text-slate-500 mt-1 flex flex-wrap items-center gap-1">
+                              {logisticsLabel[order.logisticsStatus] || order.logisticsStatus}
+                              <HelpTipFor prefix="logistics" value={order.logisticsStatus} />
+                            </p>
+                          )}
+                        </td>
+                        {/* Blank rather than guessed when Shopee never sent a
+                            deadline — an invented "aman" would be read as one. */}
+                        <td className="table-cell text-xs whitespace-nowrap">
+                          {(() => {
+                            const deadline = shipDeadline(order.shipByDate)
+                            if (!deadline) return <span className="text-gray-300 dark:text-slate-600">—</span>
+                            return (
+                              <span className={DEADLINE_TONES[deadline.tone]} title={deadline.title}>
+                                {deadline.label}
+                              </span>
+                            )
+                          })()}
+                        </td>
+                        <td className="table-cell text-xs text-gray-500 dark:text-slate-400 whitespace-nowrap">
+                          {new Date(order.createdAt).toLocaleDateString('id-ID', {
+                            day: '2-digit',
+                            month: 'short',
+                            year: 'numeric',
+                          })}
+                        </td>
+                        <td className="table-cell">
+                          <OrderActions order={order} onDone={() => fetchOrders({ background: true })} />
+                        </td>
+                      </tr>
+                    )
+                  })
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
-      )}
 
-      {/* Bulk ship dialog. Shopee will not accept a pickup without an address
-          and a time slot, and those are a shop-level setting — so the operator
-          chooses once here and the whole selection is shipped with it. */}
-      {massShipOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => { if (!bulkBusy) setMassShipOpen(false) }}
-        >
+        {/* Bulk action result — only when no selection bar is showing.
+            The bulk actions live in a bar fixed to the bottom of the viewport, but
+            this message renders in normal page flow below a long table. Pressing a
+            button there produced a result the operator never saw: it landed
+            off-screen, behind or above the bar. While a selection exists the
+            message is rendered inside that bar instead (see below), so it appears
+            where the click happened. */}
+        {bulkMessage && selected.size === 0 && (
           <div
-            className="card w-full max-w-2xl p-5 space-y-3 max-h-[85vh] overflow-y-auto"
-            onClick={(e) => e.stopPropagation()}
+            className={`rounded-lg border px-4 py-3 text-sm flex items-start justify-between gap-4 ${
+              bulkMessage.type === 'success'
+                ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800 text-green-700 dark:text-green-300'
+                : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300'
+            }`}
           >
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h3 className="font-semibold text-gray-900 dark:text-slate-100">Kirim Massal</h3>
-                <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
-                  {shippableSelected.length} pesanan
-                  {massShipOptions ? ` · ${massShipOptions.groups.length} kurir` : ''}
-                </p>
+            <span>{bulkMessage.text}</span>
+            <button onClick={() => setBulkMessage(null)} className="shrink-0">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
+        {reprintConfirmOpen && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            onClick={() => setReprintConfirmOpen(false)}
+          >
+            <div className="card w-full max-w-md p-5 space-y-3" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-start justify-between gap-4">
+                <h3 className="font-semibold text-gray-900 dark:text-slate-100">Cetak ulang resi?</h3>
+                <button onClick={() => setReprintConfirmOpen(false)} className="btn-ghost p-1">
+                  <X className="w-4 h-4" />
+                </button>
               </div>
-              <button onClick={() => setMassShipOpen(false)} disabled={bulkBusy} className="btn-ghost p-1">
-                <X className="w-4 h-4" />
-              </button>
+              <p className="text-sm text-gray-700 dark:text-slate-300">
+                <span className="font-semibold">{awbReprints.length}</span> dari {awbSelected.length} pesanan
+                ini <span className="font-semibold">sudah pernah dicetak</span>. Nomor resinya tetap sama.
+              </p>
+              <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">
+                Buang label lama pesanan ini sebelum menempel yang baru. Dua label dengan resi yang sama
+                bisa tertempel di paket yang salah.
+              </div>
+              <div className="flex justify-end gap-2 pt-1">
+                <button onClick={() => setReprintConfirmOpen(false)} className="btn-secondary">Batal</button>
+                <button onClick={handleDownloadAwb} className="btn bg-shopee text-white hover:bg-orange-600">
+                  <Printer className="w-4 h-4" />
+                  Ya, cetak {awbSelected.length} resi
+                </button>
+              </div>
             </div>
+          </div>
+        )}
 
-            {bulkMessage?.type === 'error' && (
-              <div className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 text-sm text-red-700 dark:text-red-300 break-words [overflow-wrap:anywhere]">
-                {bulkMessage.text}
+        {/* Bulk ship dialog. Shopee will not accept a pickup without an address
+            and a time slot, and those are a shop-level setting — so the operator
+            chooses once here and the whole selection is shipped with it. */}
+        {massShipOpen && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            onClick={() => { if (!bulkBusy) setMassShipOpen(false) }}
+          >
+            <div
+              className="card w-full max-w-2xl p-5 space-y-3 max-h-[85vh] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h3 className="font-semibold text-gray-900 dark:text-slate-100">Kirim Massal</h3>
+                  <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
+                    {shippableSelected.length} pesanan
+                    {massShipOptions ? ` · ${massShipOptions.groups.length} kurir` : ''}
+                  </p>
+                </div>
+                <button onClick={() => setMassShipOpen(false)} disabled={bulkBusy} className="btn-ghost p-1">
+                  <X className="w-4 h-4" />
+                </button>
               </div>
-            )}
 
-            {bulkBusy && !massShipOptions && (
-              <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-slate-400">
-                <Loader2 className="w-4 h-4 animate-spin" /> Menghubungi Shopee…
-              </div>
-            )}
+              {bulkMessage?.type === 'error' && (
+                <div className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 text-sm text-red-700 dark:text-red-300 break-words [overflow-wrap:anywhere]">
+                  {bulkMessage.text}
+                </div>
+              )}
 
-            {massShipOptions && (
-              <>
-                {/* One card per courier. KB Rule #2 still holds — exactly one
-                    mode per shipment — it is simply decided per courier now,
-                    because a pickup slot belongs to one courier's own schedule
-                    and a shared one is rejected for everybody else. */}
-                {shippableGroups.map((group) => {
-                  const choice = massChoices[group.key]
-                  if (!choice) return null
-                  const addresses = group.pickup?.address_list || []
-                  const address = addresses.find((a) => a.address_id === choice.addressId)
-                  const slots = address?.time_slot_list || []
-                  const canPickup = group.availableModes.includes('pickup')
-                  const canDropoff = group.availableModes.includes('dropoff')
+              {bulkBusy && !massShipOptions && (
+                <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-slate-400">
+                  <Loader2 className="w-4 h-4 animate-spin" /> Menghubungi Shopee…
+                </div>
+              )}
 
-                  return (
-                    <div key={group.key} className="rounded-lg border border-gray-200 dark:border-slate-700 p-3 space-y-2.5">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-medium text-gray-900 dark:text-slate-100">{group.courier}</p>
-                          <p className="text-xs text-gray-500 dark:text-slate-400">
-                            {group.storeName} · {keptIds(group.orderRowIds).length} pesanan
-                          </p>
-                        </div>
-                        <div className="flex items-start gap-2 shrink-0">
-                        {canPickup && canDropoff ? (
-                          <div className="flex gap-1 shrink-0">
-                            {([
-                              { key: 'pickup' as const, label: 'Dijemput' },
-                              { key: 'dropoff' as const, label: 'Ke counter' },
-                            ]).map((m) => (
-                              <button
-                                key={m.key}
-                                type="button"
-                                disabled={bulkBusy}
-                                onClick={() => setChoice(group.key, { mode: m.key })}
-                                className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-40 ${
-                                  choice.mode === m.key
-                                    ? 'border-primary-600 bg-primary-50 text-primary-700 dark:bg-primary-900/30 dark:text-primary-300'
-                                    : 'border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800'
-                                }`}
-                              >
-                                {m.label}
-                              </button>
-                            ))}
+              {massShipOptions && (
+                <>
+                  {/* One card per courier. KB Rule #2 still holds — exactly one
+                      mode per shipment — it is simply decided per courier now,
+                      because a pickup slot belongs to one courier's own schedule
+                      and a shared one is rejected for everybody else. */}
+                  {shippableGroups.map((group) => {
+                    const choice = massChoices[group.key]
+                    if (!choice) return null
+                    const addresses = group.pickup?.address_list || []
+                    const address = addresses.find((a) => a.address_id === choice.addressId)
+                    const slots = address?.time_slot_list || []
+                    const canPickup = group.availableModes.includes('pickup')
+                    const canDropoff = group.availableModes.includes('dropoff')
+
+                    return (
+                      <div key={group.key} className="rounded-lg border border-gray-200 dark:border-slate-700 p-3 space-y-2.5">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium text-gray-900 dark:text-slate-100">{group.courier}</p>
+                            <p className="text-xs text-gray-500 dark:text-slate-400">
+                              {group.storeName} · {keptIds(group.orderRowIds).length} pesanan
+                            </p>
                           </div>
-                        ) : (
-                          /* Only one mode on offer — say which, rather than
-                             showing a toggle that cannot move. */
-                          <span className="text-xs text-gray-500 dark:text-slate-400 shrink-0 pt-0.5">
-                            {canPickup ? 'Dijemput kurir' : 'Antar ke counter'}
-                          </span>
+                          <div className="flex items-start gap-2 shrink-0">
+                          {canPickup && canDropoff ? (
+                            <div className="flex gap-1 shrink-0">
+                              {([
+                                { key: 'pickup' as const, label: 'Dijemput' },
+                                { key: 'dropoff' as const, label: 'Ke counter' },
+                              ]).map((m) => (
+                                <button
+                                  key={m.key}
+                                  type="button"
+                                  disabled={bulkBusy}
+                                  onClick={() => setChoice(group.key, { mode: m.key })}
+                                  className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-40 ${
+                                    choice.mode === m.key
+                                      ? 'border-primary-600 bg-primary-50 text-primary-700 dark:bg-primary-900/30 dark:text-primary-300'
+                                      : 'border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800'
+                                  }`}
+                                >
+                                  {m.label}
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            /* Only one mode on offer — say which, rather than
+                               showing a toggle that cannot move. */
+                            <span className="text-xs text-gray-500 dark:text-slate-400 shrink-0 pt-0.5">
+                              {canPickup ? 'Dijemput kurir' : 'Antar ke counter'}
+                            </span>
+                          )}
+                            <button
+                              type="button"
+                              disabled={bulkBusy}
+                              onClick={() => excludeFromMass(group.orderRowIds)}
+                              className="p-1 text-red-500 hover:text-red-700 disabled:opacity-40"
+                              aria-label={`Keluarkan semua pesanan ${group.courier} dari proses ini`}
+                              title={`Keluarkan semua pesanan ${group.courier} dari proses ini`}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+
+                        <MassOrderList ids={keptIds(group.orderRowIds)} orderById={orderById} onRemove={excludeFromMass} disabled={bulkBusy} />
+
+                        {/* The rule is the operators' own — Shopee offers
+                            pickup for these couriers regardless — so it is stated
+                            rather than enforced, and only shouts when the choice
+                            actually contradicts it. */}
+                        {group.dropoffOnly && (
+                          <p className={`rounded-md border px-2.5 py-1.5 text-xs ${
+                            choice.mode === 'pickup'
+                              ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300'
+                              : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                          }`}>
+                            {choice.mode === 'pickup'
+                              ? `${group.courier} tidak menjemput paket — pilih "Ke counter", atau pengiriman ini akan menunggu kurir yang tidak datang.`
+                              : `${group.courier} tidak bisa dijemput, jadi paket diantar ke counter.`}
+                          </p>
                         )}
+
+                        {choice.mode === 'dropoff' && (group.infoNeeded?.dropoff?.length ?? 0) > 0 && (
+                          <p className="rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-2.5 py-1.5 text-xs text-amber-700 dark:text-amber-300">
+                            Channel ini meminta data tambahan untuk drop-off ({group.infoNeeded?.dropoff?.join(', ')}),
+                            yang belum bisa diisi dari sini. Pesanan yang ditolak akan dilaporkan satu per satu.
+                          </p>
+                        )}
+
+                        {choice.mode === 'pickup' && (
+                          <div className="grid sm:grid-cols-2 gap-2">
+                            <select
+                              className="input text-sm"
+                              aria-label={`Alamat penjemputan ${group.courier}`}
+                              value={choice.addressId ?? ''}
+                              disabled={bulkBusy}
+                              onChange={(e) => {
+                                const id = Number(e.target.value)
+                                const addr = addresses.find((a) => a.address_id === id)
+                                setChoice(group.key, {
+                                  addressId: id,
+                                  pickupTimeId: addr?.time_slot_list?.[0]?.pickup_time_id || '',
+                                })
+                              }}
+                            >
+                              {addresses.map((a) => (
+                                <option key={a.address_id} value={a.address_id}>
+                                  {[a.address, a.city, a.state].filter(Boolean).join(', ') || `Alamat #${a.address_id}`}
+                                </option>
+                              ))}
+                            </select>
+
+                            <select
+                              className="input text-sm"
+                              aria-label={`Slot waktu ${group.courier}`}
+                              value={choice.pickupTimeId}
+                              disabled={bulkBusy || slots.length === 0}
+                              onChange={(e) => setChoice(group.key, { pickupTimeId: e.target.value })}
+                            >
+                              {slots.length === 0 && <option value="">Tidak ada slot tersedia</option>}
+                              {slots.map((slot) => (
+                                <option key={slot.pickup_time_id} value={slot.pickup_time_id}>
+                                  {slot.time_text ||
+                                    (slot.date ? new Date(slot.date * 1000).toLocaleString('id-ID') : slot.pickup_time_id)}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+
+                  {/* A courier Shopee would not answer for is shown rather than
+                      dropped, so the operator knows those orders were left behind
+                      instead of working it out from the count afterwards. */}
+                  {blockedGroups.length > 0 && (
+                    <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 space-y-1">
+                      <p className="text-sm font-medium text-amber-800 dark:text-amber-300">Tidak bisa diatur dari sini</p>
+                      {blockedGroups.map((g) => (
+                        <p key={g.key} className="text-xs text-amber-700 dark:text-amber-300 break-words [overflow-wrap:anywhere]">
+                          {g.courier} · {g.orderRowIds.length} pesanan — {g.error}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+
+                  <ExcludedNote count={massExcluded.size} onRestore={() => setMassExcluded(new Set())} disabled={bulkBusy} />
+
+                  <p className="text-xs text-gray-500 dark:text-slate-400">
+                    Tiap kurir dikirim dengan jadwalnya sendiri, satu per satu ke Shopee. Nomor resi tidak
+                    ditunggu di sini — akan terisi pada sync berikutnya.
+                  </p>
+
+                  <div className="flex justify-end gap-2 pt-2">
+                    <button onClick={() => setMassShipOpen(false)} disabled={bulkBusy} className="btn-ghost">
+                      Batal
+                    </button>
+                    {/* Left enabled when a schedule is missing: handleMassShip
+                        names the courier that still needs one, which a dead
+                        button never could. */}
+                    <button
+                      onClick={handleMassShip}
+                      disabled={bulkBusy || shippableGroups.length === 0}
+                      className="btn-primary"
+                    >
+                      {bulkBusy && <Loader2 className="w-4 h-4 animate-spin" />}
+                      {bulkProgress
+                        ? `Mengirim ${bulkProgress.done}/${bulkProgress.total}…`
+                        : `Kirim ${groupedOrderCount} pesanan`}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Bulk pickup re-scheduling. Same per-courier shape as Kirim Massal and
+            for the same reason — a pickup slot id belongs to one courier's own
+            schedule — but with no mode to choose: a retry is always a pickup. */}
+        {massRetryOpen && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            onClick={() => { if (!bulkBusy) setMassRetryOpen(false) }}
+          >
+            <div
+              className="card w-full max-w-2xl p-5 space-y-3 max-h-[85vh] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h3 className="font-semibold text-gray-900 dark:text-slate-100">Jadwalkan Ulang Pickup</h3>
+                  <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
+                    {retrySelected.length} pesanan
+                    {massRetryOptions ? ` · ${massRetryOptions.groups.length} kurir` : ''}
+                  </p>
+                </div>
+                <button onClick={() => setMassRetryOpen(false)} disabled={bulkBusy} className="btn-ghost p-1">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {bulkMessage?.type === 'error' && (
+                <div className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 text-sm text-red-700 dark:text-red-300 break-words [overflow-wrap:anywhere]">
+                  {bulkMessage.text}
+                </div>
+              )}
+
+              {bulkBusy && !massRetryOptions && (
+                <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-slate-400">
+                  <Loader2 className="w-4 h-4 animate-spin" /> Menghubungi Shopee…
+                </div>
+              )}
+
+              {massRetryOptions && (
+                <>
+                  {retryGroups.map((group) => {
+                    const choice = retryChoices[group.key]
+                    if (!choice) return null
+                    const addresses = group.pickup?.address_list || []
+                    const address = addresses.find((a) => a.address_id === choice.addressId)
+                    const slots = address?.time_slot_list || []
+
+                    return (
+                      <div key={group.key} className="rounded-lg border border-gray-200 dark:border-slate-700 p-3 space-y-2.5">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium text-gray-900 dark:text-slate-100">{group.courier}</p>
+                            <p className="text-xs text-gray-500 dark:text-slate-400">
+                              {group.storeName} · {keptIds(group.orderRowIds).length} pesanan
+                            </p>
+                          </div>
                           <button
                             type="button"
                             disabled={bulkBusy}
                             onClick={() => excludeFromMass(group.orderRowIds)}
-                            className="p-1 text-red-500 hover:text-red-700 disabled:opacity-40"
+                            className="p-1 text-red-500 hover:text-red-700 disabled:opacity-40 shrink-0"
                             aria-label={`Keluarkan semua pesanan ${group.courier} dari proses ini`}
                             title={`Keluarkan semua pesanan ${group.courier} dari proses ini`}
                           >
                             <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
-                      </div>
 
-                      <MassOrderList ids={keptIds(group.orderRowIds)} orderById={orderById} onRemove={excludeFromMass} disabled={bulkBusy} />
+                        <MassOrderList ids={keptIds(group.orderRowIds)} orderById={orderById} onRemove={excludeFromMass} disabled={bulkBusy} />
 
-                      {/* The rule is the operators' own — Shopee offers
-                          pickup for these couriers regardless — so it is stated
-                          rather than enforced, and only shouts when the choice
-                          actually contradicts it. */}
-                      {group.dropoffOnly && (
-                        <p className={`rounded-md border px-2.5 py-1.5 text-xs ${
-                          choice.mode === 'pickup'
-                            ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300'
-                            : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
-                        }`}>
-                          {choice.mode === 'pickup'
-                            ? `${group.courier} tidak menjemput paket — pilih "Ke counter", atau pengiriman ini akan menunggu kurir yang tidak datang.`
-                            : `${group.courier} tidak bisa dijemput, jadi paket diantar ke counter.`}
-                        </p>
-                      )}
+                        {/* Worth saying here too: re-booking a collection from a
+                            courier that does not collect just fails again. */}
+                        {group.dropoffOnly && (
+                          <p className="rounded-md border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 px-2.5 py-1.5 text-xs text-red-700 dark:text-red-300">
+                            {group.courier} tidak menjemput paket — penjemputan ulang kemungkinan besar gagal lagi. Antar ke counter.
+                          </p>
+                        )}
 
-                      {choice.mode === 'dropoff' && (group.infoNeeded?.dropoff?.length ?? 0) > 0 && (
-                        <p className="rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-2.5 py-1.5 text-xs text-amber-700 dark:text-amber-300">
-                          Channel ini meminta data tambahan untuk drop-off ({group.infoNeeded?.dropoff?.join(', ')}),
-                          yang belum bisa diisi dari sini. Pesanan yang ditolak akan dilaporkan satu per satu.
-                        </p>
-                      )}
-
-                      {choice.mode === 'pickup' && (
                         <div className="grid sm:grid-cols-2 gap-2">
                           <select
                             className="input text-sm"
@@ -2561,7 +2788,7 @@ export default function OrdersPage() {
                             onChange={(e) => {
                               const id = Number(e.target.value)
                               const addr = addresses.find((a) => a.address_id === id)
-                              setChoice(group.key, {
+                              setRetryChoice(group.key, {
                                 addressId: id,
                                 pickupTimeId: addr?.time_slot_list?.[0]?.pickup_time_id || '',
                               })
@@ -2579,7 +2806,7 @@ export default function OrdersPage() {
                             aria-label={`Slot waktu ${group.courier}`}
                             value={choice.pickupTimeId}
                             disabled={bulkBusy || slots.length === 0}
-                            onChange={(e) => setChoice(group.key, { pickupTimeId: e.target.value })}
+                            onChange={(e) => setRetryChoice(group.key, { pickupTimeId: e.target.value })}
                           >
                             {slots.length === 0 && <option value="">Tidak ada slot tersedia</option>}
                             {slots.map((slot) => (
@@ -2590,313 +2817,166 @@ export default function OrdersPage() {
                             ))}
                           </select>
                         </div>
-                      )}
-                    </div>
-                  )
-                })}
-
-                {/* A courier Shopee would not answer for is shown rather than
-                    dropped, so the operator knows those orders were left behind
-                    instead of working it out from the count afterwards. */}
-                {blockedGroups.length > 0 && (
-                  <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 space-y-1">
-                    <p className="text-sm font-medium text-amber-800 dark:text-amber-300">Tidak bisa diatur dari sini</p>
-                    {blockedGroups.map((g) => (
-                      <p key={g.key} className="text-xs text-amber-700 dark:text-amber-300 break-words [overflow-wrap:anywhere]">
-                        {g.courier} · {g.orderRowIds.length} pesanan — {g.error}
-                      </p>
-                    ))}
-                  </div>
-                )}
-
-                <ExcludedNote count={massExcluded.size} onRestore={() => setMassExcluded(new Set())} disabled={bulkBusy} />
-
-                <p className="text-xs text-gray-500 dark:text-slate-400">
-                  Tiap kurir dikirim dengan jadwalnya sendiri, satu per satu ke Shopee. Nomor resi tidak
-                  ditunggu di sini — akan terisi pada sync berikutnya.
-                </p>
-
-                <div className="flex justify-end gap-2 pt-2">
-                  <button onClick={() => setMassShipOpen(false)} disabled={bulkBusy} className="btn-ghost">
-                    Batal
-                  </button>
-                  {/* Left enabled when a schedule is missing: handleMassShip
-                      names the courier that still needs one, which a dead
-                      button never could. */}
-                  <button
-                    onClick={handleMassShip}
-                    disabled={bulkBusy || shippableGroups.length === 0}
-                    className="btn-primary"
-                  >
-                    {bulkBusy && <Loader2 className="w-4 h-4 animate-spin" />}
-                    {bulkProgress
-                      ? `Mengirim ${bulkProgress.done}/${bulkProgress.total}…`
-                      : `Kirim ${groupedOrderCount} pesanan`}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Bulk pickup re-scheduling. Same per-courier shape as Kirim Massal and
-          for the same reason — a pickup slot id belongs to one courier's own
-          schedule — but with no mode to choose: a retry is always a pickup. */}
-      {massRetryOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => { if (!bulkBusy) setMassRetryOpen(false) }}
-        >
-          <div
-            className="card w-full max-w-2xl p-5 space-y-3 max-h-[85vh] overflow-y-auto"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h3 className="font-semibold text-gray-900 dark:text-slate-100">Jadwalkan Ulang Pickup</h3>
-                <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
-                  {retrySelected.length} pesanan
-                  {massRetryOptions ? ` · ${massRetryOptions.groups.length} kurir` : ''}
-                </p>
-              </div>
-              <button onClick={() => setMassRetryOpen(false)} disabled={bulkBusy} className="btn-ghost p-1">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {bulkMessage?.type === 'error' && (
-              <div className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 text-sm text-red-700 dark:text-red-300 break-words [overflow-wrap:anywhere]">
-                {bulkMessage.text}
-              </div>
-            )}
-
-            {bulkBusy && !massRetryOptions && (
-              <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-slate-400">
-                <Loader2 className="w-4 h-4 animate-spin" /> Menghubungi Shopee…
-              </div>
-            )}
-
-            {massRetryOptions && (
-              <>
-                {retryGroups.map((group) => {
-                  const choice = retryChoices[group.key]
-                  if (!choice) return null
-                  const addresses = group.pickup?.address_list || []
-                  const address = addresses.find((a) => a.address_id === choice.addressId)
-                  const slots = address?.time_slot_list || []
-
-                  return (
-                    <div key={group.key} className="rounded-lg border border-gray-200 dark:border-slate-700 p-3 space-y-2.5">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-medium text-gray-900 dark:text-slate-100">{group.courier}</p>
-                          <p className="text-xs text-gray-500 dark:text-slate-400">
-                            {group.storeName} · {keptIds(group.orderRowIds).length} pesanan
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          disabled={bulkBusy}
-                          onClick={() => excludeFromMass(group.orderRowIds)}
-                          className="p-1 text-red-500 hover:text-red-700 disabled:opacity-40 shrink-0"
-                          aria-label={`Keluarkan semua pesanan ${group.courier} dari proses ini`}
-                          title={`Keluarkan semua pesanan ${group.courier} dari proses ini`}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
                       </div>
+                    )
+                  })}
 
-                      <MassOrderList ids={keptIds(group.orderRowIds)} orderById={orderById} onRemove={excludeFromMass} disabled={bulkBusy} />
+                  <ExcludedNote count={massExcluded.size} onRestore={() => setMassExcluded(new Set())} disabled={bulkBusy} />
 
-                      {/* Worth saying here too: re-booking a collection from a
-                          courier that does not collect just fails again. */}
-                      {group.dropoffOnly && (
-                        <p className="rounded-md border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 px-2.5 py-1.5 text-xs text-red-700 dark:text-red-300">
-                          {group.courier} tidak menjemput paket — penjemputan ulang kemungkinan besar gagal lagi. Antar ke counter.
+                  {blockedRetryGroups.length > 0 && (
+                    <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 space-y-1">
+                      <p className="text-sm font-medium text-amber-800 dark:text-amber-300">Tidak bisa dijadwalkan dari sini</p>
+                      {blockedRetryGroups.map((g) => (
+                        <p key={g.key} className="text-xs text-amber-700 dark:text-amber-300 break-words [overflow-wrap:anywhere]">
+                          {g.courier} · {g.orderRowIds.length} pesanan — {g.error}
                         </p>
-                      )}
-
-                      <div className="grid sm:grid-cols-2 gap-2">
-                        <select
-                          className="input text-sm"
-                          aria-label={`Alamat penjemputan ${group.courier}`}
-                          value={choice.addressId ?? ''}
-                          disabled={bulkBusy}
-                          onChange={(e) => {
-                            const id = Number(e.target.value)
-                            const addr = addresses.find((a) => a.address_id === id)
-                            setRetryChoice(group.key, {
-                              addressId: id,
-                              pickupTimeId: addr?.time_slot_list?.[0]?.pickup_time_id || '',
-                            })
-                          }}
-                        >
-                          {addresses.map((a) => (
-                            <option key={a.address_id} value={a.address_id}>
-                              {[a.address, a.city, a.state].filter(Boolean).join(', ') || `Alamat #${a.address_id}`}
-                            </option>
-                          ))}
-                        </select>
-
-                        <select
-                          className="input text-sm"
-                          aria-label={`Slot waktu ${group.courier}`}
-                          value={choice.pickupTimeId}
-                          disabled={bulkBusy || slots.length === 0}
-                          onChange={(e) => setRetryChoice(group.key, { pickupTimeId: e.target.value })}
-                        >
-                          {slots.length === 0 && <option value="">Tidak ada slot tersedia</option>}
-                          {slots.map((slot) => (
-                            <option key={slot.pickup_time_id} value={slot.pickup_time_id}>
-                              {slot.time_text ||
-                                (slot.date ? new Date(slot.date * 1000).toLocaleString('id-ID') : slot.pickup_time_id)}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
+                      ))}
                     </div>
-                  )
-                })}
+                  )}
 
-                <ExcludedNote count={massExcluded.size} onRestore={() => setMassExcluded(new Set())} disabled={bulkBusy} />
+                  <div className="flex justify-end gap-2 pt-2">
+                    <button onClick={() => setMassRetryOpen(false)} disabled={bulkBusy} className="btn-ghost">
+                      Batal
+                    </button>
+                    <button
+                      onClick={handleMassRetry}
+                      disabled={bulkBusy || retryGroups.length === 0}
+                      className="btn-primary"
+                    >
+                      {bulkBusy && <Loader2 className="w-4 h-4 animate-spin" />}
+                      {bulkProgress
+                        ? `Menjadwalkan ${bulkProgress.done}/${bulkProgress.total}…`
+                        : `Jadwalkan ${retryGroups.reduce((n, g) => n + keptIds(g.orderRowIds).length, 0)} pesanan`}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
-                {blockedRetryGroups.length > 0 && (
-                  <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2 space-y-1">
-                    <p className="text-sm font-medium text-amber-800 dark:text-amber-300">Tidak bisa dijadwalkan dari sini</p>
-                    {blockedRetryGroups.map((g) => (
-                      <p key={g.key} className="text-xs text-amber-700 dark:text-amber-300 break-words [overflow-wrap:anywhere]">
-                        {g.courier} · {g.orderRowIds.length} pesanan — {g.error}
-                      </p>
-                    ))}
+        {/* Selection Bar */}
+        {selected.size > 0 && (
+          // The sidebar is only there from `lg`; a fixed `left-64` on a phone
+          // pushed the bar's buttons off the right edge of the screen.
+          <div className="fixed bottom-0 left-0 lg:left-64 right-0 bg-white dark:bg-slate-800 border-t border-gray-200 dark:border-slate-700 shadow-[0_-4px_12px_rgba(0,0,0,0.06)] px-3 sm:px-6 pt-3 sm:pt-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:pb-4 z-20 max-h-[60vh] overflow-y-auto">
+            {bulkMessage && (
+              <div
+                className={`rounded-lg border px-4 py-3 text-sm flex items-start justify-between gap-4 mb-3 ${
+                  bulkMessage.type === 'success'
+                    ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800 text-green-700 dark:text-green-300'
+                    : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300'
+                }`}
+              >
+                <span>{bulkMessage.text}</span>
+                <button onClick={() => setBulkMessage(null)} className="shrink-0">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+            <div className="flex items-center justify-between gap-2 sm:gap-4 flex-wrap">
+              <div className="text-sm text-gray-700 dark:text-slate-300">
+                <span className="font-semibold">{selected.size} pesanan</span> dipilih
+                {selectedPlatforms.size > 0 && (
+                  <span className="text-gray-500 dark:text-slate-400">
+                    {' '}({Array.from(selectedPlatforms).join(', ')})
+                  </span>
+                )}
+              </div>
+              {/* Tighter buttons on a phone so the usual pair — Sinkron and one
+                  action — share a row instead of stacking three deep. */}
+              <div className="flex items-center gap-2 sm:gap-3 flex-wrap max-sm:[&_button:not([data-helptip])]:px-3 max-sm:[&_button:not([data-helptip])]:py-2 max-sm:[&_button:not([data-helptip])]:text-xs">
+                {/* First in the row because it comes first in the work: sync the
+                    selection, then act on it. */}
+                {syncSelected.length > 0 && (
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={handleSyncSelected}
+                      disabled={bulkBusy}
+                      className="btn-secondary flex items-center gap-2"
+                    >
+                      {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                      Sinkron ({syncSelected.length})
+                    </button>
+                    <HelpTip term="btn.syncSelected" />
                   </div>
                 )}
-
-                <div className="flex justify-end gap-2 pt-2">
-                  <button onClick={() => setMassRetryOpen(false)} disabled={bulkBusy} className="btn-ghost">
-                    Batal
-                  </button>
-                  <button
-                    onClick={handleMassRetry}
-                    disabled={bulkBusy || retryGroups.length === 0}
-                    className="btn-primary"
-                  >
-                    {bulkBusy && <Loader2 className="w-4 h-4 animate-spin" />}
-                    {bulkProgress
-                      ? `Menjadwalkan ${bulkProgress.done}/${bulkProgress.total}…`
-                      : `Jadwalkan ${retryGroups.reduce((n, g) => n + keptIds(g.orderRowIds).length, 0)} pesanan`}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Selection Bar */}
-      {selected.size > 0 && (
-        // The sidebar is only there from `lg`; a fixed `left-64` on a phone
-        // pushed the bar's buttons off the right edge of the screen.
-        <div className="fixed bottom-0 left-0 lg:left-64 right-0 bg-white dark:bg-slate-800 border-t border-gray-200 dark:border-slate-700 shadow-[0_-4px_12px_rgba(0,0,0,0.06)] px-3 sm:px-6 pt-3 sm:pt-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:pb-4 z-20 max-h-[60vh] overflow-y-auto">
-          {bulkMessage && (
-            <div
-              className={`rounded-lg border px-4 py-3 text-sm flex items-start justify-between gap-4 mb-3 ${
-                bulkMessage.type === 'success'
-                  ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800 text-green-700 dark:text-green-300'
-                  : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-300'
-              }`}
-            >
-              <span>{bulkMessage.text}</span>
-              <button onClick={() => setBulkMessage(null)} className="shrink-0">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          )}
-          <div className="flex items-center justify-between gap-2 sm:gap-4 flex-wrap">
-            <div className="text-sm text-gray-700 dark:text-slate-300">
-              <span className="font-semibold">{selected.size} pesanan</span> dipilih
-              {selectedPlatforms.size > 0 && (
-                <span className="text-gray-500 dark:text-slate-400">
-                  {' '}({Array.from(selectedPlatforms).join(', ')})
-                </span>
-              )}
-            </div>
-            {/* Tighter buttons on a phone so the usual pair — Sinkron and one
-                action — share a row instead of stacking three deep. */}
-            <div className="flex items-center gap-2 sm:gap-3 flex-wrap max-sm:[&_button]:px-3 max-sm:[&_button]:py-2 max-sm:[&_button]:text-xs">
-              {/* First in the row because it comes first in the work: sync the
-                  selection, then act on it. */}
-              {syncSelected.length > 0 && (
-                <button
-                  onClick={handleSyncSelected}
-                  disabled={bulkBusy}
-                  className="btn-secondary flex items-center gap-2"
-                >
-                  {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                  Sinkron ({syncSelected.length})
+                {shippableSelected.length > 0 && (
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={openMassShip}
+                      disabled={bulkBusy}
+                      className="btn bg-shopee text-white hover:bg-orange-600"
+                    >
+                      {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Truck className="w-4 h-4" />}
+                      Kirim Massal ({shippableSelected.length})
+                    </button>
+                    <HelpTip term="btn.massShip" />
+                  </div>
+                )}
+                {/* Its own button because a retry is a different Shopee call:
+                    sending these through Kirim Massal only re-reads the tracking
+                    number and reports success without re-booking anything. */}
+                {retrySelected.length > 0 && (
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={openMassRetry}
+                      disabled={bulkBusy}
+                      className="btn bg-amber-600 text-white hover:bg-amber-700"
+                    >
+                      {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+                      Jadwalkan Ulang Pickup ({retrySelected.length})
+                    </button>
+                    <HelpTip term="btn.massRetry" />
+                  </div>
+                )}
+                {/* The courier scans Shopee's own label — sorting codes and all —
+                    so that is what the main button prints. The app-drawn receipt
+                    stays as a fallback for when Shopee will not issue one. */}
+                {awbSelected.length > 0 && (
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={handleDownloadAwb}
+                      disabled={bulkBusy || awbTooMany}
+                      title={
+                        awbTooMany
+                          ? `Maksimal ${AWB_MAX_PER_DOWNLOAD} paket sekali unduh`
+                          : 'Unduh resi resmi dari Shopee'
+                      }
+                      className="btn bg-shopee text-white hover:bg-orange-600"
+                    >
+                      {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Printer className="w-4 h-4" />}
+                      Cetak Resi Shopee ({awbSelected.length})
+                    </button>
+                    <HelpTip term="btn.printAwb" />
+                  </div>
+                )}
+                {shopeeCount > 0 && (
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => handlePrint('SHOPEE')}
+                      title="Resi yang digambar oleh app, bukan dari Shopee — pakai hanya kalau resi resmi gagal diunduh"
+                      className="btn-secondary"
+                    >
+                      <FileDown className="w-4 h-4" />
+                      Resi Cadangan ({shopeeCount})
+                    </button>
+                    <HelpTip term="btn.printFallback" />
+                  </div>
+                )}
+                {tiktokCount > 0 && (
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => handlePrint('TIKTOK')} className="btn bg-tiktok text-white hover:bg-gray-800">
+                      <Printer className="w-4 h-4" />
+                      Cetak Resi TikTok ({tiktokCount})
+                    </button>
+                    <HelpTip term="btn.printTiktok" />
+                  </div>
+                )}
+                <button onClick={() => setSelected(new Set())} className="btn-ghost text-gray-500 dark:text-slate-400">
+                  <X className="w-4 h-4" />
+                  Batal
                 </button>
-              )}
-              {shippableSelected.length > 0 && (
-                <button
-                  onClick={openMassShip}
-                  disabled={bulkBusy}
-                  className="btn bg-shopee text-white hover:bg-orange-600"
-                >
-                  {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Truck className="w-4 h-4" />}
-                  Kirim Massal ({shippableSelected.length})
-                </button>
-              )}
-              {/* Its own button because a retry is a different Shopee call:
-                  sending these through Kirim Massal only re-reads the tracking
-                  number and reports success without re-booking anything. */}
-              {retrySelected.length > 0 && (
-                <button
-                  onClick={openMassRetry}
-                  disabled={bulkBusy}
-                  className="btn bg-amber-600 text-white hover:bg-amber-700"
-                >
-                  {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
-                  Jadwalkan Ulang Pickup ({retrySelected.length})
-                </button>
-              )}
-              {/* The courier scans Shopee's own label — sorting codes and all —
-                  so that is what the main button prints. The app-drawn receipt
-                  stays as a fallback for when Shopee will not issue one. */}
-              {awbSelected.length > 0 && (
-                <button
-                  onClick={handleDownloadAwb}
-                  disabled={bulkBusy || awbTooMany}
-                  title={
-                    awbTooMany
-                      ? `Maksimal ${AWB_MAX_PER_DOWNLOAD} paket sekali unduh`
-                      : 'Unduh resi resmi dari Shopee'
-                  }
-                  className="btn bg-shopee text-white hover:bg-orange-600"
-                >
-                  {bulkBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Printer className="w-4 h-4" />}
-                  Cetak Resi Shopee ({awbSelected.length})
-                </button>
-              )}
-              {shopeeCount > 0 && (
-                <button
-                  onClick={() => handlePrint('SHOPEE')}
-                  title="Resi yang digambar oleh app, bukan dari Shopee — pakai hanya kalau resi resmi gagal diunduh"
-                  className="btn-secondary"
-                >
-                  <FileDown className="w-4 h-4" />
-                  Resi Cadangan ({shopeeCount})
-                </button>
-              )}
-              {tiktokCount > 0 && (
-                <button onClick={() => handlePrint('TIKTOK')} className="btn bg-tiktok text-white hover:bg-gray-800">
-                  <Printer className="w-4 h-4" />
-                  Cetak Resi TikTok ({tiktokCount})
-                </button>
-              )}
-              <button onClick={() => setSelected(new Set())} className="btn-ghost text-gray-500 dark:text-slate-400">
-                <X className="w-4 h-4" />
-                Batal
-              </button>
             </div>
           </div>
         </div>

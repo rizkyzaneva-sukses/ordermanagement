@@ -4,6 +4,8 @@ import { Fragment, useCallback, useEffect, useState } from 'react'
 import api from '@/lib/api'
 import Pagination from '@/components/Pagination'
 import { History, Search, ChevronDown, ChevronRight } from 'lucide-react'
+import HelpTip, { Labelled } from '@/components/HelpTip'
+import FilterField from '@/components/FilterField'
 
 interface LogRow {
   id: string
@@ -105,45 +107,61 @@ export default function ActivityPage() {
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">Log Aktivitas</h1>
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100 flex items-center gap-2">
+          Log Aktivitas
+          <HelpTip term="activity.log" />
+        </h1>
         <p className="text-sm text-gray-500 dark:text-slate-400">
           Siapa melakukan apa di OrderPro: login, atur pengiriman, cetak resi, ubah stok, hapus master, kelola user dan toko.
           {retentionDays ? ` Disimpan ${retentionDays} hari.` : ''}
         </p>
       </div>
 
-      <div className="card p-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        <select
-          value={userId}
-          onChange={(e) => resetPage(setUserId)(e.target.value)}
-          className="input"
-          aria-label="Filter user"
-        >
-          <option value="">Semua user</option>
-          {users.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
-        </select>
-        <input type="date" value={from} onChange={(e) => resetPage(setFrom)(e.target.value)} className="input" aria-label="Dari tanggal" />
-        <input type="date" value={to} onChange={(e) => resetPage(setTo)(e.target.value)} className="input" aria-label="Sampai tanggal" />
-        <div className="relative">
-          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input
-            value={qInput}
-            onChange={(e) => setQInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') { setQ(qInput.trim()); setPage(1) } }}
-            onBlur={() => { if (qInput.trim() !== q) { setQ(qInput.trim()); setPage(1) } }}
-            placeholder="Cari aksi / email…"
-            className="input pl-9 w-full"
-          />
+      <div className="card p-4 grid gap-x-3 gap-y-3 sm:grid-cols-2 lg:grid-cols-5">
+        <FilterField label="User" term="activity.user">
+          <select
+            value={userId}
+            onChange={(e) => resetPage(setUserId)(e.target.value)}
+            className="input w-full"
+            aria-label="Filter user"
+          >
+            <option value="">Semua user</option>
+            {users.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+          </select>
+        </FilterField>
+        <FilterField label="Dari tanggal" term="activity.dateRange">
+          <input type="date" value={from} onChange={(e) => resetPage(setFrom)(e.target.value)} className="input w-full" aria-label="Dari tanggal" />
+        </FilterField>
+        <FilterField label="Sampai tanggal" term="activity.dateRange">
+          <input type="date" value={to} onChange={(e) => resetPage(setTo)(e.target.value)} className="input w-full" aria-label="Sampai tanggal" />
+        </FilterField>
+        <FilterField label="Cari" term="activity.search">
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              value={qInput}
+              onChange={(e) => setQInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { setQ(qInput.trim()); setPage(1) } }}
+              onBlur={() => { if (qInput.trim() !== q) { setQ(qInput.trim()); setPage(1) } }}
+              placeholder="Cari aksi / email…"
+              className="input pl-9 w-full"
+            />
+          </div>
+        </FilterField>
+        <div className="flex items-end">
+          <div className="flex h-[42px] items-center gap-1.5">
+            <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-slate-200">
+              <input
+                type="checkbox"
+                checked={failedOnly}
+                onChange={(e) => resetPage(setFailedOnly)(e.target.checked)}
+                className="rounded border-gray-300 dark:border-slate-600"
+              />
+              Hanya yang gagal
+            </label>
+            <HelpTip term="activity.failedOnly" />
+          </div>
         </div>
-        <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-slate-200">
-          <input
-            type="checkbox"
-            checked={failedOnly}
-            onChange={(e) => resetPage(setFailedOnly)(e.target.checked)}
-            className="rounded border-gray-300 dark:border-slate-600"
-          />
-          Hanya yang gagal
-        </label>
       </div>
 
       {error && (
@@ -168,10 +186,10 @@ export default function ActivityPage() {
             <thead className="bg-gray-50 dark:bg-slate-800/60 text-left text-xs uppercase text-gray-500 dark:text-slate-400">
               <tr>
                 <th className="px-4 py-3 w-8"></th>
-                <th className="px-4 py-3">Waktu</th>
-                <th className="px-4 py-3">User</th>
-                <th className="px-4 py-3">Aksi</th>
-                <th className="px-4 py-3">Hasil</th>
+                <th className="px-4 py-3"><Labelled term="activity.col.time">Waktu</Labelled></th>
+                <th className="px-4 py-3"><Labelled term="activity.col.user">User</Labelled></th>
+                <th className="px-4 py-3"><Labelled term="activity.col.action">Aksi</Labelled></th>
+                <th className="px-4 py-3"><Labelled term="activity.col.result">Hasil</Labelled></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200 dark:divide-slate-700">

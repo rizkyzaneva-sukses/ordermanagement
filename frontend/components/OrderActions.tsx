@@ -4,6 +4,8 @@ import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useRouter } from 'next/navigation'
 import api from '@/lib/api'
+import HelpTip from '@/components/HelpTip'
+import type { GlossaryKey } from '@/lib/glossary'
 import {
   MoreHorizontal,
   Truck,
@@ -20,6 +22,53 @@ import {
   RefreshCcw,
   Printer,
 } from 'lucide-react'
+
+/**
+ * One row of the Aksi menu: the action's name, and under it one line saying what
+ * it does. A menu item is itself a button, so the explanation cannot be a "?"
+ * button beside it — it is printed in place, where it needs no tap to be read.
+ */
+function MenuItem({ icon: Icon, label, hint, onClick, danger = false }: {
+  icon: React.ComponentType<{ className?: string }>
+  label: string
+  hint: string
+  onClick: () => void
+  danger?: boolean
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`w-full text-left px-3 py-2 flex items-start gap-2 ${
+        danger
+          ? 'text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20'
+          : 'hover:bg-gray-50 dark:hover:bg-slate-700'
+      }`}
+    >
+      <Icon className="w-4 h-4 mt-0.5 shrink-0" />
+      {/* divs, not spans: in dark mode a global rule recolours every span,
+          which would flatten the hint to the same grey as the label. */}
+      <div className="min-w-0">
+        <div>{label}</div>
+        <div className={`text-[11px] leading-snug font-normal ${danger ? 'text-red-500/80 dark:text-red-300/70' : 'text-gray-500 dark:text-slate-400'}`}>
+          {hint}
+        </div>
+      </div>
+    </button>
+  )
+}
+
+/**
+ * A form label with its "?". Not a <label> around the tip: a button inside a
+ * label becomes the label's control, so clicking the words would press it.
+ */
+function FieldLabel({ term, children }: { term: GlossaryKey; children: React.ReactNode }) {
+  return (
+    <div className="mb-1.5 flex items-center gap-1 text-sm font-medium text-gray-700 dark:text-slate-300">
+      {children}
+      <HelpTip term={term} />
+    </div>
+  )
+}
 
 export interface ActionableOrder {
   id: string
@@ -580,84 +629,115 @@ export default function OrderActions({
               // in the top-left corner.
               visibility: menuPos ? 'visible' : 'hidden',
             }}
-            className="fixed w-56 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg z-[61] py-1 text-sm">
+            className="fixed w-64 max-w-[calc(100vw-1rem)] rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg z-[61] py-1 text-sm">
             {/* First, and available whatever the status: this is the action
                 for "the row looks wrong", so it has to be reachable exactly
                 when nothing else in this menu applies. */}
             {isShopee && (
               <>
-                <button onClick={syncOrder} className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2">
-                  <RefreshCcw className="w-4 h-4" /> Sinkron pesanan
-                </button>
+                <MenuItem
+                  icon={RefreshCcw}
+                  label="Sinkron pesanan"
+                  hint="Baca ulang pesanan ini dari Shopee, kalau barisnya terlihat tidak sesuai."
+                  onClick={syncOrder}
+                />
                 <div className="border-t border-gray-100 dark:border-slate-700 my-1" />
               </>
             )}
             {canShip && (
-              <button onClick={() => openShippingModal('ship')} className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2">
-                <Truck className="w-4 h-4" /> Atur pengiriman
-              </button>
+              <MenuItem
+                icon={Truck}
+                label="Atur pengiriman"
+                hint="Pilih dijemput kurir atau diantar ke counter."
+                onClick={() => openShippingModal('ship')}
+              />
             )}
             {canPrint && (
-              <button
+              <MenuItem
+                icon={Printer}
+                label="Cetak resi"
+                hint="Resi cadangan buatan aplikasi. Untuk resi resmi Shopee, centang pesanannya lalu pakai Cetak Resi Shopee."
                 onClick={() => { setMenuOpen(false); router.push(`/print?ids=${order.id}`) }}
-                className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2"
-              >
-                <Printer className="w-4 h-4" /> Cetak resi
-              </button>
+              />
             )}
             {canRetry && (
-              <button onClick={() => openShippingModal('retry')} className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2">
-                <RotateCcw className="w-4 h-4" /> Jadwalkan ulang pickup
-              </button>
+              <MenuItem
+                icon={RotateCcw}
+                label="Jadwalkan ulang pickup"
+                hint="Minta kurir menjemput lagi, karena penjemputan sebelumnya gagal."
+                onClick={() => openShippingModal('retry')}
+              />
             )}
             {isShopee && (
-              <button onClick={refreshTracking} className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2">
-                <RefreshCw className="w-4 h-4" /> Ambil nomor resi
-              </button>
+              <MenuItem
+                icon={RefreshCw}
+                label="Ambil nomor resi"
+                hint="Tanya kurir nomor resinya, kalau belum muncul."
+                onClick={refreshTracking}
+              />
             )}
             {canTrack && (
-              <button onClick={openTracking} className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2">
-                <MapPin className="w-4 h-4" /> Lacak pengiriman
-              </button>
+              <MenuItem
+                icon={MapPin}
+                label="Lacak pengiriman"
+                hint="Lihat riwayat perjalanan paket."
+                onClick={openTracking}
+              />
             )}
             {hasStoredAwb && (
-              <button onClick={downloadStoredAwb} className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2">
-                <FileDown className="w-4 h-4" /> Unduh AWB tersimpan
-              </button>
+              <MenuItem
+                icon={FileDown}
+                label="Unduh AWB tersimpan"
+                hint="Unduh lagi label resi resmi Shopee yang sudah pernah diambil."
+                onClick={downloadStoredAwb}
+              />
             )}
             {canSplit && (
               <>
                 <div className="border-t border-gray-100 dark:border-slate-700 my-1" />
-                <button onClick={openSplit} className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2">
-                  <Split className="w-4 h-4" /> Pecah jadi beberapa paket
-                </button>
+                <MenuItem
+                  icon={Split}
+                  label="Pecah jadi beberapa paket"
+                  hint="Bagi isi pesanan ke beberapa paket, masing-masing dengan resi sendiri. Hanya bisa sebelum pengiriman diatur."
+                  onClick={openSplit}
+                />
               </>
             )}
             {canUnsplit && (
-              <button onClick={submitUnsplit} className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2">
-                <Merge className="w-4 h-4" /> Gabungkan kembali
-              </button>
+              <MenuItem
+                icon={Merge}
+                label="Gabungkan kembali"
+                hint="Satukan lagi paket-paket hasil pecahan menjadi satu pesanan."
+                onClick={submitUnsplit}
+              />
             )}
             {canAnswerCancellation && (
               <>
                 <div className="border-t border-gray-100 dark:border-slate-700 my-1" />
-                <button onClick={() => answerCancellation('ACCEPT')} className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2">
-                  <Check className="w-4 h-4" /> Setujui pembatalan buyer
-                </button>
-                <button onClick={() => answerCancellation('REJECT')} className="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-slate-700 flex items-center gap-2">
-                  <X className="w-4 h-4" /> Tolak pembatalan buyer
-                </button>
+                <MenuItem
+                  icon={Check}
+                  label="Setujui pembatalan buyer"
+                  hint="Pesanan dibatalkan sesuai permintaan pembeli."
+                  onClick={() => answerCancellation('ACCEPT')}
+                />
+                <MenuItem
+                  icon={X}
+                  label="Tolak pembatalan buyer"
+                  hint="Pesanan tetap berjalan dan harus dikirim."
+                  onClick={() => answerCancellation('REJECT')}
+                />
               </>
             )}
             {canCancel && (
               <>
                 <div className="border-t border-gray-100 dark:border-slate-700 my-1" />
-                <button
+                <MenuItem
+                  icon={Ban}
+                  label="Batalkan pesanan"
+                  hint="Membatalkan pesanan atas nama penjual. Tidak bisa diurungkan."
+                  danger
                   onClick={() => { setMenuOpen(false); setModal('cancel') }}
-                  className="w-full text-left px-3 py-2 hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400 flex items-center gap-2"
-                >
-                  <Ban className="w-4 h-4" /> Batalkan pesanan
-                </button>
+                />
               </>
             )}
           </div>
@@ -712,9 +792,7 @@ export default function OrderActions({
             {modal === 'ship' && !busy && !notice && options && (
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
-                    Mode pengiriman
-                  </label>
+                  <FieldLabel term="ship.mode">Mode pengiriman</FieldLabel>
                   {options.availableModes.length === 0 ? (
                     <p className="text-sm text-gray-500 dark:text-slate-400">
                       Channel ini tidak menawarkan mode pengiriman apa pun saat ini.
@@ -755,9 +833,7 @@ export default function OrderActions({
                 {mode === 'pickup' && (
                   <>
                     <div>
-                      <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
-                        Alamat penjemputan
-                      </label>
+                      <FieldLabel term="ship.address">Alamat penjemputan</FieldLabel>
                       <select
                         className="input"
                         value={addressId ?? ''}
@@ -777,9 +853,7 @@ export default function OrderActions({
                     </div>
 
                     <div>
-                      <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
-                        Slot waktu
-                      </label>
+                      <FieldLabel term="ship.slot">Slot waktu</FieldLabel>
                       <select className="input" value={pickupTimeId} onChange={(e) => setPickupTimeId(e.target.value)}>
                         {(selectedAddress?.time_slot_list || []).map((slot) => (
                           <option key={slot.pickup_time_id} value={slot.pickup_time_id}>
@@ -799,9 +873,7 @@ export default function OrderActions({
 
                 {mode === 'non_integrated' && (
                   <div>
-                    <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
-                      Nomor resi
-                    </label>
+                    <FieldLabel term="ship.tracking">Nomor resi</FieldLabel>
                     <input
                       className="input font-mono"
                       value={trackingNumberInput}
@@ -824,9 +896,7 @@ export default function OrderActions({
             {modal === 'retry' && !busy && !notice && options && (
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
-                    Alamat penjemputan
-                  </label>
+                  <FieldLabel term="ship.address">Alamat penjemputan</FieldLabel>
                   <select
                     className="input"
                     value={addressId ?? ''}
@@ -846,9 +916,7 @@ export default function OrderActions({
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
-                    Slot waktu
-                  </label>
+                  <FieldLabel term="ship.slot">Slot waktu</FieldLabel>
                   <select className="input" value={pickupTimeId} onChange={(e) => setPickupTimeId(e.target.value)}>
                     {(selectedAddress?.time_slot_list || []).map((slot) => (
                       <option key={slot.pickup_time_id} value={slot.pickup_time_id}>
@@ -874,9 +942,7 @@ export default function OrderActions({
                   ikut dibatalkan.
                 </p>
                 <div>
-                  <label className="block text-sm font-medium mb-1.5 text-gray-700 dark:text-slate-300">
-                    Alasan
-                  </label>
+                  <FieldLabel term="cancel.reason">Alasan</FieldLabel>
                   <select className="input" value={cancelReason} onChange={(e) => setCancelReason(e.target.value)}>
                     {CANCEL_REASONS.map((r) => (
                       <option key={r.value} value={r.value}>{r.label}</option>
@@ -911,7 +977,10 @@ export default function OrderActions({
                 )}
 
                 <div className="flex items-center gap-2">
-                  <label className="text-sm font-medium text-gray-700 dark:text-slate-300">Jumlah paket</label>
+                  <div className="flex items-center gap-1 text-sm font-medium text-gray-700 dark:text-slate-300">
+                    Jumlah paket
+                    <HelpTip term="split.count" />
+                  </div>
                   <select
                     className="input w-24"
                     value={packageCount}

@@ -11,6 +11,7 @@ import {
   UserCheck,
   UserX,
 } from 'lucide-react'
+import HelpTip, { Labelled } from '@/components/HelpTip'
 
 interface Store {
   id: string
@@ -170,10 +171,10 @@ export default function UsersPage() {
               <tr className="border-b border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800/80">
                 <th className="table-header">Nama</th>
                 <th className="table-header">Email</th>
-                <th className="table-header">Role</th>
-                <th className="table-header">Status</th>
-                <th className="table-header">Akses Toko</th>
-                <th className="table-header text-right">Aksi</th>
+                <th className="table-header"><Labelled term="user.role">Role</Labelled></th>
+                <th className="table-header"><Labelled term="user.status">Status</Labelled></th>
+                <th className="table-header"><Labelled term="user.storeAccess">Akses Toko</Labelled></th>
+                <th className="table-header text-right"><Labelled term="user.actions">Aksi</Labelled></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-slate-700/60">
@@ -217,8 +218,10 @@ export default function UsersPage() {
                       </span>
                     </td>
                     <td className="table-cell">
-                      {user.storeAccess.length === 0 ? (
-                        <span className="text-gray-400 dark:text-slate-500 text-sm">Semua toko</span>
+                      {user.role === 'ADMIN' ? (
+                        <span className="text-gray-400 dark:text-slate-500 text-sm">Semua toko (admin)</span>
+                      ) : user.storeAccess.length === 0 ? (
+                        <span className="text-amber-700 dark:text-amber-400 text-sm">Belum ada toko — tidak melihat data apa pun</span>
                       ) : (
                         <div className="flex flex-wrap gap-1">
                           {user.storeAccess.map((s) => (
@@ -304,7 +307,10 @@ export default function UsersPage() {
                 />
               </div>
               <div>
-                <label className="label">Role</label>
+                <div className="label flex items-center gap-1">
+                  Role
+                  <HelpTip term="user.role" />
+                </div>
                 <select
                   value={formRole}
                   onChange={(e) => setFormRole(e.target.value as 'ADMIN' | 'STAFF')}
@@ -315,8 +321,13 @@ export default function UsersPage() {
                 </select>
               </div>
               <div>
-                <label className="label">Akses Toko</label>
-                <p className="text-xs text-gray-500 dark:text-slate-400 mb-2">Pilih toko yang dapat diakses staff (Kosongkan = akses semua)</p>
+                <div className="label flex items-center gap-1">
+                  Akses Toko
+                  <HelpTip term="user.storeAccess" />
+                </div>
+                <p className="text-xs text-gray-500 dark:text-slate-400 mb-2">
+                  Centang toko yang boleh dikerjakan staff. Staff hanya melihat toko yang dicentang; admin selalu melihat semua toko.
+                </p>
                 <div className="space-y-2 max-h-40 overflow-y-auto border border-gray-200 dark:border-slate-700 rounded-lg p-3 bg-gray-50 dark:bg-slate-900/40">
                   {stores.map((store) => (
                     <label key={store.id} className="flex items-center gap-2 cursor-pointer">
