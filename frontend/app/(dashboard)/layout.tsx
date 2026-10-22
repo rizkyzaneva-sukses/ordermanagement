@@ -41,7 +41,9 @@ export default function DashboardLayout({
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-slate-900 transition-colors">
       <Sidebar user={user} />
-      <main className="pt-20 lg:pt-6 lg:ml-64 p-4 sm:p-6 max-w-7xl transition-all duration-200">
+      {/* Top padding spelled out per breakpoint: a bare `sm:p-6` would undo
+          the room left for the fixed mobile header on tablets. */}
+      <main className="lg:ml-64 px-4 pb-6 pt-20 sm:px-6 sm:pt-[5.5rem] lg:pt-6 max-w-7xl min-w-0 transition-all duration-200">
         {children}
       </main>
     </div>

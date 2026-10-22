@@ -368,19 +368,19 @@ export default function DashboardPage() {
               </p>
             )}
           </div>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="grid grid-cols-2 sm:flex sm:flex-wrap sm:items-center gap-2">
             <input
               type="date"
-              className="input w-auto"
+              className="input sm:w-auto"
               value={statsFrom}
               max={statsTo || undefined}
               onChange={(e) => setStatsFrom(e.target.value)}
               aria-label="Tanggal mulai"
             />
-            <span className="text-gray-400 dark:text-slate-500 text-sm">–</span>
+            <span className="hidden sm:inline text-gray-400 dark:text-slate-500 text-sm">–</span>
             <input
               type="date"
-              className="input w-auto"
+              className="input sm:w-auto"
               value={statsTo}
               min={statsFrom || undefined}
               onChange={(e) => setStatsTo(e.target.value)}
@@ -388,14 +388,14 @@ export default function DashboardPage() {
             />
             <input
               type="time"
-              className="input w-auto"
+              className="input sm:w-auto"
               value={statsUntil}
               onChange={(e) => setStatsUntil(e.target.value)}
               aria-label="Sampai jam"
               title="Batas jam pada tanggal akhir. Kosong berarti sampai akhir hari."
             />
             <select
-              className="input w-auto"
+              className="input sm:w-auto"
               value={statsBasis}
               onChange={(e) => setStatsBasis(e.target.value as StatsBasis)}
               aria-label="Status pesanan"
@@ -406,7 +406,7 @@ export default function DashboardPage() {
               ))}
             </select>
             <select
-              className="input w-auto"
+              className="input sm:w-auto"
               value={statsPlatform}
               onChange={(e) => {
                 setStatsPlatform(e.target.value)
@@ -419,7 +419,7 @@ export default function DashboardPage() {
               <option value="TIKTOK">TikTok</option>
             </select>
             <select
-              className="input w-auto"
+              className="input sm:w-auto"
               value={statsStoreId}
               onChange={(e) => setStatsStoreId(e.target.value)}
               aria-label="Toko"
@@ -448,9 +448,10 @@ export default function DashboardPage() {
                   { label: 'Nilai Pesanan Dibatalkan', value: statistics?.cancelledValue ?? 0 },
                   { label: 'Rata-rata per Pesanan', value: statistics?.averageOrderValue ?? 0 },
                 ].map((card) => (
-                  <div key={card.label} className="rounded-xl border border-gray-200 dark:border-slate-700 p-4">
+                  <div key={card.label} className="rounded-xl border border-gray-200 dark:border-slate-700 p-3 sm:p-4 min-w-0">
                     <p className="text-xs text-gray-500 dark:text-slate-400">{card.label}</p>
-                    <p className="text-lg sm:text-xl font-bold text-gray-900 dark:text-slate-100 mt-1 break-words">
+                    {/* Never wrapped: "Rp 18.450.00 / 0" over two lines reads as two numbers. */}
+                    <p className="text-[15px] sm:text-xl font-bold text-gray-900 dark:text-slate-100 mt-1 whitespace-nowrap tabular-nums">
                       {rupiah(card.value)}
                     </p>
                   </div>
@@ -568,7 +569,7 @@ export default function DashboardPage() {
 
       {/* Active Stores */}
       <div className="card">
-        <div className="px-6 py-4 border-b border-gray-200 dark:border-slate-700">
+        <div className="px-4 sm:px-6 py-4 border-b border-gray-200 dark:border-slate-700">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-slate-100">Toko Aktif</h2>
         </div>
         <div className="divide-y divide-gray-100 dark:divide-slate-700/60">
@@ -580,14 +581,14 @@ export default function DashboardPage() {
             </div>
           ) : (
             stores.map((store) => (
-              <div key={store.id} className="px-6 py-4 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-slate-700/40 transition-colors">
-                <div className="flex items-center gap-4">
-                  <div className="w-10 h-10 rounded-lg bg-gray-100 dark:bg-slate-700 flex items-center justify-center shrink-0">
+              <div key={store.id} className="px-4 sm:px-6 py-4 flex items-center justify-between gap-3 hover:bg-gray-50 dark:hover:bg-slate-700/40 transition-colors">
+                <div className="flex items-center gap-3 sm:gap-4 min-w-0">
+                  <div className="hidden sm:flex w-10 h-10 rounded-lg bg-gray-100 dark:bg-slate-700 items-center justify-center shrink-0">
                     <Store className="w-5 h-5 text-gray-500 dark:text-slate-300" />
                   </div>
-                  <div>
-                    <p className="font-medium text-gray-900 dark:text-slate-100">{store.name}</p>
-                    <div className="flex items-center gap-2 mt-1">
+                  <div className="min-w-0">
+                    <p className="font-medium text-gray-900 dark:text-slate-100 truncate">{store.name}</p>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1">
                       <span className={store.platform === 'SHOPEE' ? 'badge-shopee' : 'badge-tiktok'}>
                         {store.platform}
                       </span>
@@ -605,7 +606,7 @@ export default function DashboardPage() {
                     </div>
                   </div>
                 </div>
-                <div className="text-right">
+                <div className="text-right shrink-0">
                   <p className="text-lg font-semibold text-gray-900 dark:text-slate-100">{store.orderCount}</p>
                   <p className="text-xs text-gray-500 dark:text-slate-400">
                     pesanan

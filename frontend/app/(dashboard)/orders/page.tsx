@@ -526,6 +526,8 @@ export default function OrdersPage() {
     SORT_OPTIONS.some((o) => o.key === view.get('sort')) ? view.get('sort') as SortKey : 'newest'
   )
   const [checkOpen, setCheckOpen] = useState(false)
+  /** The filter dropdowns on a phone; always shown from `sm` up. */
+  const [filtersOpen, setFiltersOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [stores, setStores] = useState<Store[]>([])
@@ -1495,10 +1497,15 @@ export default function OrdersPage() {
   // dropdown is one now that it no longer leads the page.
   const hasActiveFilters = platform || storeId || status || courier || !isDefaultRange || search
     || printFilter !== 'semua'
+  /** What the collapsed filter button on a phone has to own up to hiding. */
+  const activeFilterCount = [platform, storeId, status, courier, !isDefaultRange, printFilter !== 'semua', sort !== 'newest']
+    .filter(Boolean).length
   const totalPages = Math.ceil(total / limit)
 
   return (
-    <div className="space-y-4">
+    // Room under the last order for the fixed selection bar, which would
+    // otherwise sit on top of it.
+    <div className={`space-y-4 ${selected.size > 0 ? 'pb-44 sm:pb-28' : ''}`}>
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -1800,14 +1807,16 @@ export default function OrdersPage() {
             <button
               key={t.key}
               onClick={() => handleTabChange(t.key)}
-              className={`flex-1 py-2.5 px-3 sm:px-4 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
+              // Label over count on a phone, so all four tabs fit without a
+              // sideways scroll that hides "Dikirim" off the edge.
+              className={`flex-1 min-w-0 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2 py-2 sm:py-2.5 px-1 sm:px-4 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
                 tab === t.key
                   ? 'bg-primary-600 text-white shadow-sm dark:bg-primary-600'
                   : 'text-gray-600 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-700/60'
               }`}
             >
               {t.label}
-              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs ${
+              <span className={`px-2 py-0.5 rounded-full text-[11px] sm:text-xs leading-none sm:leading-normal ${
                 tab === t.key
                   ? 'bg-white/20 text-white'
                   : 'bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-slate-300'
@@ -1823,12 +1832,12 @@ export default function OrdersPage() {
           shipment arranged, "Telah Diproses" already has one and is waiting to
           be printed. Two different jobs, two different buttons. */}
       {tab === 'toShip' && (
-        <div className="flex gap-4 px-1 overflow-x-auto">
+        <div className="flex justify-between sm:justify-start gap-3 sm:gap-4 px-1 overflow-x-auto">
           {ORDER_SUB_TABS.map((st) => (
             <button
               key={st.key}
               onClick={() => handleSubTabChange(st.key)}
-              className={`py-1.5 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
+              className={`py-1.5 text-xs sm:text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
                 subTab === st.key
                   ? 'border-primary-600 text-primary-700 dark:text-primary-400'
                   : 'border-transparent text-gray-500 dark:text-slate-400 hover:text-gray-700 dark:hover:text-slate-200'
@@ -1844,8 +1853,8 @@ export default function OrdersPage() {
       <div className="card p-4">
         <form onSubmit={handleSearch} className="space-y-3">
           {/* Search bar */}
-          <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
-            <div className="flex-1 relative">
+          <div className="flex gap-2 sm:gap-3">
+            <div className="flex-1 min-w-0 relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 dark:text-slate-500" />
               <input
                 type="text"
@@ -1855,22 +1864,36 @@ export default function OrdersPage() {
                 className="input pl-10"
               />
             </div>
-            <div className="flex gap-2">
-              <button type="submit" className="btn-secondary flex-1 sm:flex-none">
-                <Search className="w-4 h-4" />
-                Cari
-              </button>
-              {hasActiveFilters && (
-                <button type="button" onClick={clearFilters} className="btn-ghost text-red-600 dark:text-red-400 flex-1 sm:flex-none">
-                  <X className="w-4 h-4" />
-                  Reset
-                </button>
+            <button type="submit" className="btn-secondary px-3 sm:px-4" aria-label="Cari">
+              <Search className="w-4 h-4" />
+              <span className="hidden sm:inline">Cari</span>
+            </button>
+            {/* Phones only: eight dropdowns stacked above the list pushed the
+                first order a full screen down. */}
+            <button
+              type="button"
+              onClick={() => setFiltersOpen((v) => !v)}
+              className={`sm:hidden btn-secondary px-3 relative ${filtersOpen ? 'ring-2 ring-primary-500/30' : ''}`}
+              aria-expanded={filtersOpen}
+              aria-label="Filter"
+            >
+              <Filter className="w-4 h-4" />
+              {activeFilterCount > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-primary-600 text-white text-[10px] font-semibold flex items-center justify-center">
+                  {activeFilterCount}
+                </span>
               )}
-            </div>
+            </button>
+            {hasActiveFilters && (
+              <button type="button" onClick={clearFilters} className="btn-ghost px-3 sm:px-4 text-red-600 dark:text-red-400" aria-label="Reset filter">
+                <X className="w-4 h-4" />
+                <span className="hidden sm:inline">Reset</span>
+              </button>
+            )}
           </div>
 
           {/* Filter row */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:flex lg:flex-wrap gap-2.5">
+          <div className={`${filtersOpen ? 'grid' : 'hidden'} sm:grid grid-cols-2 sm:grid-cols-3 lg:flex lg:flex-wrap gap-2.5`}>
             <select value={platform} onChange={(e) => { setPlatform(e.target.value); setPage(1) }} className="input w-full lg:w-auto min-w-[130px]">
               <option value="">Semua Platform</option>
               <option value="SHOPEE">Shopee</option>
@@ -1965,15 +1988,15 @@ export default function OrdersPage() {
             and hiding it at 500-per-page would strand the operator with no way
             back to 20. */}
         {total > 0 && (
-          <div className="px-4 py-3 border-b border-gray-200 dark:border-slate-700 flex flex-col sm:flex-row items-center justify-between gap-3 bg-gray-50 dark:bg-slate-800/80">
-            <div className="flex items-center gap-3">
-              <p className="text-sm text-gray-500 dark:text-slate-400">
+          <div className="px-3 sm:px-4 py-3 border-b border-gray-200 dark:border-slate-700 flex flex-col sm:flex-row items-center justify-between gap-3 bg-gray-50 dark:bg-slate-800/80">
+            <div className="flex items-center justify-between sm:justify-start gap-3 w-full sm:w-auto">
+              <p className="text-xs sm:text-sm text-gray-500 dark:text-slate-400">
                 Menampilkan {(page - 1) * limit + 1}–{Math.min(page * limit, total)} dari {total} pesanan
               </p>
               <select
                 value={limit}
                 onChange={(e) => { setLimit(Number(e.target.value)); setPage(1) }}
-                className="input py-1 text-sm w-auto min-w-[110px]"
+                className="input py-1 text-sm w-auto min-w-[110px] shrink-0"
                 aria-label="Jumlah per halaman"
               >
                 {[20, 50, 100, 200, 500].map((n) => (
@@ -2018,7 +2041,144 @@ export default function OrdersPage() {
             )}
           </div>
         )}
-        <div className="overflow-x-auto">
+        {/* Below `lg`, one card per order. Eleven columns squeezed into a phone
+            width left the order ID and product names one letter per line. */}
+        <div className="lg:hidden">
+          {!loading && orders.length > 0 && (selectableUnprinted.length > 0 || selectablePrinted.length > 0) && (
+            <div className="flex items-center gap-4 px-3 py-2 border-b border-gray-200 dark:border-slate-700 text-xs text-gray-600 dark:text-slate-300">
+              <span className="text-gray-400 dark:text-slate-500">Pilih semua:</span>
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={allOf(selectableUnprinted)}
+                  onChange={() => toggleSelectGroup(selectableUnprinted)}
+                  disabled={selectableUnprinted.length === 0}
+                  className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:opacity-40"
+                />
+                Belum dicetak
+              </label>
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={allOf(selectablePrinted)}
+                  onChange={() => toggleSelectGroup(selectablePrinted)}
+                  disabled={selectablePrinted.length === 0}
+                  className="w-4 h-4 rounded border-gray-300 text-amber-500 focus:ring-amber-400 disabled:opacity-40"
+                />
+                Sudah dicetak
+              </label>
+            </div>
+          )}
+          {loading ? (
+            <div className="px-4 py-16 text-center">
+              <Loader2 className="w-8 h-8 animate-spin text-primary-600 mx-auto" />
+              <p className="text-sm text-gray-500 dark:text-slate-400 mt-2">Memuat pesanan...</p>
+            </div>
+          ) : orders.length === 0 ? (
+            <div className="px-4 py-16 text-center">
+              <Package className="w-12 h-12 text-gray-300 dark:text-slate-600 mx-auto mb-3" />
+              <p className="font-medium text-gray-900 dark:text-slate-200">Tidak ada pesanan</p>
+              <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">
+                {hasActiveFilters
+                  ? 'Coba ubah filter atau kata kunci pencarian'
+                  : 'Belum ada pesanan hari ini. Ubah rentang tanggal untuk melihat hari lain, atau klik "Sync" untuk mengambil pesanan terbaru'}
+              </p>
+            </div>
+          ) : (
+            <ul className="divide-y divide-gray-100 dark:divide-slate-700/60">
+              {orders.map((order) => {
+                const enabled = isCheckboxEnabled(order)
+                const deadline = shipDeadline(order.shipByDate)
+                return (
+                  <li
+                    key={order.id}
+                    className={`flex gap-3 px-3 py-3 transition-colors ${
+                      selected.has(order.id) ? 'bg-primary-50/70 dark:bg-primary-950/30' : ''
+                    }`}
+                  >
+                    {/* The whole strip is the tap target — a bare 16px box is
+                        too small to hit reliably with a thumb. */}
+                    <label
+                      className={`-my-3 -ml-3 pl-3 pr-1 py-3 flex items-start ${enabled ? 'cursor-pointer' : ''}`}
+                      title={enabled ? undefined : checkboxDisabledReason(order)}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selected.has(order.id)}
+                        onChange={() => toggleSelect(order.id)}
+                        disabled={!enabled}
+                        className="mt-0.5 w-5 h-5 rounded border-gray-300 text-primary-600 focus:ring-primary-500 disabled:opacity-30"
+                      />
+                    </label>
+
+                    <div className="min-w-0 flex-1 space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="font-mono text-xs font-semibold text-gray-900 dark:text-slate-100 break-all">
+                            {order.orderId}
+                          </p>
+                          <p className="text-xs text-gray-500 dark:text-slate-400 truncate">
+                            {order.platform !== 'SHOPEE' && (
+                              <span className={`${platformBadgeClass[order.platform] || 'badge'} mr-1 !px-1.5 !py-0 text-[10px]`}>
+                                {order.platform}
+                              </span>
+                            )}
+                            {order.storeName} · {order.buyerName}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0 -mt-1 -mr-1">
+                          <span className={`${statusBadgeClass[order.status] || 'badge'} whitespace-nowrap`}>
+                            {STATUS_LABELS[order.status] || order.status.replace(/_/g, ' ')}
+                          </span>
+                          <OrderActions order={order} onDone={() => fetchOrders({ background: true })} />
+                        </div>
+                      </div>
+
+                      {order.items.length > 0 && (
+                        <div className="space-y-0.5">
+                          {order.items.slice(0, 2).map((it, idx) => (
+                            <p key={idx} className="text-[13px] leading-snug text-gray-800 dark:text-slate-200 line-clamp-2">
+                              <span className="font-semibold text-gray-500 dark:text-slate-400">{it.quantity}×</span>{' '}
+                              {it.name}
+                              {it.variant && <span className="text-gray-500 dark:text-slate-400"> · {it.variant}</span>}
+                            </p>
+                          ))}
+                          {order.items.length > 2 && (
+                            <p className="text-xs text-gray-400 dark:text-slate-500">+{order.items.length - 2} produk lain</p>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                        <span className="inline-flex items-center gap-1 text-gray-600 dark:text-slate-300">
+                          <Truck className="w-3.5 h-3.5 text-gray-400 dark:text-slate-500" />
+                          {order.courier}
+                        </span>
+                        {order.trackingNumber && (
+                          <span className="font-mono text-[11px] text-gray-500 dark:text-slate-400 break-all">{order.trackingNumber}</span>
+                        )}
+                        {deadline && (
+                          <span className={`inline-flex items-center gap-1 ${DEADLINE_TONES[deadline.tone]}`} title={deadline.title}>
+                            <Clock className="w-3.5 h-3.5" />
+                            {deadline.label}
+                          </span>
+                        )}
+                        {order.logisticsStatus && (
+                          <span className="text-gray-400 dark:text-slate-500">
+                            {logisticsLabel[order.logisticsStatus] || order.logisticsStatus}
+                          </span>
+                        )}
+                        {order.printed && <PrintBadge order={order} />}
+                      </div>
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </div>
+
+        <div className="hidden lg:block overflow-x-auto">
           <table className="w-full table-fixed">
             <colgroup>
               <col className="w-[64px]" />
@@ -2635,7 +2795,9 @@ export default function OrdersPage() {
 
       {/* Selection Bar */}
       {selected.size > 0 && (
-        <div className="fixed bottom-0 left-64 right-0 bg-white dark:bg-slate-800 border-t border-gray-200 dark:border-slate-700 shadow-lg px-6 py-4 z-20">
+        // The sidebar is only there from `lg`; a fixed `left-64` on a phone
+        // pushed the bar's buttons off the right edge of the screen.
+        <div className="fixed bottom-0 left-0 lg:left-64 right-0 bg-white dark:bg-slate-800 border-t border-gray-200 dark:border-slate-700 shadow-[0_-4px_12px_rgba(0,0,0,0.06)] px-3 sm:px-6 pt-3 sm:pt-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:pb-4 z-20 max-h-[60vh] overflow-y-auto">
           {bulkMessage && (
             <div
               className={`rounded-lg border px-4 py-3 text-sm flex items-start justify-between gap-4 mb-3 ${
@@ -2650,7 +2812,7 @@ export default function OrdersPage() {
               </button>
             </div>
           )}
-          <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-center justify-between gap-2 sm:gap-4 flex-wrap">
             <div className="text-sm text-gray-700 dark:text-slate-300">
               <span className="font-semibold">{selected.size} pesanan</span> dipilih
               {selectedPlatforms.size > 0 && (
@@ -2659,7 +2821,9 @@ export default function OrdersPage() {
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-3 flex-wrap">
+            {/* Tighter buttons on a phone so the usual pair — Sinkron and one
+                action — share a row instead of stacking three deep. */}
+            <div className="flex items-center gap-2 sm:gap-3 flex-wrap max-sm:[&_button]:px-3 max-sm:[&_button]:py-2 max-sm:[&_button]:text-xs">
               {/* First in the row because it comes first in the work: sync the
                   selection, then act on it. */}
               {syncSelected.length > 0 && (

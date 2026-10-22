@@ -679,24 +679,24 @@ export default function ProductsPage() {
               className="input pl-9 w-full"
             />
           </div>
-          <button onClick={() => setSearch(searchInput)} className="btn-secondary flex items-center gap-2">
+          <button onClick={() => setSearch(searchInput)} className="btn-secondary flex items-center gap-2 px-3 sm:px-4" aria-label="Cari">
             <Search className="w-4 h-4" />
-            <span>Cari</span>
+            <span className="hidden sm:inline">Cari</span>
           </button>
         </div>
 
-        <div className="flex flex-wrap gap-2">
-          <select value={storeId} onChange={(e) => setStoreId(e.target.value)} className="input">
+        <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
+          <select value={storeId} onChange={(e) => setStoreId(e.target.value)} className="input col-span-2 sm:w-auto">
             <option value="">Semua Toko</option>
             {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
           {tab === 'active' && <>
-          <select value={status} onChange={(e) => setStatus(e.target.value)} className="input">
+          <select value={status} onChange={(e) => setStatus(e.target.value)} className="input sm:w-auto">
             <option value="">Semua Status</option>
             <option value="NORMAL">Aktif</option>
             <option value="UNLIST">Diarsipkan</option>
           </select>
-          <select value={mapped} onChange={(e) => setMapped(e.target.value)} className="input">
+          <select value={mapped} onChange={(e) => setMapped(e.target.value)} className="input sm:w-auto">
             <option value="">Semua Pemetaan</option>
             <option value="no">Belum punya master</option>
             <option value="yes">Sudah punya master</option>
@@ -773,7 +773,81 @@ export default function ProductsPage() {
             <span>Petakan Otomatis dari SKU</span>
           </button>
         </Pagination>
-        <div className="overflow-x-auto">
+        {/* Below `md`, one card per listing; the eight-column table only ever
+            showed half its columns on a phone. */}
+        <div className="md:hidden">
+          {!loading && listings.length > 0 && (
+            <label className="flex items-center gap-2 px-3 py-2 border-b border-gray-200 dark:border-slate-700 text-xs text-gray-600 dark:text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={allOnPageSelected}
+                onChange={toggleAllOnPage}
+                className="w-4 h-4 rounded border-gray-300 dark:border-slate-600"
+              />
+              Pilih semua di halaman ini
+            </label>
+          )}
+          {loading ? (
+            <p className="px-4 py-8 text-center text-sm text-gray-500 dark:text-slate-400">Memuat…</p>
+          ) : listings.length === 0 ? (
+            <p className="px-4 py-8 text-center text-sm text-gray-500 dark:text-slate-400">Tidak ada listing yang cocok dengan filter.</p>
+          ) : (
+            <ul className="divide-y divide-gray-200 dark:divide-slate-700">
+              {listings.map((l) => (
+                <li
+                  key={l.id}
+                  className={`flex gap-3 px-3 py-3 ${selected.includes(l.id) ? 'bg-blue-50/60 dark:bg-blue-900/10' : ''}`}
+                >
+                  <label className="-my-3 -ml-3 pl-3 py-3 flex items-start cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(l.id)}
+                      onChange={() => toggleRow(l.id)}
+                      aria-label={`Pilih ${l.name}`}
+                      className="mt-0.5 w-5 h-5 rounded border-gray-300 dark:border-slate-600"
+                    />
+                  </label>
+                  {l.imageUrl
+                    // eslint-disable-next-line @next/next/no-img-element
+                    ? <img src={l.imageUrl} alt="" className="w-14 h-14 rounded-lg object-cover shrink-0" />
+                    : <div className="w-14 h-14 rounded-lg bg-gray-100 dark:bg-slate-700 shrink-0" />}
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <p className="text-sm leading-snug text-gray-900 dark:text-slate-100 line-clamp-2">
+                      {l.itemName && l.itemName !== l.name ? (
+                        <>{l.itemName} <span className="text-gray-500 dark:text-slate-400">· {l.name}</span></>
+                      ) : l.name}
+                    </p>
+                    <p className="text-xs text-gray-500 dark:text-slate-400 truncate">
+                      {l.store?.name}
+                      {l.sku && <> · <span className="font-mono">{l.sku}</span></>}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                      <span className={`px-1.5 py-0.5 rounded font-medium ${statusClass[l.status] || statusClass.UNLIST}`}>
+                        {statusLabels[l.status] || l.status}
+                      </span>
+                      {l.product ? (
+                        <span className="font-mono text-gray-600 dark:text-slate-300 truncate">→ {l.product.masterSku}</span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                          <Link2Off className="w-3 h-3" /> belum ada master
+                        </span>
+                      )}
+                      <span className="ml-auto whitespace-nowrap text-gray-700 dark:text-slate-200">
+                        {rupiah(l.price)}
+                        <span className="text-gray-400 dark:text-slate-500"> · stok </span>
+                        {l.stock === null
+                          ? <span className="text-gray-400 dark:text-slate-500" title="Stok tidak terbaca dari Shopee">?</span>
+                          : <span className="font-semibold text-gray-900 dark:text-slate-100">{l.stock}</span>}
+                      </span>
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-gray-50 dark:bg-slate-800/60 text-left text-xs uppercase text-gray-500 dark:text-slate-400">
               <tr>

@@ -44,9 +44,9 @@ export default function Pagination({
   const pages = Array.from({ length: Math.min(5, totalPages) }, (_, i) => firstShown + i)
 
   return (
-    <div className="px-4 py-3 border-b border-gray-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-3">
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="text-sm text-gray-500 dark:text-slate-400">
+    <div className="px-3 sm:px-4 py-3 border-b border-gray-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-3">
+      <div className="flex items-center justify-between sm:justify-start gap-3 w-full sm:w-auto">
+        <span className="text-xs sm:text-sm text-gray-500 dark:text-slate-400">
           {loading
             ? 'Memuat…'
             : total === 0
@@ -56,7 +56,7 @@ export default function Pagination({
         <select
           value={limit}
           onChange={(e) => onLimitChange(Number(e.target.value))}
-          className="input py-1 text-sm w-auto min-w-[110px]"
+          className="input py-1 text-sm w-auto min-w-[110px] shrink-0"
           aria-label="Jumlah per halaman"
         >
           {PAGE_SIZE_OPTIONS.map((n) => (
@@ -66,7 +66,7 @@ export default function Pagination({
       </div>
 
       {totalPages > 1 && (
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-0.5 sm:gap-1 mx-auto sm:mx-0">
           <button
             onClick={() => onPageChange(1)}
             disabled={page === 1}

@@ -81,6 +81,34 @@ const timeFmt = new Intl.DateTimeFormat('id-ID', {
 /** "17", or "17–42" when the shops disagree. */
 const formatRange = (r: { min: number; max: number }) => (r.min === r.max ? `${r.min}` : `${r.min}–${r.max}`)
 
+function ListingCount({ master: m }: { master: Master }) {
+  if ((m._count?.listings ?? 0) === 0) {
+    // A master bound to nothing changes nothing anywhere. Worth flagging on the
+    // screen where its number is being typed.
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400" title="Master ini belum terikat ke listing mana pun">
+        <AlertTriangle className="w-3 h-3" /> 0
+      </span>
+    )
+  }
+  return <span className="text-gray-600 dark:text-slate-300">{m._count?.listings}</span>
+}
+
+function ShopeeStock({ master: m }: { master: Master }) {
+  if (!m.listingStock) return <span className="text-gray-500 dark:text-slate-400">—</span>
+  if (inSync(m)) return <span className="text-gray-600 dark:text-slate-300">{formatRange(m.listingStock)}</span>
+  // Shopee holds a different number — usually sales since the last save. Worth
+  // seeing before typing a new count.
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-amber-700 dark:text-amber-400"
+      title="Beda dengan stok master. Simpan stok untuk mengirim angka master ke Shopee."
+    >
+      <AlertTriangle className="w-3 h-3" /> {formatRange(m.listingStock)}
+    </span>
+  )
+}
+
 /** Merge the push results of several chunked requests into one. */
 function mergePush(results: PushResult[]): PushResult {
   const out: PushResult = { listings: 0, pushed: 0, failed: [], skipped: [] }
@@ -504,10 +532,11 @@ export default function StockPage() {
           </div>
           <button
             onClick={() => { setSearch(searchInput); setPage(1) }}
-            className="btn-secondary flex items-center gap-2"
+            className="btn-secondary flex items-center gap-2 px-3 sm:px-4"
+            aria-label="Cari"
           >
             <Search className="w-4 h-4" />
-            <span>Cari</span>
+            <span className="hidden sm:inline">Cari</span>
           </button>
         </div>
       </div>
@@ -560,7 +589,99 @@ export default function StockPage() {
           onPageChange={setPage}
           onLimitChange={(n) => { setLimit(n); setPage(1) }}
         />
-        <div className="overflow-x-auto">
+        {/* Below `md`, one card per master with the stock number up front —
+            the column a phone user came here to read or change. */}
+        <div className="md:hidden">
+          {!loading && masters.length > 0 && (
+            <label className="flex items-center gap-2 px-3 py-2 border-b border-gray-200 dark:border-slate-700 text-xs text-gray-600 dark:text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={allOnPageSelected}
+                onChange={toggleAllOnPage}
+                className="w-4 h-4 rounded border-gray-300 dark:border-slate-600"
+              />
+              Pilih semua di halaman ini
+            </label>
+          )}
+          {loading ? (
+            <p className="px-4 py-8 text-center text-sm text-gray-500 dark:text-slate-400">Memuat…</p>
+          ) : masters.length === 0 ? (
+            <p className="px-4 py-8 text-center text-sm text-gray-500 dark:text-slate-400">Tidak ada master yang cocok.</p>
+          ) : (
+            <ul className="divide-y divide-gray-200 dark:divide-slate-700">
+              {masters.map((m) => (
+                <li
+                  key={m.id}
+                  className={`flex gap-3 px-3 py-3 ${selected.includes(m.id) ? 'bg-blue-50/60 dark:bg-blue-900/10' : ''}`}
+                >
+                  <label className="-my-3 -ml-3 pl-3 py-3 flex items-start cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(m.id)}
+                      onChange={() => toggleRow(m.id)}
+                      aria-label={`Pilih ${m.masterSku}`}
+                      className="mt-0.5 w-5 h-5 rounded border-gray-300 dark:border-slate-600"
+                    />
+                  </label>
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium leading-snug text-gray-900 dark:text-slate-100 line-clamp-2">{m.name}</p>
+                        <p className="font-mono text-xs text-gray-500 dark:text-slate-400 break-all">{m.masterSku}</p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        {editingId === m.id ? (
+                          <input
+                            type="number"
+                            inputMode="numeric"
+                            min={0}
+                            value={editValue}
+                            onChange={(e) => setEditValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') saveEdit(m)
+                              if (e.key === 'Escape') cancelEdit()
+                            }}
+                            autoFocus
+                            className="input w-24 text-right py-1.5"
+                          />
+                        ) : (
+                          <p className="text-xl font-bold leading-none text-gray-900 dark:text-slate-100 tabular-nums">{m.stock}</p>
+                        )}
+                        <p className="text-[10px] uppercase tracking-wide text-gray-400 dark:text-slate-500 mt-1">Stok</p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                      <span className="text-gray-500 dark:text-slate-400">Listing <ListingCount master={m} /></span>
+                      <span className="text-gray-500 dark:text-slate-400">Di Shopee <ShopeeStock master={m} /></span>
+                      <div className="ml-auto flex items-center gap-1">
+                        {editingId === m.id ? (
+                          <>
+                            <button onClick={cancelEdit} className="btn-ghost px-3 py-1.5 text-xs">Batal</button>
+                            <button onClick={() => saveEdit(m)} disabled={busy} className="btn-primary px-3 py-1.5 text-xs">
+                              {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                              Simpan
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button onClick={() => openHistory(m)} className="btn-ghost px-2.5 py-1.5 text-xs">
+                              <History className="w-3.5 h-3.5" /> Riwayat
+                            </button>
+                            <button onClick={() => startEdit(m)} className="btn-secondary px-2.5 py-1.5 text-xs">
+                              <Pencil className="w-3.5 h-3.5" /> Edit
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-gray-50 dark:bg-slate-800/60 text-left text-xs uppercase text-gray-500 dark:text-slate-400">
               <tr>
@@ -605,15 +726,7 @@ export default function StockPage() {
                   <td className="px-4 py-3 font-mono text-xs text-gray-900 dark:text-slate-100">{m.masterSku}</td>
                   <td className="px-4 py-3 text-gray-700 dark:text-slate-200">{m.name}</td>
                   <td className="px-4 py-3 text-right">
-                    {(m._count?.listings ?? 0) === 0 ? (
-                      // A master bound to nothing changes nothing anywhere. Worth
-                      // flagging on the screen where its number is being typed.
-                      <span className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400" title="Master ini belum terikat ke listing mana pun">
-                        <AlertTriangle className="w-3 h-3" /> 0
-                      </span>
-                    ) : (
-                      <span className="text-gray-600 dark:text-slate-300">{m._count?.listings}</span>
-                    )}
+                    <ListingCount master={m} />
                   </td>
                   <td className="px-4 py-3 text-right">
                     {editingId === m.id ? (
@@ -634,20 +747,7 @@ export default function StockPage() {
                     )}
                   </td>
                   <td className="px-4 py-3 text-right">
-                    {!m.listingStock ? (
-                      <span className="text-gray-500 dark:text-slate-400">—</span>
-                    ) : inSync(m) ? (
-                      <span className="text-gray-600 dark:text-slate-300">{formatRange(m.listingStock)}</span>
-                    ) : (
-                      // Shopee holds a different number — usually sales since the
-                      // last save. Worth seeing before typing a new count.
-                      <span
-                        className="inline-flex items-center gap-1 text-amber-700 dark:text-amber-400"
-                        title="Beda dengan stok master. Simpan stok untuk mengirim angka master ke Shopee."
-                      >
-                        <AlertTriangle className="w-3 h-3" /> {formatRange(m.listingStock)}
-                      </span>
-                    )}
+                    <ShopeeStock master={m} />
                   </td>
                   <td className="px-4 py-3">
                     {editingId === m.id ? (
