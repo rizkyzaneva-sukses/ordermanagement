@@ -467,7 +467,10 @@ async function existingMastersBySku(db, skus) {
  * POST /masters/from-items
  * "Jadikan Master": one parent per item, one Master SKU per variation.
  *
- * Body: { items: [{ name, variants: [{ listingId, masterSku }] }] }
+ * Body: { items: [{ name, shareSku?, variants: [{ listingId, masterSku }] }] }
+ *
+ * `shareSku` lets variations that sit on the same SKU share one master (a
+ * jacket and its jacket-plus-jogger bundle); see planMasterFromItem.
  *
  * Each item is its own transaction and its own verdict, reported the way
  * Komplace reports it ("Berhasil: 4, Gagal: 1"). One item with a blank SKU
@@ -521,7 +524,10 @@ router.post('/masters/from-items', async (req, res) => {
                   stock: c.stock,
                 },
               });
-              await tx.productListing.update({ where: { id: c.listingId }, data: { productId: product.id } });
+              await tx.productListing.updateMany({
+                where: { id: { in: [c.listingId, ...c.alsoListingIds] } },
+                data: { productId: product.id },
+              });
             }
           }
           for (const b of plan.binds) {
@@ -542,6 +548,7 @@ router.post('/masters/from-items', async (req, res) => {
           created: outcome.creates.length,
           bound: outcome.binds.length,
           skipped: outcome.skipped.length,
+          shared: outcome.shared,
           unreadStock: outcome.unreadStock,
         });
       } catch (err) {

@@ -97,6 +97,8 @@ interface DraftItem {
   name: string
   imageUrl: string | null
   variants: DraftVariant[]
+  /** Variations on one SKU share one master — set by the operator, never by default. */
+  shareSku?: boolean
 }
 
 interface ItemResult {
@@ -106,7 +108,42 @@ interface ItemResult {
   created?: number
   bound?: number
   skipped?: number
+  shared?: number
   unreadStock?: number
+}
+
+const skuKey = (sku: string | null) => (sku ?? '').trim().toLowerCase()
+
+/**
+ * Variations of one item that sit on the same Master SKU, among those that still
+ * need a master. Only groups of two or more — the ones the server would refuse
+ * unless the operator says the stock is shared.
+ */
+const skuGroups = (item: DraftItem): DraftVariant[][] => {
+  const groups = new Map<string, DraftVariant[]>()
+  for (const v of item.variants) {
+    const key = skuKey(v.masterSku)
+    if (v.mappedTo || !key) continue
+    groups.set(key, [...(groups.get(key) ?? []), v])
+  }
+  return [...groups.values()].filter((g) => g.length > 1)
+}
+
+/**
+ * What the new masters start with, by the same rule as the server: a variation's
+ * own stock, or — for variations sharing a SKU — the smallest of them.
+ */
+const startingStock = (item: DraftItem): number => {
+  const open = item.variants.filter((v) => !v.mappedTo)
+  if (!item.shareSku) return open.reduce((n, v) => n + (v.stock ?? 0), 0)
+  const bySku = new Map<string, number[]>()
+  for (const v of open) {
+    const key = skuKey(v.masterSku) || v.listingId
+    bySku.set(key, [...(bySku.get(key) ?? []), ...(v.stock === null ? [] : [v.stock])])
+  }
+  let total = 0
+  bySku.forEach((stocks) => { total += stocks.length > 0 ? Math.min(...stocks) : 0 })
+  return total
 }
 
 const sameSku = (a: string | null, b: string | null) =>
@@ -398,6 +435,16 @@ export default function ProductsPage() {
     })
   }
 
+  /** Flip "stok dipakai bersama" for one product. Any earlier refusal was about the old setting. */
+  const setShareSku = (key: string, shareSku: boolean) => {
+    setDraft((prev) => prev.map((it) => (draftKey(it) === key ? { ...it, shareSku } : it)))
+    setDraftErrors((prev) => {
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+  }
+
   const updateDraftSku = (key: string, listingId: string, masterSku: string) =>
     setDraft((prev) => prev.map((it) => draftKey(it) !== key ? it : {
       ...it,
@@ -411,6 +458,7 @@ export default function ProductsPage() {
       const res = await api.post<any>('/products/masters/from-items', {
         items: sent.map((it) => ({
           name: it.name,
+          shareSku: it.shareSku === true,
           // A listing already bound elsewhere is shown for context but not sent
           // to be re-pointed; the server would skip it anyway.
           variants: it.variants.filter((v) => !v.mappedTo).map((v) => ({
@@ -424,9 +472,11 @@ export default function ProductsPage() {
       const succeeded = res.data?.succeeded ?? 0
       const failed = res.data?.failed ?? 0
       const unread = results.reduce((n, r) => n + (r.unreadStock ?? 0), 0)
+      const sharedCount = results.reduce((n, r) => n + (r.shared ?? 0), 0)
 
       const summaryText =
         `Berhasil: ${succeeded} produk, Gagal: ${failed} produk` +
+        (sharedCount > 0 ? ` — ${sharedCount} varian berbagi stok dengan varian lain` : '') +
         (unread > 0 ? ` — ${unread} varian stoknya tidak terbaca dari Shopee dan diisi 0, cek di Daftar Stok` : '')
 
       if (failed === 0) {
@@ -1028,8 +1078,14 @@ export default function ProductsPage() {
             {draft.map((item) => {
               const key = draftKey(item)
               const errors = draftErrors[key]
-              const open = item.variants.filter((v) => !v.mappedTo)
-              const totalStock = open.reduce((n, v) => n + (v.stock ?? 0), 0)
+              const totalStock = startingStock(item)
+              const dupGroups = skuGroups(item)
+              // First row of each shared SKU: it names the master; the rest ride on it.
+              const leaderOf = new Map(dupGroups.map((g) => [skuKey(g[0].masterSku), g[0]]))
+              const sharedStockOf = (v: DraftVariant) => {
+                const stocks = (dupGroups.find((g) => g.includes(v)) ?? []).flatMap((m) => (m.stock === null ? [] : [m.stock]))
+                return stocks.length > 0 ? Math.min(...stocks) : 0
+              }
               return (
                 <div key={key} className={`rounded-lg border p-4 space-y-3 ${
                   errors ? 'border-red-300 dark:border-red-800' : 'border-gray-200 dark:border-slate-700'
@@ -1070,8 +1126,38 @@ export default function ProductsPage() {
                     </div>
                   )}
 
+                  {dupGroups.length > 0 && (
+                    <div className="rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-3 py-2.5 text-xs text-amber-900 dark:text-amber-200 space-y-2">
+                      <p>
+                        <span className="font-semibold">{dupGroups.length} SKU dipakai lebih dari satu varian</span>
+                        {' '}— misalnya &ldquo;{dupGroups[0][0].masterSku}&rdquo; oleh{' '}
+                        {dupGroups[0].map((v) => v.variantName || v.sku).join(' dan ')}.
+                      </p>
+                      <label className="flex items-start gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={item.shareSku === true}
+                          onChange={(e) => setShareSku(key, e.target.checked)}
+                          disabled={busy}
+                          className="mt-0.5 rounded border-gray-300 dark:border-slate-600"
+                        />
+                        <span>
+                          <span className="font-semibold">Stok dipakai bersama.</span>{' '}
+                          Varian dengan SKU yang sama diikat ke satu master dan berbagi satu angka stok. Pakai ini kalau
+                          memang barangnya sama, misalnya jaket dan paket jaket + jogger.
+                        </span>
+                      </label>
+                      <div className="flex items-center gap-1 text-amber-800 dark:text-amber-300">
+                        {item.shareSku
+                          ? 'Stok awal tiap SKU diambil dari varian yang stoknya paling sedikit.'
+                          : 'Kalau dibiarkan mati, ubah SKU salah satunya, atau produk ini tidak bisa dibuat.'}
+                        <HelpTip term="masterForm.shared" />
+                      </div>
+                    </div>
+                  )}
+
                   <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
+                    <table className="w-full min-w-[520px] text-sm">
                       <thead className="text-left text-xs uppercase text-gray-500 dark:text-slate-400">
                         <tr>
                           <th className="py-2 pr-3">Varian</th>
@@ -1105,15 +1191,28 @@ export default function ProductsPage() {
                                       Master SKU ini sudah ada — listing akan digabung ke sana, stoknya tidak diubah
                                     </p>
                                   )}
+                                  {item.shareSku && leaderOf.has(skuKey(v.masterSku)) && (
+                                    <p className="text-xs text-blue-700 dark:text-blue-300 mt-0.5">
+                                      {leaderOf.get(skuKey(v.masterSku)) === v
+                                        ? 'Dipakai bersama varian di bawahnya — satu stok'
+                                        : `Ikut master “${leaderOf.get(skuKey(v.masterSku))?.variantName || leaderOf.get(skuKey(v.masterSku))?.sku}” — satu stok`}
+                                    </p>
+                                  )}
                                 </>
                               )}
                             </td>
                             <td className="py-2 text-right">
-                              {v.stock === null
-                                ? <span className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400" title="Stok tidak terbaca dari Shopee — akan diisi 0">
-                                    <AlertTriangle className="w-3 h-3" /> 0
-                                  </span>
-                                : <span className="text-gray-900 dark:text-slate-100">{v.stock}</span>}
+                              {item.shareSku && !v.mappedTo && leaderOf.has(skuKey(v.masterSku))
+                                ? leaderOf.get(skuKey(v.masterSku)) === v
+                                  ? <span className="text-gray-900 dark:text-slate-100" title="Yang paling sedikit di antara varian yang berbagi SKU ini">
+                                      {sharedStockOf(v)}
+                                    </span>
+                                  : <span className="text-xs text-gray-400 dark:text-slate-500" title="Memakai stok master di atasnya">ikut</span>
+                                : v.stock === null
+                                  ? <span className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400" title="Stok tidak terbaca dari Shopee — akan diisi 0">
+                                      <AlertTriangle className="w-3 h-3" /> 0
+                                    </span>
+                                  : <span className="text-gray-900 dark:text-slate-100">{v.stock}</span>}
                             </td>
                           </tr>
                         ))}
@@ -1125,7 +1224,7 @@ export default function ProductsPage() {
             })}
 
             <p className="text-xs text-gray-500 dark:text-slate-400">
-              Stok master tetap diisi manual setelah ini — angkanya tidak berkurang sendiri saat ada pesanan.
+              Setelah ini stok master dikelola dari Daftar Stok. Kalau Stok Otomatis menyala, angkanya berkurang sendiri saat pesanan dibayar.
             </p>
 
             <div className="flex justify-end gap-2 pt-1">

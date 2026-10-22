@@ -636,6 +636,16 @@ export const GLOSSARY = {
     ],
     hint: 'Kalau Master SKU-nya sudah ada, listing ini digabung ke master itu dan stok master-nya tidak diubah.',
   },
+  'masterForm.shared': {
+    title: 'Stok dipakai bersama',
+    body: 'Varian yang SKU-nya sama diikat ke satu master, jadi stoknya satu angka dan diubah sekali. Dipakai untuk paket yang memakai barang yang sama, misalnya jaket Anak dan jaket + Jogger yang diambil dari tumpukan jaket yang sama.',
+    items: [
+      { term: 'Stok awal', text: 'Diambil dari yang paling sedikit di antara varian itu, supaya tidak menjual lebih dari yang ada. Bisa dinaikkan lewat Edit Stok.' },
+      { term: 'Setelah itu', text: 'Setiap kali stok master berubah, semua varian yang terikat ikut dikirim angka yang sama. Pesanan dari salah satunya mengurangi stok yang sama.' },
+      { term: 'Yang tidak dihitung', text: 'Barang pelengkap paket (misalnya celana Jogger) tidak punya stok sendiri di sini. Kalau pelengkapnya bisa habis lebih dulu, cek stoknya manual.' },
+    ],
+    hint: 'Biarkan mati kalau SKU kembar itu sebenarnya kesalahan, misalnya semua warna tidak sengaja memakai SKU produk induk.',
+  },
   'masterForm.stock': {
     title: 'Stok Awal',
     body: 'Stok master saat pertama dibuat, disalin dari stok listing di Shopee. Setelah itu stok dikelola dari Daftar Stok.',

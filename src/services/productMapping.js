@@ -256,18 +256,31 @@ function variantNameOf(listing, itemName) {
  *           so the listing joins that master instead of duplicating it
  *   skip    the listing is already mapped; a manual mapping is never re-pointed
  *
- * @param {{name: string, variants: Array<{listingId: string, masterSku: string}>}} input
+ * `input.shareSku` lets several variations sit on one SKU on purpose: a jacket
+ * and a "jacket + jogger" bundle that are both cut from the same pile of
+ * jackets. Left off, two variations on one SKU still fail the item, because
+ * the usual cause is an accident (a model that inherited the item's SKU) and
+ * the result is every colour sharing one stock figure. Turned on, the first
+ * row of each SKU creates (or joins) the master and the others follow it; the
+ * master starts from the *smallest* stock among them, since overselling the
+ * shared pile is worse than starting a little low and raising it by hand.
+ *
+ * @param {{name: string, shareSku?: boolean, variants: Array<{listingId: string, masterSku: string}>}} input
  * @param {Map<string, {id: string, name: string, itemId: string, modelId: string,
  *   itemName?: string|null, modelName?: string|null, stock: number|null,
  *   productId: string|null}>} listingsById - Only listings the caller may act on
  * @param {Map<string, {id: string, masterSku: string}>} existingBySku - Keyed by normaliseSku
  * @returns {{ ok: true, name: string, creates: Array<Object>, binds: Array<Object>,
- *   skipped: Array<Object>, unreadStock: number } | { ok: false, errors: string[] }}
+ *   skipped: Array<Object>, unreadStock: number, shared: number }
+ *   | { ok: false, errors: string[] }}
+ *   `creates[].alsoListingIds` are the further listings that join a created
+ *   master; `shared` is how many listings ride on another variation's master.
  */
 function planMasterFromItem(input, listingsById, existingBySku) {
   const errors = [];
   const name = String(input?.name ?? '').trim();
   const rows = Array.isArray(input?.variants) ? input.variants : [];
+  const shareSku = input?.shareSku === true;
 
   if (!name) errors.push('Nama master produk wajib diisi');
   if (rows.length === 0) errors.push('Tidak ada varian untuk dijadikan master');
@@ -298,7 +311,9 @@ function planMasterFromItem(input, listingsById, existingBySku) {
     }
     // Two variations on one SKU is the exact collapse this flow exists to stop,
     // and it happens quietly: a model without its own SKU inherits the item's.
+    // Only an explicit shareSku says it is meant.
     if (seen.has(key)) {
+      if (shareSku) continue;
       errors.push(`Master SKU "${masterSku}" dipakai dua kali ("${seen.get(key)}" dan "${label}")`);
       continue;
     }
@@ -312,28 +327,50 @@ function planMasterFromItem(input, listingsById, existingBySku) {
   const skipped = [];
   let unreadStock = 0;
 
-  for (const { listing, masterSku } of listings) {
-    if (listing.productId) {
-      skipped.push({ listingId: listing.id, reason: 'sudah punya master' });
+  // Rows on one SKU, in the order the form lists them. Without shareSku every
+  // group is a single row, so this is the old one-master-per-row behaviour.
+  const groups = new Map();
+  for (const row of listings) {
+    if (row.listing.productId) {
+      skipped.push({ listingId: row.listing.id, reason: 'sudah punya master' });
       continue;
     }
-    const existing = existingBySku.get(normaliseSku(masterSku));
+    const key = normaliseSku(row.masterSku);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+
+  let shared = 0;
+  for (const [key, group] of groups) {
+    shared += group.length - 1;
+
+    const existing = existingBySku.get(key);
     if (existing) {
-      binds.push({ listingId: listing.id, productId: existing.id, masterSku: existing.masterSku });
+      for (const { listing } of group) {
+        binds.push({ listingId: listing.id, productId: existing.id, masterSku: existing.masterSku });
+      }
       continue;
     }
+
+    const [first, ...rest] = group;
     // Unreadable is not zero, but a master needs a number; 0 is the safe one to
     // start from, and the count is reported so it gets checked on Daftar Stok.
-    if (listing.stock === null || listing.stock === undefined) unreadStock++;
+    // In a shared group an unreadable row just defers to the ones that read.
+    const readable = group
+      .map(({ listing }) => listing.stock)
+      .filter((stock) => stock !== null && stock !== undefined);
+    if (readable.length === 0) unreadStock++;
+
     creates.push({
-      listingId: listing.id,
-      masterSku,
-      variantName: variantNameOf(listing, itemName),
-      stock: Math.max(0, listing.stock ?? 0),
+      listingId: first.listing.id,
+      alsoListingIds: rest.map(({ listing }) => listing.id),
+      masterSku: first.masterSku,
+      variantName: variantNameOf(first.listing, itemName),
+      stock: readable.length > 0 ? Math.max(0, Math.min(...readable)) : 0,
     });
   }
 
-  return { ok: true, name, creates, binds, skipped, unreadStock };
+  return { ok: true, name, creates, binds, skipped, unreadStock, shared };
 }
 
 module.exports = {
