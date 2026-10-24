@@ -3,6 +3,7 @@ const { handleSync }      = require('./services/syncDirect.js');
 const pdfService          = require('./services/pdf.js');
 const fulfillmentService  = require('./services/fulfillment.js');
 const { runPublish }      = require('./services/productPublish.js');
+const { pushMasterStock } = require('./services/stockPush.js');
 const prisma              = require('./prisma/client.js');
 const { connection, syncQueue, isRedisReady, hasQueueWorkers } = require('./services/queue.js');
 const config              = require('./config/index.js');
@@ -129,6 +130,20 @@ productPublishWorker.on('failed', (job, err) => {
   console.error(`[product-publish] Job ${job?.id} failed:`, err.message);
 });
 
+// Stock pushed after Import Master / Import Stok. One at a time: a single job
+// already fans out across every shop, and two at once only invite rate limits.
+const stockPushWorker = new Worker('stock-push', async (job) => {
+  return pushMasterStock(job.data.productIds);
+}, {
+  connection,
+  concurrency: 1,
+  lockDuration: 10 * 60 * 1000,
+});
+
+stockPushWorker.on('failed', (job, err) => {
+  console.error(`[stock-push] Job ${job?.id} failed:`, err.message);
+});
+
 syncWorker.on('completed', (job) => {
   console.log(`[sync] Job ${job.id} completed`);
 });
@@ -232,4 +247,4 @@ setTimeout(() => {
 
 console.log('[worker] OrderPro workers started');
 
-module.exports = { syncWorker, printWorker, productPublishWorker, handleSync, handlePrintBatch };
+module.exports = { syncWorker, printWorker, productPublishWorker, stockPushWorker, handleSync, handlePrintBatch };

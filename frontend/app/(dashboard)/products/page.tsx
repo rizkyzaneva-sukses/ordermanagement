@@ -7,6 +7,7 @@ import HelpTip, { HelpTipFor, Labelled } from '@/components/HelpTip'
 import FilterField from '@/components/FilterField'
 import CopyProductModal, { type CopyResult } from '@/components/products/CopyProductModal'
 import DraftsTab from '@/components/products/DraftsTab'
+import ImportMasterModal from '@/components/products/ImportMasterModal'
 import {
   Package,
   RefreshCw,
@@ -18,6 +19,7 @@ import {
   Wand2,
   X,
   Copy,
+  FileSpreadsheet,
 } from 'lucide-react'
 
 interface Listing {
@@ -217,6 +219,7 @@ export default function ProductsPage() {
   const [tab, setTab] = useState<'active' | 'drafts'>('active')
   const [draftCount, setDraftCount] = useState<number | null>(null)
   const [copyOpen, setCopyOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
 
   useEffect(() => {
     if (new URLSearchParams(window.location.search).get('tab') === 'drafts') setTab('drafts')
@@ -867,6 +870,13 @@ export default function ProductsPage() {
             </button>
             <HelpTip term="btn.automap" />
           </div>
+          <div className="flex items-center gap-1.5">
+            <button onClick={() => setImportOpen(true)} disabled={busy} className="btn-secondary flex items-center gap-2 text-sm">
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>Import Master</span>
+            </button>
+            <HelpTip term="btn.importMaster" />
+          </div>
         </Pagination>
         {/* Below `md`, one card per listing; the eight-column table only ever
             showed half its columns on a phone. */}
@@ -1049,6 +1059,15 @@ export default function ProductsPage() {
           </div>
         )}
       </div>}
+
+      {importOpen && (
+        <ImportMasterModal
+          stores={stores}
+          defaultStoreId={storeId}
+          onClose={() => setImportOpen(false)}
+          onDone={(text) => { setImportOpen(false); afterMappingChange(text) }}
+        />
+      )}
 
       {copyOpen && copyTarget && (
         <CopyProductModal

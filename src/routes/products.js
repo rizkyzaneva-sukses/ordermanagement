@@ -10,6 +10,7 @@
  */
 
 const express = require('express');
+const multer = require('multer');
 const router = express.Router();
 const prisma = require('../prisma/client');
 const { authenticate } = require('../middleware/auth');
@@ -23,6 +24,12 @@ const {
   syncAllStock, syncStoreStock, getLastStockSync, recordStockSync,
 } = require('../services/productSync');
 const { pushMasterStock } = require('../services/stockPush');
+const {
+  MAX_ROWS, MASTER_COLUMNS, MASTER_REQUIRED, STOCK_COLUMNS, STOCK_REQUIRED,
+  readRows, planMasterImport, planStockImport,
+} = require('../services/masterImport');
+const { buildWorkbook, readSheet } = require('../services/importWorkbook');
+const { stockPushQueue, hasQueueWorkers } = require('../services/queue');
 const { getAutoDeductSince, setAutoDeduct } = require('../services/orderStock');
 
 router.use(authenticate);
@@ -822,11 +829,12 @@ router.post('/masters/automap', async (req, res) => {
  * worth answering "gagal" over.
  *
  * @param {Array<{id: string, from: number, to: number}>} changes
+ * @param {string} [kind] - MANUAL for Edit Stok, IMPORT for Import Stok
  */
-async function recordManual(changes, userId) {
+async function recordManual(changes, userId, kind = 'MANUAL') {
   const rows = changes
     .filter(c => c.from !== undefined && c.from !== c.to)
-    .map(c => ({ productId: c.id, kind: 'MANUAL', delta: c.to - c.from, stockAfter: c.to, userId: userId || null }));
+    .map(c => ({ productId: c.id, kind, delta: c.to - c.from, stockAfter: c.to, userId: userId || null }));
   if (rows.length === 0) return;
   try {
     await prisma.stockMovement.createMany({ data: rows });
@@ -1032,6 +1040,537 @@ router.post('/masters/stock', async (req, res) => {
   } catch (err) {
     console.error('POST /products/masters/stock error:', err);
     return res.status(500).json({ success: false, error: 'Gagal mengubah stok master' });
+  }
+});
+
+// ── Import Master & Import Stok (.xlsx) ──────────────────────────────────────
+//
+// PRD-import-xlsx.md. Both go download → edit in Excel → upload → preview →
+// save. Simpan is sent back the rows the preview read rather than the file, and
+// plans them again on fresh data: a listing may have been mapped, or a master
+// sold down, while the operator was reading the preview.
+
+const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+/** Most issues a preview lists by row; the rest are counted, not shown. */
+const PREVIEW_LIST_LIMIT = 300;
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+/** multer.single, answering its own errors in Indonesian instead of as a 500. */
+function uploadFile(req, res, next) {
+  upload.single('file')(req, res, (err) => {
+    if (!err) return next();
+    const error = err.code === 'LIMIT_FILE_SIZE' ? 'File maksimal 10 MB' : 'File gagal diunggah';
+    return res.status(400).json({ success: false, error });
+  });
+}
+
+/** Send a workbook as a download. */
+function sendWorkbook(res, buffer, filename) {
+  res.setHeader('Content-Type', XLSX_TYPE);
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  return res.send(buffer);
+}
+
+/** "20261024" — dates in file names sort, and say which day a count is from. */
+function fileDate() {
+  return new Date().toISOString().slice(0, 10).replace(/-/g, '');
+}
+
+/**
+ * Read an uploaded workbook into rows.
+ * @throws {Error} with `status` 400 when it is not a file this import can read
+ */
+async function readUpload(req, columns, required) {
+  if (!req.file) {
+    const err = new Error('Pilih file .xlsx dulu');
+    err.status = 400;
+    throw err;
+  }
+  const { rows, error } = readRows(await readSheet(req.file.buffer), columns, required);
+  if (error) {
+    const err = new Error(error);
+    err.status = 400;
+    throw err;
+  }
+  return rows;
+}
+
+/**
+ * Rows as Simpan sends them back: only the known columns, as text, so a
+ * hand-crafted request cannot smuggle anything the preview would not have read.
+ */
+function rowsFromBody(body, columns) {
+  if (!Array.isArray(body) || body.length === 0) {
+    const err = new Error('Tidak ada baris untuk disimpan');
+    err.status = 400;
+    throw err;
+  }
+  if (body.length > MAX_ROWS) {
+    const err = new Error(`Maksimal ${MAX_ROWS} baris sekali impor`);
+    err.status = 400;
+    throw err;
+  }
+  return body.map((r) => {
+    const out = { row: Number(r?.row) || 0 };
+    for (const c of columns) {
+      if (r?.[c.key] !== undefined && r?.[c.key] !== null) out[c.key] = String(r[c.key]);
+    }
+    return out;
+  });
+}
+
+/**
+ * Every master, keyed by normaliseSku. A few thousand rows at most, which is
+ * cheaper than one case-insensitive OR clause per SKU in a 20,000-row file.
+ */
+async function allMastersBySku() {
+  const masters = await prisma.product.findMany({
+    select: { id: true, masterSku: true, name: true, stock: true },
+  });
+  return new Map(masters.map(m => [normaliseSku(m.masterSku), m]));
+}
+
+/** The listings an import names, limited to the shops this user may see. */
+async function listingsForRows(user, rows) {
+  const ids = [...new Set(rows.map(r => String(r.listingId ?? '').trim()).filter(Boolean))];
+  const allowed = await visibleStoreIds(user);
+  const found = [];
+  // Chunked: Postgres caps one statement at 32,767 parameters.
+  for (let i = 0; i < ids.length; i += 5000) {
+    const where = { id: { in: ids.slice(i, i + 5000) } };
+    if (allowed) where.storeId = { in: allowed };
+    found.push(...await prisma.productListing.findMany({
+      where,
+      select: {
+        id: true, storeId: true, itemId: true, modelId: true, name: true,
+        itemName: true, modelName: true, stock: true, productId: true,
+      },
+    }));
+  }
+  return new Map(found.map(l => [l.id, l]));
+}
+
+/**
+ * Push masters to Shopee without holding the request open: through the
+ * stock-push queue when a worker is listening, otherwise in this process after
+ * the response — the same fallback Publish uses.
+ *
+ * @returns {Promise<'none'|'queue'|'inline'>}
+ */
+async function pushInBackground(productIds) {
+  const ids = [...new Set(productIds)];
+  if (ids.length === 0) return 'none';
+  if (await hasQueueWorkers(stockPushQueue)) {
+    await stockPushQueue.add('push', { productIds: ids }, {
+      // A failed push shows in the "Di Shopee" column; Edit Stok re-sends it.
+      attempts: 1,
+      removeOnComplete: { age: 86400 },
+      removeOnFail: { age: 7 * 86400 },
+    });
+    return 'queue';
+  }
+  console.warn(`[masters] No stock-push worker — pushing ${ids.length} master(s) in the API process`);
+  setImmediate(() => { pushAfterSave(ids); });
+  return 'inline';
+}
+
+/** What a master-import preview shows; the full plan is far too big to send. */
+function masterPreview(plan) {
+  const creates = plan.parents.flatMap(p => p.creates.map(c => ({
+    parent: p.name,
+    masterSku: c.masterSku,
+    variantName: c.variantName,
+    stock: c.stock,
+    typed: c.typed,
+    spread: c.spread,
+    listings: c.listingIds.length,
+    stores: c.stores,
+    rows: c.rows,
+  })));
+  // Merges and disagreements first: they are what the operator should check.
+  creates.sort((a, b) => (Number(Boolean(b.spread)) - Number(Boolean(a.spread)))
+    || (b.stores - a.stores) || (a.rows[0] - b.rows[0]));
+
+  const skippedReasons = {};
+  for (const s of plan.skipped) skippedReasons[s.reason] = (skippedReasons[s.reason] || 0) + 1;
+
+  return {
+    ok: plan.ok,
+    counts: { ...plan.counts, errors: plan.errors.length, warnings: plan.warnings.length },
+    errors: plan.errors.slice(0, PREVIEW_LIST_LIMIT),
+    warnings: plan.warnings.slice(0, PREVIEW_LIST_LIMIT),
+    sharedConflicts: plan.sharedConflicts,
+    skippedReasons,
+    creates: creates.slice(0, PREVIEW_LIST_LIMIT),
+    binds: plan.binds.slice(0, PREVIEW_LIST_LIMIT),
+  };
+}
+
+/**
+ * GET /masters/import-template
+ * Import Master, step 1: every listing still without a master, one row each,
+ * with Master SKU pre-filled from the Shopee SKU.
+ *
+ * Query: storeId (optional) — one shop, for a file small enough to work through
+ */
+router.get('/masters/import-template', async (req, res) => {
+  try {
+    const where = { productId: null, status: { in: ['NORMAL', 'UNLIST'] } };
+    const allowed = await visibleStoreIds(req.user);
+    const storeId = req.query.storeId ? String(req.query.storeId) : null;
+    if (storeId) {
+      if (allowed && !allowed.includes(storeId)) {
+        return res.status(403).json({ success: false, error: 'Kamu tidak punya akses ke toko ini' });
+      }
+      where.storeId = storeId;
+    } else if (allowed) {
+      where.storeId = { in: allowed };
+    }
+
+    const total = await prisma.productListing.count({ where });
+    if (total > MAX_ROWS) {
+      return res.status(400).json({
+        success: false,
+        error: `Ada ${total} listing belum punya master, lebih dari ${MAX_ROWS} untuk satu file. Pilih satu toko dulu.`,
+      });
+    }
+
+    const listings = await prisma.productListing.findMany({
+      where,
+      include: { store: { select: { name: true } } },
+      orderBy: [{ storeId: 'asc' }, { itemId: 'asc' }, { name: 'asc' }],
+    });
+
+    const items = new Map();
+    for (const l of listings) {
+      const key = `${l.storeId}:${l.itemId}`;
+      if (!items.has(key)) items.set(key, []);
+      items.get(key).push(l);
+    }
+
+    const rows = [];
+    for (const siblings of items.values()) {
+      const itemName = itemNameOf(siblings);
+      for (const l of siblings) {
+        rows.push({
+          store: l.store?.name ?? '',
+          product: itemName,
+          variant: variantNameOf(l, itemName) ?? '',
+          sku: l.sku ?? '',
+          listingStock: l.stock ?? '',
+          masterSku: l.sku ?? '',
+          masterName: itemName,
+          startStock: '',
+          listingId: l.id,
+        });
+      }
+    }
+    rows.sort((a, b) => a.store.localeCompare(b.store, 'id') || a.product.localeCompare(b.product, 'id'));
+
+    const buffer = await buildWorkbook({
+      sheet: 'Master',
+      columns: MASTER_COLUMNS,
+      rows,
+      guide: [
+        'Cara mengisi Template Master',
+        'Satu baris = satu varian listing Shopee yang belum punya master. Kolom berwarna kuning boleh diubah, yang lain hanya untuk dibaca.',
+        'Master SKU — sudah diisi dari SKU Shopee. Baris dengan Master SKU sama dijadikan satu master, walaupun dari toko berbeda. Kalau SKU itu sudah ada di OrderPro, listingnya digabung ke master itu dan stoknya tidak diubah.',
+        'Kosongkan Master SKU untuk melewati baris itu. Listingnya tetap belum punya master dan muncul lagi di template berikutnya.',
+        'Varian paket (misalnya jaket + jogger) boleh diberi Master SKU yang sama dengan barang utamanya. Saat mengunggah, centang "Stok dipakai bersama".',
+        'Nama Master Produk — baris dengan nama sama dikumpulkan di bawah satu induk Master Produk.',
+        'Stok Awal — kosongkan untuk memakai stok Shopee. Kalau satu Master SKU ada di beberapa toko dengan stok berbeda, yang dipakai yang paling kecil. Isi angka bulat tanpa titik atau koma.',
+        'ID (jangan diubah) — kunci untuk mencocokkan baris ke listing. Jangan diubah, dihapus, atau disalin ke baris lain.',
+        'Simpan tetap sebagai .xlsx, lalu unggah di Produk → Import Master. Sebelum disimpan, OrderPro menampilkan pratinjau dulu.',
+      ],
+    });
+
+    const store = storeId ? (listings[0]?.store?.name || 'toko') : 'semua-toko';
+    const slug = store.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    return sendWorkbook(res, buffer, `template-master-${slug}-${fileDate()}.xlsx`);
+  } catch (err) {
+    console.error('GET /products/masters/import-template error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal membuat template' });
+  }
+});
+
+/**
+ * POST /masters/import/preview
+ * Import Master, step 2: read the uploaded file and say what Simpan would do.
+ * Nothing is written.
+ *
+ * Multipart: file, shareSku ("true" to allow variations of one item on one SKU)
+ *     or JSON: { rows, shareSku } — the rows a previous preview returned, so
+ *     ticking "Stok dipakai bersama" re-plans without uploading again
+ */
+router.post('/masters/import/preview', uploadFile, async (req, res) => {
+  try {
+    const rows = req.file
+      ? await readUpload(req, MASTER_COLUMNS, MASTER_REQUIRED)
+      : rowsFromBody(req.body?.rows, MASTER_COLUMNS);
+    const shareSku = req.body?.shareSku === true || req.body?.shareSku === 'true';
+    const plan = planMasterImport(
+      rows, await listingsForRows(req.user, rows), await allMastersBySku(), { shareSku },
+    );
+    return res.json({ success: true, data: { rows, ...masterPreview(plan) } });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ success: false, error: err.message });
+    console.error('POST /products/masters/import/preview error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal membaca file' });
+  }
+});
+
+/**
+ * POST /masters/import
+ * Import Master, step 3: create the masters.
+ *
+ * Body: { rows, shareSku? } — rows as the preview returned them
+ *
+ * One transaction per parent, reported like Jadikan Master: a parent whose SKU
+ * someone else just created fails on its own and the rest are kept.
+ */
+router.post('/masters/import', async (req, res) => {
+  try {
+    const rows = rowsFromBody(req.body?.rows, MASTER_COLUMNS);
+    const plan = planMasterImport(
+      rows, await listingsForRows(req.user, rows), await allMastersBySku(),
+      { shareSku: req.body?.shareSku === true },
+    );
+    if (!plan.ok) {
+      return res.status(409).json({
+        success: false,
+        error: 'Data berubah sejak pratinjau dan sekarang ada baris yang salah. Unggah ulang filenya.',
+        data: masterPreview(plan),
+      });
+    }
+
+    const toPush = [];
+    const failures = [];
+    let parentsMade = 0;
+    let mastersMade = 0;
+
+    for (const parent of plan.parents) {
+      try {
+        const made = await prisma.$transaction(async (tx) => {
+          const head = await tx.masterProduct.create({ data: { name: parent.name } });
+          const push = [];
+          for (const c of parent.creates) {
+            const product = await tx.product.create({
+              data: {
+                masterProductId: head.id,
+                masterSku: c.masterSku,
+                variantName: c.variantName,
+                name: c.variantName ? `${parent.name} — ${c.variantName}` : parent.name,
+                stock: c.stock,
+              },
+            });
+            // productId: null again here, not just in the plan: a listing mapped
+            // by someone else since then must fail this parent, not be stolen.
+            const bound = await tx.productListing.updateMany({
+              where: { id: { in: c.listingIds }, productId: null },
+              data: { productId: product.id },
+            });
+            if (bound.count !== c.listingIds.length) {
+              const err = new Error('listing changed');
+              err.code = 'LISTING_TAKEN';
+              throw err;
+            }
+            if (c.needsPush) push.push(product.id);
+          }
+          return push;
+        }, { timeout: 30_000 });
+        parentsMade++;
+        mastersMade += parent.creates.length;
+        toPush.push(...made);
+      } catch (err) {
+        let reason = 'Gagal menyimpan';
+        if (err.code === 'P2002') reason = 'Master SKU bentrok dengan master yang baru saja dibuat';
+        else if (err.code === 'LISTING_TAKEN') reason = 'Sebagian listing baru saja dipetakan orang lain';
+        else console.error(`[masters] Import "${parent.name}" failed:`, err);
+        failures.push({ name: parent.name, reason, rows: parent.creates.flatMap(c => c.rows) });
+      }
+    }
+
+    let bound = 0;
+    const byMaster = new Map();
+    for (const b of plan.binds) {
+      if (!byMaster.has(b.productId)) byMaster.set(b.productId, []);
+      byMaster.get(b.productId).push(b.listingId);
+    }
+    for (const [productId, ids] of byMaster) {
+      const result = await prisma.productListing.updateMany({
+        where: { id: { in: ids }, productId: null },
+        data: { productId },
+      });
+      bound += result.count;
+      if (result.count > 0 && plan.pushIds.includes(productId)) toPush.push(productId);
+    }
+
+    const pushMode = await pushInBackground(toPush);
+    console.log(
+      `[masters] Import: ${mastersMade} master(s) in ${parentsMade} parent(s), ${bound} listing(s) joined ` +
+      `existing masters, ${failures.length} parent(s) failed, push ${toPush.length} (${pushMode})`
+    );
+
+    return res.json({
+      success: true,
+      data: {
+        parents: parentsMade,
+        masters: mastersMade,
+        bound,
+        skipped: plan.counts.skipped,
+        unreadStock: plan.counts.unreadStock,
+        failures,
+        push: { masters: new Set(toPush).size, mode: pushMode },
+      },
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ success: false, error: err.message });
+    console.error('POST /products/masters/import error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal mengimpor master' });
+  }
+});
+
+/**
+ * GET /masters/stock-export
+ * Export Stok: every master and its stock, with an empty Stok Baru to fill in.
+ *
+ * Query: search — the same filter as Daftar Stok
+ */
+router.get('/masters/stock-export', async (req, res) => {
+  try {
+    const where = {};
+    if (req.query.search) {
+      const search = String(req.query.search);
+      where.OR = [
+        { masterSku: { contains: search, mode: 'insensitive' } },
+        { name: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
+    const masters = await prisma.product.findMany({
+      where,
+      include: {
+        _count: { select: { listings: true } },
+        masterProduct: { select: { name: true } },
+      },
+      orderBy: [{ masterSku: 'asc' }],
+    });
+
+    const buffer = await buildWorkbook({
+      sheet: 'Stok',
+      columns: STOCK_COLUMNS,
+      rows: masters.map(m => ({
+        masterSku: m.masterSku,
+        masterName: m.masterProduct?.name ?? m.name,
+        variant: m.variantName ?? '',
+        bound: m._count.listings,
+        currentStock: m.stock,
+        newStock: '',
+      })),
+      guide: [
+        'Cara mengisi Export Stok',
+        'Isi kolom Stok Baru (kuning) dengan angka akhir hasil hitung gudang. Angka itu menggantikan stok master, bukan ditambahkan.',
+        'Kosongkan Stok Baru untuk SKU yang tidak dihitung. Stoknya tidak diubah.',
+        'Tulis angka bulat tanpa titik, koma, atau minus: 1200, bukan 1.200.',
+        'Jangan ubah kolom Master SKU. Kolom lain hanya untuk dibaca.',
+        'Stok Sekarang adalah stok saat file diunduh. Kalau berbeda saat diunggah (biasanya karena ada pesanan masuk), barisnya ditandai di pratinjau.',
+        'Simpan tetap sebagai .xlsx, lalu unggah di Daftar Stok → Import Stok. Setelah disimpan, stok dikirim ke semua listing Shopee yang terikat.',
+      ],
+    });
+
+    return sendWorkbook(res, buffer, `stok-master-${fileDate()}.xlsx`);
+  } catch (err) {
+    console.error('GET /products/masters/stock-export error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal membuat file stok' });
+  }
+});
+
+/** What a stock-import preview shows. */
+function stockPreview(plan) {
+  // Rows that overwrite a sale come first; they are the ones to double-check.
+  const changes = [...plan.changes].sort((a, b) => Number(b.drifted) - Number(a.drifted) || a.row - b.row);
+  return {
+    ok: plan.ok,
+    counts: { ...plan.counts, errors: plan.errors.length },
+    errors: plan.errors.slice(0, PREVIEW_LIST_LIMIT),
+    changes: changes.slice(0, PREVIEW_LIST_LIMIT),
+  };
+}
+
+/**
+ * POST /masters/stock-import/preview
+ * Import Stok, step 2: read the file and list what would change. Nothing is written.
+ *
+ * Multipart: file
+ */
+router.post('/masters/stock-import/preview', uploadFile, async (req, res) => {
+  try {
+    const rows = await readUpload(req, STOCK_COLUMNS, STOCK_REQUIRED);
+    const plan = planStockImport(rows, await allMastersBySku());
+    return res.json({ success: true, data: { rows, ...stockPreview(plan) } });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ success: false, error: err.message });
+    console.error('POST /products/masters/stock-import/preview error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal membaca file' });
+  }
+});
+
+/**
+ * POST /masters/stock-import
+ * Import Stok, step 3: set every counted master, write Riwayat Stok, push.
+ *
+ * Body: { rows } — as the preview returned them
+ */
+router.post('/masters/stock-import', async (req, res) => {
+  try {
+    const rows = rowsFromBody(req.body?.rows, STOCK_COLUMNS);
+    const plan = planStockImport(rows, await allMastersBySku());
+    if (!plan.ok) {
+      return res.status(409).json({
+        success: false,
+        error: 'Data berubah sejak pratinjau dan sekarang ada baris yang salah. Unggah ulang filenya.',
+        data: stockPreview(plan),
+      });
+    }
+
+    // `from` is re-read inside the write: an order taken between preview and
+    // Simpan belongs in Riwayat Stok as what this count replaced.
+    const changes = [];
+    for (let i = 0; i < plan.changes.length; i += 500) {
+      const chunk = plan.changes.slice(i, i + 500);
+      const written = await prisma.$transaction(async (tx) => {
+        const now = await tx.product.findMany({
+          where: { id: { in: chunk.map(c => c.productId) } },
+          select: { id: true, stock: true },
+        });
+        const was = new Map(now.map(m => [m.id, m.stock]));
+        for (const c of chunk) {
+          await tx.product.update({ where: { id: c.productId }, data: { stock: c.to } });
+        }
+        return chunk.map(c => ({ id: c.productId, from: was.get(c.productId), to: c.to }));
+      }, { timeout: 30_000 });
+      changes.push(...written);
+    }
+
+    await recordManual(changes, req.user?.id, 'IMPORT');
+    const pushMode = await pushInBackground(changes.map(c => c.id));
+    console.log(`[masters] Stock import: ${changes.length} master(s) set, push ${pushMode}`);
+
+    return res.json({
+      success: true,
+      data: {
+        updated: changes.length,
+        unchanged: plan.counts.unchanged,
+        blank: plan.counts.blank,
+        push: { masters: changes.length, mode: pushMode },
+      },
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ success: false, error: err.message });
+    console.error('POST /products/masters/stock-import error:', err);
+    return res.status(500).json({ success: false, error: 'Gagal mengimpor stok' });
   }
 });
 

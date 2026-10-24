@@ -6,6 +6,7 @@ import api from '@/lib/api'
 import { getMe } from '@/lib/auth'
 import Pagination from '@/components/Pagination'
 import HelpTip, { Labelled } from '@/components/HelpTip'
+import ImportStockModal from '@/components/stock/ImportStockModal'
 import {
   Boxes,
   Search,
@@ -16,6 +17,7 @@ import {
   AlertTriangle,
   Trash2,
   History,
+  FileSpreadsheet,
 } from 'lucide-react'
 
 interface Master {
@@ -54,7 +56,7 @@ const inSync = (m: Master) =>
 
 interface Movement {
   id: string
-  kind: 'ORDER' | 'CANCEL' | 'MANUAL'
+  kind: 'ORDER' | 'CANCEL' | 'MANUAL' | 'IMPORT'
   delta: number
   stockAfter: number
   orderId: string | null
@@ -68,6 +70,7 @@ const kindLabels: Record<Movement['kind'], string> = {
   ORDER: 'Pesanan',
   CANCEL: 'Batal',
   MANUAL: 'Edit manual',
+  IMPORT: 'Import',
 }
 
 const timeFmt = new Intl.DateTimeFormat('id-ID', {
@@ -190,6 +193,7 @@ export default function StockPage() {
   // keyed by master id. Blank means "leave this one alone". The mode + value
   // pair above the list only fills those fields; nothing is saved until Simpan.
   const [bulkOpen, setBulkOpen] = useState(false)
+  const [fileOpen, setFileOpen] = useState(false)
   const [bulkValues, setBulkValues] = useState<Record<string, string>>({})
   const [bulkMode, setBulkMode] = useState<BulkMode>('set')
   const [bulkValue, setBulkValue] = useState('')
@@ -602,7 +606,15 @@ export default function StockPage() {
           unit="master produk"
           onPageChange={setPage}
           onLimitChange={(n) => { setLimit(n); setPage(1) }}
-        />
+        >
+          <div className="flex items-center gap-1.5">
+            <button onClick={() => setFileOpen(true)} disabled={busy} className="btn-secondary flex items-center gap-2 text-sm">
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>Export / Import Stok</span>
+            </button>
+            <HelpTip term="btn.stockFile" />
+          </div>
+        </Pagination>
         {/* Below `md`, one card per master with the stock number up front —
             the column a phone user came here to read or change. */}
         <div className="md:hidden">
@@ -829,6 +841,14 @@ export default function StockPage() {
           </div>
         )}
       </div>
+
+      {fileOpen && (
+        <ImportStockModal
+          search={search}
+          onClose={() => setFileOpen(false)}
+          onDone={(text) => { setFileOpen(false); setMessage({ type: 'success', text }); fetchMasters() }}
+        />
+      )}
 
       {autoDialog && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={() => !busy && setAutoDialog(null)}>

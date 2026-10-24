@@ -536,6 +536,32 @@ export const GLOSSARY = {
     body: 'Mengikat semua listing yang belum dipetakan ke master yang SKU-nya sama persis. Tidak pernah mengubah listing yang sudah kamu petakan sendiri.',
     hint: 'Kamu diminta konfirmasi dulu dengan jumlah listing yang akan terpengaruh.',
   },
+  'btn.importMaster': {
+    title: 'Import Master',
+    body: 'Membuat banyak master sekaligus lewat file Excel, tanpa membuka Jadikan Master satu per satu. Unduh template berisi semua listing yang belum punya master, rapikan Master SKU-nya di Excel, lalu unggah lagi.',
+    hint: 'Tidak ada yang tersimpan sebelum kamu membaca pratinjau dan menekan Simpan.',
+  },
+  'import.template': {
+    title: 'Kolom template',
+    items: [
+      { term: 'Master SKU', text: 'Sudah diisi dari SKU Shopee. Baris dengan Master SKU sama jadi satu master, walaupun dari toko berbeda. Kosongkan untuk melewati baris itu.' },
+      { term: 'Nama Master Produk', text: 'Baris dengan nama sama dikumpulkan di bawah satu induk.' },
+      { term: 'Stok Awal', text: 'Kosongkan untuk memakai stok Shopee. Kalau satu Master SKU ada di beberapa toko dengan stok berbeda, yang dipakai yang paling kecil.' },
+      { term: 'ID (jangan diubah)', text: 'Kunci untuk mencocokkan baris ke listing. Jangan diubah atau dihapus.' },
+    ],
+    hint: 'Simpan tetap sebagai .xlsx. File CSV tidak bisa dibaca.',
+  },
+  'import.preview': {
+    title: 'Membaca pratinjau',
+    items: [
+      { term: 'Master baru', text: 'Master SKU yang belum ada dan akan dibuat.' },
+      { term: 'Digabung', text: 'Listing yang Master SKU-nya sudah ada di OrderPro. Listing itu ikut ke master tersebut, dan stok master-nya tidak diubah.' },
+      { term: 'Stok beda antartoko', text: 'Satu Master SKU dipakai beberapa toko yang stoknya tidak sama. Yang dipakai yang paling kecil, kecuali kamu mengisi Stok Awal.' },
+      { term: 'Dilewati', text: 'Baris yang Master SKU-nya kosong atau listingnya sudah punya master.' },
+      { term: 'Dikirim ke Shopee', text: 'Master yang stoknya berbeda dengan salah satu listingnya. Setelah disimpan, angka master dikirim ke listing itu.' },
+    ],
+    hint: 'Kalau ada baris merah, betulkan di Excel lalu unggah lagi. Tombol Simpan baru aktif setelah tidak ada yang salah.',
+  },
   'btn.makeMaster': {
     title: 'Jadikan Master',
     body: 'Membuat Master SKU baru dari listing yang dicentang, satu SKU untuk tiap varian. Stok awal master diambil dari stok listing, dan SKU-nya bisa kamu ubah dulu.',
@@ -829,6 +855,7 @@ export const GLOSSARY = {
       { term: 'Pesanan', text: 'Stok berkurang karena pesanan dibayar.' },
       { term: 'Batal', text: 'Stok kembali karena pesanan dibatalkan.' },
       { term: 'Edit manual', text: 'Diubah lewat Edit Stok; nama pengubahnya tercatat.' },
+      { term: 'Import', text: 'Diubah lewat Import Stok (file Excel); nama pengubahnya tercatat.' },
     ],
   },
   'btn.bulkStock': {
@@ -852,6 +879,15 @@ export const GLOSSARY = {
       { term: 'Kurangi', text: 'Angka yang diketik dikurangkan dari stok sekarang.' },
     ],
     hint: 'Ini hanya mengisi kolom "Stok baru" di bawah, belum menyimpan apa pun. Kamu masih bisa mengubah tiap baris.',
+  },
+  'btn.stockFile': {
+    title: 'Export & Import Stok',
+    body: 'Untuk stock opname. Export Stok mengunduh semua master beserta stoknya. Isi kolom Stok Baru dengan angka hasil hitung gudang, lalu unggah lewat Import Stok.',
+    items: [
+      { term: 'Stok Baru', text: 'Angka akhir. Menggantikan stok master, bukan ditambahkan. Kosongkan untuk SKU yang tidak dihitung.' },
+      { term: 'Stok berubah sejak diunduh', text: 'Ada pesanan masuk setelah file diunduh. Angkamu tetap disimpan, tapi pastikan hitunganmu sudah memperhitungkan pesanan itu.' },
+    ],
+    hint: 'Setelah disimpan, stok dikirim ke semua listing Shopee yang terikat dan tercatat di Riwayat sebagai "Import".',
   },
   'btn.deleteMaster': {
     title: 'Hapus Master',
