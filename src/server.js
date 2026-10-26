@@ -62,6 +62,13 @@ if (fs.existsSync(frontendPath)) {
     index: false,
     maxAge: '1y',
     etag: true,
+    // The service worker and manifest must update with each deploy, so the
+    // browser has to re-check them instead of keeping them for a year.
+    setHeaders(res, filePath) {
+      if (['sw.js', 'manifest.webmanifest', 'offline.html'].includes(path.basename(filePath))) {
+        res.setHeader('Cache-Control', 'no-cache');
+      }
+    },
   }));
 
   // Server-side redirect: / → /login/
