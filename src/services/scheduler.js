@@ -18,6 +18,7 @@ const { syncQueue, connection, isRedisReady } = require('./queue.js');
 const fulfillmentService = require('./fulfillment.js');
 const tokenService = require('./tokens.js');
 const activity = require('./activity.js');
+const productBoost = require('./productBoost.js');
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -188,6 +189,11 @@ function startAwbCleanup() {
     } catch (err) {
       console.error('[scheduler] Activity log prune failed:', err.message);
     }
+    try {
+      await productBoost.pruneOld();
+    } catch (err) {
+      console.error('[scheduler] Boost history prune failed:', err.message);
+    }
   };
 
   run();
@@ -296,6 +302,7 @@ async function start() {
   // when tokens would otherwise be left to expire.
   startTokenRefresh();
   startAwbCleanup();
+  productBoost.start();
 
   if (await waitForRedis(10_000)) {
     if (await registerAllStores()) {

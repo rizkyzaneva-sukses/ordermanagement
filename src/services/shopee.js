@@ -1715,6 +1715,38 @@ class ShopeeService {
     return this._request('POST', '/api/v2/product/unlist_item', {}, { item_list: itemList }, accessToken, String(shopId));
   }
 
+  /**
+   * Naikkan Produk: push up to 5 items to the top of search results.
+   *
+   * Shopee gives a shop 5 boost slots; each one is held for 4 hours after use.
+   * Asking for more than the free slots fails per item in `failure_list`.
+   *
+   * @param {Array<string|number>} itemIdList - Max 5
+   * @returns {Promise<Object>} `{ response: { success_list: { item_id_list }, failure_list: [{ item_id, failed_reason }] } }`
+   */
+  async boostItem(accessToken, shopId, itemIdList) {
+    if (!Array.isArray(itemIdList) || itemIdList.length === 0) {
+      throw new Error('itemIdList must be a non-empty array');
+    }
+    if (itemIdList.length > 5) {
+      throw new Error('itemIdList supports a maximum of 5 ids per request');
+    }
+    console.error(`[ShopeeService.boostItem] shop=${shopId} items=${itemIdList.join(',')}`);
+    return this._request('POST', '/api/v2/product/boost_item', {}, {
+      item_id_list: itemIdList.map(Number),
+    }, accessToken, String(shopId));
+  }
+
+  /**
+   * Items currently holding a boost slot, each with the seconds left before
+   * that slot frees up. Includes boosts made by hand in Seller Centre.
+   *
+   * @returns {Promise<Object>} `{ response: { item_list: [{ item_id, cool_down_second }] } }`
+   */
+  async getBoostedList(accessToken, shopId) {
+    return this._request('GET', '/api/v2/product/get_boosted_list', {}, null, accessToken, String(shopId));
+  }
+
   /** Name/description/image/price limits for a category in this shop. */
   async getItemLimit(accessToken, shopId, categoryId) {
     return this._request('GET', '/api/v2/product/get_item_limit',

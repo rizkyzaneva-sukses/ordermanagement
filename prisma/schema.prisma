@@ -58,6 +58,11 @@ model Store {
   // description: Shopee whitelists that per shop. New copies to the shop then
   // start with plain text instead of failing the same way again.
   plainDescriptionOnly Boolean @default(false)
+  // Naikkan Produk otomatis (services/productBoost.js). The last pass's error,
+  // so a shop whose boosting stopped says why instead of going quiet.
+  autoBoost         Boolean   @default(false)
+  boostLastRunAt    DateTime?
+  boostLastError    String?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
@@ -68,6 +73,7 @@ model Store {
   draftsFrom ProductDraft[] @relation("DraftSource")
   draftsTo   ProductDraft[] @relation("DraftTarget")
   stockMovements StockMovement[]
+  boosts         ProductBoost[]
 
   @@unique([platform, shopId])
   @@map("stores")
@@ -417,6 +423,29 @@ model StockMovement {
   @@unique([storeId, orderId, itemId, modelId, kind])
   @@index([productId, createdAt])
   @@map("stock_movements")
+}
+
+// One attempt to boost one item (Naikkan Produk). Riwayat on the page, and the
+// rotation's memory: the item tried longest ago goes next, failed tries
+// included, so an item Shopee keeps refusing cannot hold up the queue.
+model ProductBoost {
+  id        String   @id @default(cuid())
+  storeId   String
+  itemId    String
+  // Snapshot from the catalogue at the time; null for an item not pulled yet.
+  itemName  String?
+  ok        Boolean
+  // Shopee's reason when it refused.
+  reason    String?
+  // false when an operator pressed "Naikkan sekarang".
+  auto      Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([storeId, createdAt])
+  @@index([storeId, itemId])
+  @@map("product_boosts")
 }
 
 // Small app-wide settings, key → value.

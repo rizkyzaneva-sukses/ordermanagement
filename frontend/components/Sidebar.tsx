@@ -19,6 +19,7 @@ import {
   Settings,
   MessageCircle,
   History,
+  Rocket,
 } from 'lucide-react'
 import api from '@/lib/api'
 import { User, logout } from '@/lib/auth'
@@ -34,6 +35,7 @@ const navItems = [
   { href: '/chat', label: 'Chat', icon: MessageCircle },
   { href: '/products', label: 'Produk', icon: Package },
   { href: '/stock', label: 'Daftar Stok', icon: Boxes },
+  { href: '/boost', label: 'Naikkan Produk', icon: Rocket },
   { href: '/print', label: 'Cetak Resi', icon: Printer },
 ]
 

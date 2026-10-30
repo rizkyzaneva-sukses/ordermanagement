@@ -1001,6 +1001,35 @@ export const GLOSSARY = {
     body: 'Berhasil atau Gagal. Alasan kegagalan ada di rincian baris.',
   },
 
+  // ── Naikkan Produk ────────────────────────────────────────────────────────
+  'boost.page': {
+    title: 'Naikkan Produk',
+    body: 'Fitur Shopee yang menaikkan produk ke urutan paling atas di hasil pencarian. Tiap toko boleh menaikkan 5 produk, dan tiap slot baru bisa dipakai lagi 4 jam kemudian.',
+    hint: 'Nyalakan Otomatis supaya kelima slot selalu terpakai tanpa perlu diingat-ingat.',
+  },
+  'boost.auto': {
+    title: 'Naikkan otomatis',
+    body: 'Kalau menyala, OrderPro mengecek toko ini tiap 10 menit. Begitu ada slot yang kosong, slot itu langsung diisi produk berikutnya dalam antrean.',
+    items: [
+      { term: 'Antrean', text: 'Semua produk yang sedang aktif dijual, digilir bergantian. Yang belum pernah dinaikkan didahulukan, lalu yang paling lama tidak dinaikkan.' },
+      { term: 'Dilewati', text: 'Produk yang stoknya habis (menurut katalog terakhir), dan produk yang sedang dinaikkan.' },
+      { term: 'Manual di Seller Centre', text: 'Ikut terhitung. Slot yang dipakai lewat Seller Centre tidak akan ditimpa.' },
+    ],
+  },
+  'boost.slots': {
+    title: 'Slot terpakai',
+    body: 'Berapa dari 5 slot yang sedang dipakai. Angka ini dibaca langsung dari Shopee, termasuk produk yang dinaikkan manual di Seller Centre.',
+    hint: 'Jam di samping tiap produk adalah sisa waktu sampai slotnya bisa dipakai lagi.',
+  },
+  'boost.next': {
+    title: 'Antrean berikutnya',
+    body: 'Produk yang akan dinaikkan saat slot kosong. Ini perkiraan dari katalog terakhir. Produk baru yang belum ditarik ke katalog tetap ikut dinaikkan, hanya belum terlihat di sini.',
+  },
+  'boost.history': {
+    title: 'Riwayat',
+    body: 'Produk yang sudah dinaikkan, terbaru di atas. "Manual" berarti lewat tombol Naikkan Sekarang. Yang gagal menampilkan alasan dari Shopee, lalu dipindah ke belakang antrean.',
+  },
+
   // ── Admin: pengaturan ─────────────────────────────────────────────────────
   'check.system': {
     title: 'Cek Sistem',

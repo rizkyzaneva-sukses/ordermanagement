@@ -47,6 +47,7 @@ app.use('/api/orders', require('./routes/orders'));
 // Before /api/products, which would otherwise run its own auth and 404 first
 app.use('/api/products/drafts', require('./routes/productDrafts'));
 app.use('/api/products', require('./routes/products'));
+app.use('/api/boost', require('./routes/boost'));
 app.use('/api/print', require('./routes/print'));
 app.use('/api/chat', require('./routes/chat'));
 app.use('/api/sync', require('./routes/sync'));

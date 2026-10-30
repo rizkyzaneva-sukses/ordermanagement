@@ -59,6 +59,8 @@ const ACTIONS = {
   'POST /api/products/masters/automap': 'Petakan otomatis',
   'POST /api/products/listings/map': 'Ikat listing ke master',
   'POST /api/products/listings/unmap': 'Lepas listing dari master',
+  'PUT /api/boost/:id': 'Ubah Naikkan Produk otomatis',
+  'POST /api/boost/:id/run': 'Naikkan produk sekarang',
   'POST /api/products/drafts/': 'Salin produk ke draf',
   'PATCH /api/products/drafts/:id': 'Ubah draf produk',
   'POST /api/products/drafts/:id/publish': 'Publikasikan draf',
